@@ -48,6 +48,174 @@ static void send_json_response(cJSON *root)
     cJSON_Delete(root);
 }
 
+static char *trimmed_line_dup(const char *start, size_t len)
+{
+    while (len > 0 && isspace((unsigned char)*start))
+    {
+        start++;
+        len--;
+    }
+    while (len > 0 && isspace((unsigned char)start[len - 1]))
+    {
+        len--;
+    }
+
+    char *out = malloc(len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    memcpy(out, start, len);
+    out[len] = 0;
+    return out;
+}
+
+static char *find_c_signature_in_header(const char *path, const char *symbol, int depth)
+{
+    if (!path || !symbol || depth > 16)
+    {
+        return NULL;
+    }
+
+    char *src = load_file(path);
+    if (!src)
+    {
+        return NULL;
+    }
+
+    char header_dir[MAX_PATH_LEN];
+    header_dir[0] = 0;
+    const char *last_slash = z_path_last_sep(path);
+    if (last_slash)
+    {
+        int dir_len = (int)(last_slash - path);
+        if (dir_len >= (int)sizeof(header_dir))
+        {
+            dir_len = (int)sizeof(header_dir) - 1;
+        }
+        strncpy(header_dir, path, dir_len);
+        header_dir[dir_len] = 0;
+    }
+
+    char *ptr = src;
+    while (*ptr)
+    {
+        char *line_start = ptr;
+        char *line_end = ptr;
+        while (*line_end && *line_end != '\n')
+        {
+            line_end++;
+        }
+
+        size_t len = (size_t)(line_end - line_start);
+        char *trimmed = trimmed_line_dup(line_start, len);
+        if (trimmed && trimmed[0])
+        {
+            if (trimmed[0] == '#')
+            {
+                const char *inc = trimmed + 1;
+                while (*inc && isspace((unsigned char)*inc))
+                {
+                    inc++;
+                }
+                if (strncmp(inc, "include", 7) == 0 && !isalnum((unsigned char)inc[7]) &&
+                    inc[7] != '_')
+                {
+                    inc += 7;
+                    while (*inc && isspace((unsigned char)*inc))
+                    {
+                        inc++;
+                    }
+                    if (*inc == '"')
+                    {
+                        inc++;
+                        const char *end_quote = strchr(inc, '"');
+                        if (end_quote && end_quote > inc)
+                        {
+                            char nested_path[MAX_PATH_LEN];
+                            int ret = snprintf(nested_path, sizeof(nested_path), "%s/%.*s",
+                                             header_dir, (int)(end_quote - inc), inc);
+                            if (ret >= 0 && (size_t)ret < sizeof(nested_path))
+                            {
+                                char *nested = find_c_signature_in_header(nested_path, symbol,
+                                                                          depth + 1);
+                                if (nested)
+                                {
+                                    free(trimmed);
+                                    free(src);
+                                    return nested;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                const char *hit = strstr(trimmed, symbol);
+                if (hit)
+                {
+                    size_t sym_len = strlen(symbol);
+                    int left_ok = (hit == trimmed) ||
+                                  !(isalnum((unsigned char)hit[-1]) || hit[-1] == '_');
+                    int right_ok =
+                        !(isalnum((unsigned char)hit[sym_len]) || hit[sym_len] == '_');
+                    if (left_ok && right_ok)
+                    {
+                        const char *lparen = strchr(hit + sym_len, '(');
+                        const char *semi = strrchr(trimmed, ';');
+                        if (lparen && semi && semi > lparen && strchr(trimmed, '{') == NULL)
+                        {
+                            free(src);
+                            return trimmed;
+                        }
+                    }
+                }
+            }
+        }
+        free(trimmed);
+
+        ptr = line_end;
+        if (*ptr == '\n')
+        {
+            ptr++;
+        }
+    }
+
+    free(src);
+    return NULL;
+}
+
+static char *find_c_signature_in_imported_headers(ASTNode *node, const char *symbol)
+{
+    if (node && node->type == NODE_ROOT)
+    {
+        node = node->root.children;
+    }
+    else if (node && node->type == NODE_BLOCK)
+    {
+        node = node->block.statements;
+    }
+
+    while (node)
+    {
+        if (node->type == NODE_INCLUDE && node->include.path)
+        {
+            size_t len = strlen(node->include.path);
+            if (len > 2 && strcmp(node->include.path + len - 2, ".h") == 0)
+            {
+                char *sig = find_c_signature_in_header(node->include.path, symbol, 0);
+                if (sig)
+                {
+                    return sig;
+                }
+            }
+        }
+        node = node->next;
+    }
+    return NULL;
+}
+
 // Callback for parser errors (legacy fallback).
 void lsp_on_error(void *data, Token t, const char *msg)
 {
@@ -191,6 +359,11 @@ void lsp_goto_definition(const char *uri, int line, int col, int id)
 
     if (!idx)
     {
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+        cJSON_AddNumberToObject(root, "id", id);
+        cJSON_AddNullToObject(root, "result");
+        send_json_response(root);
         return;
     }
 
@@ -448,12 +621,18 @@ void lsp_hover(const char *uri, int line, int col, int id)
 
     if (!idx)
     {
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+        cJSON_AddNumberToObject(root, "id", id);
+        cJSON_AddNullToObject(root, "result");
+        send_json_response(root);
         return;
     }
 
     LSPRange *r = lsp_find_at(idx, line, col);
     char *text = NULL;
     int is_primitive = 0;
+    int text_needs_free = 0;
 
     if (r)
     {
@@ -512,11 +691,42 @@ void lsp_hover(const char *uri, int line, int col, int id)
         char *word = get_word_at(pf->source, line, col);
         if (word)
         {
-            const char *doc = get_primitive_doc(word);
-            if (doc)
+            if (pf->ast)
             {
-                text = (char *)doc;
-                is_primitive = 1;
+                text = find_c_signature_in_imported_headers(pf->ast, word);
+                if (text)
+                {
+                    text_needs_free = 1;
+                }
+            }
+
+            if (!text && g_project && is_extern_symbol(g_project->ctx, word))
+            {
+                Module *mod = g_project->ctx->modules;
+                while (mod)
+                {
+                    if (mod->is_c_header)
+                    {
+                        char *sig = find_c_signature_in_header(mod->path, word, 0);
+                        if (sig)
+                        {
+                            text = sig;
+                            text_needs_free = 1;
+                            break;
+                        }
+                    }
+                    mod = mod->next;
+                }
+            }
+
+            if (!text)
+            {
+                const char *doc = get_primitive_doc(word);
+                if (doc)
+                {
+                    text = (char *)doc;
+                    is_primitive = 1;
+                }
             }
             free(word);
         }
@@ -552,6 +762,11 @@ void lsp_hover(const char *uri, int line, int col, int id)
     else
     {
         cJSON_AddNullToObject(root, "result");
+    }
+
+    if (text && text_needs_free)
+    {
+        free(text);
     }
 
     send_json_response(root);

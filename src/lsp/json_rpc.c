@@ -17,6 +17,106 @@ void lsp_signature_help(const char *uri, int line, int col, int id);
 void lsp_rename(const char *uri, int line, int col, const char *new_name, int id);
 void lsp_code_action(const char *uri, cJSON *diagnostics, int id);
 
+static int lsp_position_to_offset(const char *src, int line, int character, size_t *out_offset)
+{
+    if (!src || !out_offset || line < 0 || character < 0)
+    {
+        return 0;
+    }
+
+    const char *p = src;
+    int current_line = 0;
+    while (*p && current_line < line)
+    {
+        if (*p == '\n')
+        {
+            current_line++;
+        }
+        p++;
+    }
+
+    if (current_line != line)
+    {
+        return 0;
+    }
+
+    int current_char = 0;
+    while (*p && *p != '\n' && current_char < character)
+    {
+        p++;
+        current_char++;
+    }
+
+    *out_offset = (size_t)(p - src);
+    return 1;
+}
+
+static char *lsp_apply_change(const char *base, cJSON *change)
+{
+    if (!base || !change)
+    {
+        return NULL;
+    }
+
+    cJSON *text = cJSON_GetObjectItem(change, "text");
+    if (!text || !text->valuestring)
+    {
+        return NULL;
+    }
+
+    cJSON *range = cJSON_GetObjectItem(change, "range");
+    if (!range)
+    {
+        return strdup(text->valuestring);
+    }
+
+    cJSON *start = cJSON_GetObjectItem(range, "start");
+    cJSON *end = cJSON_GetObjectItem(range, "end");
+    if (!start || !end)
+    {
+        return NULL;
+    }
+
+    cJSON *start_line = cJSON_GetObjectItem(start, "line");
+    cJSON *start_char = cJSON_GetObjectItem(start, "character");
+    cJSON *end_line = cJSON_GetObjectItem(end, "line");
+    cJSON *end_char = cJSON_GetObjectItem(end, "character");
+    if (!start_line || !start_char || !end_line || !end_char)
+    {
+        return NULL;
+    }
+
+    size_t start_offset = 0;
+    size_t end_offset = 0;
+    if (!lsp_position_to_offset(base, start_line->valueint, start_char->valueint, &start_offset) ||
+        !lsp_position_to_offset(base, end_line->valueint, end_char->valueint, &end_offset) ||
+        end_offset < start_offset)
+    {
+        return NULL;
+    }
+
+    size_t base_len = strlen(base);
+    size_t repl_len = strlen(text->valuestring);
+    if (end_offset > base_len)
+    {
+        return NULL;
+    }
+
+    size_t out_len = start_offset + repl_len + (base_len - end_offset);
+    char *out = malloc(out_len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+
+    memcpy(out, base, start_offset);
+    memcpy(out + start_offset, text->valuestring, repl_len);
+    memcpy(out + start_offset + repl_len, base + end_offset, base_len - end_offset);
+    out[out_len] = '\0';
+
+    return out;
+}
+
 // Helper to extract textDocument params
 static void get_params(cJSON *root, char **uri, int *line, int *col)
 {
@@ -113,7 +213,7 @@ void handle_request(const char *json_str)
         const char *response =
             "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{"
             "\"serverInfo\":{\"name\":\"ZenC LS\",\"version\": \"1.0.0\"},"
-            "\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},"
+            "\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":2},"
             "\"definitionProvider\":true,\"hoverProvider\":true,"
             "\"referencesProvider\":true,\"documentSymbolProvider\":true,"
             "\"renameProvider\":true,\"codeActionProvider\":true,"
@@ -160,20 +260,60 @@ void handle_request(const char *json_str)
             {
                 cJSON *uri = cJSON_GetObjectItem(doc, "uri");
                 cJSON *text = cJSON_GetObjectItem(doc, "text");
-                // For didChange, text is inside contentChanges
-                if (!text && strcmp(method, "textDocument/didChange") == 0)
+                if (!uri || !uri->valuestring)
                 {
-                    cJSON *changes = cJSON_GetObjectItem(params, "contentChanges");
-                    if (changes && cJSON_GetArraySize(changes) > 0)
-                    {
-                        cJSON *change = cJSON_GetArrayItem(changes, 0);
-                        text = cJSON_GetObjectItem(change, "text");
-                    }
+                    cJSON_Delete(json);
+                    return;
                 }
 
-                if (uri && uri->valuestring && text && text->valuestring)
+                if (strcmp(method, "textDocument/didOpen") == 0)
                 {
-                    lsp_check_file(uri->valuestring, text->valuestring, id);
+                    if (text && text->valuestring)
+                    {
+                        lsp_check_file(uri->valuestring, text->valuestring, id);
+                    }
+                }
+                else
+                {
+                    cJSON *changes = cJSON_GetObjectItem(params, "contentChanges");
+                    int change_count = (changes && cJSON_IsArray(changes)) ? cJSON_GetArraySize(changes) : 0;
+                    if (change_count <= 0)
+                    {
+                        cJSON_Delete(json);
+                        return;
+                    }
+
+                    ProjectFile *pf = lsp_project_get_file(uri->valuestring);
+                    char *current =
+                        (pf && pf->source) ? strdup(pf->source) : ((text && text->valuestring)
+                                                                       ? strdup(text->valuestring)
+                                                                       : strdup(""));
+
+                    for (int i = 0; i < change_count; i++)
+                    {
+                        cJSON *change = cJSON_GetArrayItem(changes, i);
+                        char *next = lsp_apply_change(current, change);
+                        if (!next)
+                        {
+                            cJSON *fallback_text = change ? cJSON_GetObjectItem(change, "text") : NULL;
+                            if (fallback_text && fallback_text->valuestring)
+                            {
+                                next = strdup(fallback_text->valuestring);
+                            }
+                        }
+
+                        if (next)
+                        {
+                            free(current);
+                            current = next;
+                        }
+                    }
+
+                    if (current)
+                    {
+                        lsp_check_file(uri->valuestring, current, id);
+                        free(current);
+                    }
                 }
             }
         }

@@ -8,8 +8,11 @@
 
 LSPProject *g_project = NULL;
 int g_is_indexing = 0;
+static int g_lsp_base_cfg_define_count = 0;
+static int g_lsp_base_include_path_count = 0;
 
 static void scan_dir(const char *dir_path);
+static void free_pending_type_validations(ParserContext *ctx);
 
 // Initialize the project with a root directory
 void lsp_project_init(const char *root_path);
@@ -44,6 +47,9 @@ void lsp_project_init(const char *root_path)
     void lsp_default_on_error(void *data, Token t, const char *msg);
     g_project->ctx->on_error = lsp_default_on_error;
 
+    load_all_configs();
+    g_lsp_base_cfg_define_count = g_config.cfg_define_count;
+
     // Add root path and std/ to include paths to resolve 'std.zc' etc.
     // Ensure we don't overflow the include_paths array (limit is 64)
     if (g_config.include_path_count < 62)
@@ -64,6 +70,8 @@ void lsp_project_init(const char *root_path)
             g_config.include_paths[g_config.include_path_count++] = xstrdup(std_path);
         }
     }
+
+    g_lsp_base_include_path_count = g_config.include_path_count;
 
     fprintf(stderr, "zls: Project initialized at %s\n", root_path);
 }
@@ -121,6 +129,24 @@ static void scan_file(const char *path)
     fprintf(stderr, "zls: Indexing %s\n", path);
     lsp_project_update_file(uri, src);
     free(src);
+}
+
+static void free_pending_type_validations(ParserContext *ctx)
+{
+    if (!ctx)
+    {
+        return;
+    }
+
+    TypeUsage *u = ctx->pending_type_validations;
+    while (u)
+    {
+        TypeUsage *next = u->next;
+        free(u->name);
+        free(u);
+        u = next;
+    }
+    ctx->pending_type_validations = NULL;
 }
 
 static void scan_dir(const char *dir_path)
@@ -218,9 +244,9 @@ void lsp_project_update_file(const char *uri, const char *src)
         pf = add_project_file(uri);
     }
 
-    // Use the plain path for internal compiler state, not the URI.
-    // This ensures z_resolve_path can use access() correctly.
+    // Save caller filename; switch to this file for parsing and directives.
     extern char *g_current_filename;
+    char *saved_filename = g_current_filename;
     g_current_filename = pf->path;
 
     if (pf->index)
@@ -235,11 +261,21 @@ void lsp_project_update_file(const char *uri, const char *src)
     }
     pf->source = xstrdup(src);
 
-    // Use the plain path for internal compiler state.
-    // This allows z_resolve_path and is_file_imported to work correctly.
-    extern char *g_current_filename;
-    char *saved_filename = g_current_filename;
-    g_current_filename = pf->path;
+    for (int i = g_lsp_base_include_path_count; i < g_config.include_path_count; i++)
+    {
+        free(g_config.include_paths[i]);
+        g_config.include_paths[i] = NULL;
+    }
+    g_config.include_path_count = g_lsp_base_include_path_count;
+    for (int i = g_lsp_base_cfg_define_count; i < g_config.cfg_define_count; i++)
+    {
+        free(g_config.cfg_defines[i]);
+        g_config.cfg_defines[i] = NULL;
+    }
+    g_config.cfg_define_count = g_lsp_base_cfg_define_count;
+    g_cflags[0] = 0;
+    g_link_flags[0] = 0;
+    scan_build_directives(g_project->ctx, src);
 
     Lexer l;
     lexer_init(&l, src);
@@ -252,7 +288,7 @@ void lsp_project_update_file(const char *uri, const char *src)
         void register_builtins(ParserContext * ctx);
         register_builtins(g_project->ctx);
     }
-
+    free_pending_type_validations(g_project->ctx);
     g_project->ctx->had_error = 0;
 
     if (!is_file_imported(g_project->ctx, pf->path))

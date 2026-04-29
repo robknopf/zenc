@@ -4406,14 +4406,7 @@ ASTNode *parse_import(ParserContext *ctx, Lexer *l)
     free(fn);
     fn = resolved;
 
-    // In fault-tolerant LSP mode zpanic_at reports the diagnostic and returns.
-    // Bail out here instead of dereferencing a NULL path below.
-    if (!fn)
-    {
-        ASTNode *dummy = ast_create(NODE_BLOCK);
-        dummy->block.statements = NULL;
-        return dummy;
-    }
+    int is_header_file = (strlen(fn) > 2 && strcmp(fn + strlen(fn) - 2, ".h") == 0);
 
     if (is_file_imported(ctx, fn))
     {
@@ -4473,7 +4466,7 @@ ASTNode *parse_import(ParserContext *ctx, Lexer *l)
     }
 
     // C Header: Emit include and return (don't parse)
-    if (strlen(fn) > 2 && strcmp(fn + strlen(fn) - 2, ".h") == 0)
+    if (is_header_file)
     {
         ASTNode *n = ast_create(NODE_INCLUDE);
         n->include.path = xstrdup(fn); // Store exact path
