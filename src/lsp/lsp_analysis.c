@@ -70,9 +70,25 @@ static char *trimmed_line_dup(const char *start, size_t len)
     return out;
 }
 
-static char *find_c_signature_in_header(const char *path, const char *symbol, int depth)
+#define MAX_HEADER_VISIT 16
+
+static char *find_c_signature_in_header_ex(const char *path, const char *symbol, int depth,
+                                           const char **visited, int visited_count)
 {
-    if (!path || !symbol || depth > 16)
+    if (!path || !symbol || depth > MAX_HEADER_VISIT)
+    {
+        return NULL;
+    }
+
+    for (int i = 0; i < visited_count; i++)
+    {
+        if (strcmp(visited[i], path) == 0)
+        {
+            return NULL;
+        }
+    }
+
+    if (visited_count >= MAX_HEADER_VISIT)
     {
         return NULL;
     }
@@ -82,6 +98,14 @@ static char *find_c_signature_in_header(const char *path, const char *symbol, in
     {
         return NULL;
     }
+
+    const char *new_visited[MAX_HEADER_VISIT];
+    for (int i = 0; i < visited_count; i++)
+    {
+        new_visited[i] = visited[i];
+    }
+    new_visited[visited_count] = path;
+    int new_visited_count = visited_count + 1;
 
     char header_dir[MAX_PATH_LEN];
     header_dir[0] = 0;
@@ -137,8 +161,9 @@ static char *find_c_signature_in_header(const char *path, const char *symbol, in
                                              header_dir, (int)(end_quote - inc), inc);
                             if (ret >= 0 && (size_t)ret < sizeof(nested_path))
                             {
-                                char *nested = find_c_signature_in_header(nested_path, symbol,
-                                                                          depth + 1);
+                                char *nested = find_c_signature_in_header_ex(
+                                    nested_path, symbol, depth + 1,
+                                    new_visited, new_visited_count);
                                 if (nested)
                                 {
                                     free(trimmed);
@@ -184,6 +209,11 @@ static char *find_c_signature_in_header(const char *path, const char *symbol, in
 
     free(src);
     return NULL;
+}
+
+static char *find_c_signature_in_header(const char *path, const char *symbol, int depth)
+{
+    return find_c_signature_in_header_ex(path, symbol, depth, NULL, 0);
 }
 
 static char *find_c_signature_in_imported_headers(ASTNode *node, const char *symbol)

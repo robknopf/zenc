@@ -4446,20 +4446,11 @@ ASTNode *parse_import(ParserContext *ctx, Lexer *l)
             alias[alias_tok.len] = 0;
 
             // Register the module
-
-            // Check if C header
-            int is_header = 0;
-            if (strlen(fn) > 2 && strcmp(fn + strlen(fn) - 2, ".h") == 0)
-            {
-                is_header = 1;
-            }
-
-            // Register the module
             Module *m = xmalloc(sizeof(Module));
             m->alias = xstrdup(alias);
             m->path = xstrdup(fn);
             m->base_name = extract_module_name(fn);
-            m->is_c_header = is_header;
+            m->is_c_header = is_header_file;
             m->next = ctx->modules;
             ctx->modules = m;
         }

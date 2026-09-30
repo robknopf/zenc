@@ -521,6 +521,11 @@ void scan_build_directives(ParserContext *ctx, const char *src)
                     char flags[MAX_PATH_LEN + 32];
                     snprintf(flags, sizeof(flags), "-I%s", path);
                     append_flag(g_cflags, sizeof(g_cflags), flags, NULL);
+
+                    if (g_config.include_path_count < 64)
+                    {
+                        g_config.include_paths[g_config.include_path_count++] = xstrdup(path);
+                    }
                 }
             }
             else if (strncmp(directive, "lib:", 4) == 0)

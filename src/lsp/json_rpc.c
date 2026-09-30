@@ -43,8 +43,44 @@ static int lsp_position_to_offset(const char *src, int line, int character, size
     int current_char = 0;
     while (*p && *p != '\n' && current_char < character)
     {
-        p++;
-        current_char++;
+        unsigned char c = (unsigned char)*p;
+        int char_len = 1;
+        int utf16_units = 1;
+        if (c >= 0xF0)
+        {
+            char_len = 4;
+            utf16_units = 2; // surrogate pair
+        }
+        else if (c >= 0xE0)
+        {
+            char_len = 3;
+        }
+        else if (c >= 0xC0)
+        {
+            char_len = 2;
+        }
+        if (char_len > 1)
+        {
+            int valid = 1;
+            for (int j = 1; j < char_len; j++)
+            {
+                if (!p[j] || p[j] == '\n')
+                {
+                    valid = 0;
+                    break;
+                }
+            }
+            if (!valid)
+            {
+                break;
+            }
+        }
+        if (current_char + utf16_units > character)
+        {
+            break;
+        }
+        current_char += utf16_units;
+        p += char_len;
     }
 
     *out_offset = (size_t)(p - src);
@@ -67,7 +103,7 @@ static char *lsp_apply_change(const char *base, cJSON *change)
     cJSON *range = cJSON_GetObjectItem(change, "range");
     if (!range)
     {
-        return strdup(text->valuestring);
+        return xstrdup(text->valuestring);
     }
 
     cJSON *start = cJSON_GetObjectItem(range, "start");
@@ -285,9 +321,9 @@ void handle_request(const char *json_str)
 
                     ProjectFile *pf = lsp_project_get_file(uri->valuestring);
                     char *current =
-                        (pf && pf->source) ? strdup(pf->source) : ((text && text->valuestring)
-                                                                       ? strdup(text->valuestring)
-                                                                       : strdup(""));
+                        (pf && pf->source) ? xstrdup(pf->source) : ((text && text->valuestring)
+                                                                       ? xstrdup(text->valuestring)
+                                                                       : xstrdup(""));
 
                     for (int i = 0; i < change_count; i++)
                     {
@@ -295,10 +331,18 @@ void handle_request(const char *json_str)
                         char *next = lsp_apply_change(current, change);
                         if (!next)
                         {
-                            cJSON *fallback_text = change ? cJSON_GetObjectItem(change, "text") : NULL;
-                            if (fallback_text && fallback_text->valuestring)
+                            cJSON *range = change ? cJSON_GetObjectItem(change, "range") : NULL;
+                            if (!range)
                             {
-                                next = strdup(fallback_text->valuestring);
+                                cJSON *fallback_text = change ? cJSON_GetObjectItem(change, "text") : NULL;
+                                if (fallback_text && fallback_text->valuestring)
+                                {
+                                    next = xstrdup(fallback_text->valuestring);
+                                }
+                            }
+                            else
+                            {
+                                fprintf(stderr, "zls: Failed to apply incremental change %d\n", i);
                             }
                         }
 
