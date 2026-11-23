@@ -1895,20 +1895,21 @@ static char *open_and_get_diagnostics(int id, const char *name, const char *json
     return diagnostics;
 }
 
-// The server keeps one global scope for the whole workspace. A global in one file must not
-// make a same-named parameter or local in another file, which never imports it, "shadow" it.
-// Shadowing within a file is still reported, at the shadowing name rather than at 1:1.
-static void test_shadow_across_files(void)
+// Globals are program-wide (function bodies are parsed after every top-level declaration),
+// so a parameter or local shadows a same-named global of another file, as it does for the
+// compiler. The warning points at the shadowing name, including for a parameter (not at 1:1).
+static void test_shadow_warning_location(void)
 {
-    printf("Running test_shadow_across_files...\n");
+    printf("Running test_shadow_warning_location...\n");
     mkdir("/tmp/zc_lsp_shadow", 0755);
     write_config_fixture("/tmp/zc_lsp_shadow/globals.zc", "let ctx: int = 0;\nfn main() {}\n");
-    const char *other_src = "extern fn foo(ctx: void*);\\n"
-                            "fn bar(p: int) { let ctx = p; println \\\"{ctx}\\\"; }\\n";
+    const char *other_src = "fn bar(ctx: int) { println \\\"{ctx}\\\"; }\\n"
+                            "fn qux(p: int) { let ctx = p; println \\\"{ctx}\\\"; }\\n";
     write_config_fixture("/tmp/zc_lsp_shadow/other.zc",
-                         "extern fn foo(ctx: void*);\n"
-                         "fn bar(p: int) { let ctx = p; println \"{ctx}\"; }\n");
-    const char *same_src = "let gx: int = 0;\\nfn baz(gx: int) { let q = gx; println \\\"{q}\\\"; }\\n";
+                         "fn bar(ctx: int) { println \"{ctx}\"; }\n"
+                         "fn qux(p: int) { let ctx = p; println \"{ctx}\"; }\n");
+    const char *same_src =
+        "let gx: int = 0;\\nfn baz(gx: int) { let q = gx; println \\\"{q}\\\"; }\\n";
     write_config_fixture("/tmp/zc_lsp_shadow/same.zc",
                          "let gx: int = 0;\nfn baz(gx: int) { let q = gx; println \"{q}\"; }\n");
 
@@ -1928,10 +1929,13 @@ static void test_shadow_across_files(void)
     {
         fail("No diagnostics received for other.zc");
     }
-    if (strstr(diagnostics, "shadows"))
+    // The parameter `ctx` is at 0:7, the local `ctx` at 1:21 (0-based).
+    if (!strstr(diagnostics, "Variable 'ctx' shadows") ||
+        !strstr(diagnostics, "\"start\":{\"line\":0,\"character\":7}") ||
+        !strstr(diagnostics, "\"start\":{\"line\":1,\"character\":21}"))
     {
         printf("diagnostics: %s\n", diagnostics);
-        fail("A global from a file that is not imported was reported as shadowed");
+        fail("Shadowing a global of another file was not reported at the shadowing names");
     }
     free(diagnostics);
 
@@ -1954,7 +1958,7 @@ static void test_shadow_across_files(void)
     free(wait_for_response(1403));
     send_request("{\"jsonrpc\": \"2.0\", \"method\": \"exit\", \"params\": {}}");
     waitpid(child_pid, NULL, 0);
-    printf("PASS: test_shadow_across_files\n");
+    printf("PASS: test_shadow_warning_location\n");
 }
 
 int main()
@@ -2003,7 +2007,7 @@ int main()
     test_project_config();
     test_index_exclude();
     test_std_import_in_other_project();
-    test_shadow_across_files();
+    test_shadow_warning_location();
     if (failures > 0)
     {
         fprintf(stderr, "TEST FAIL: %d LSP check(s) failed\n", failures);
