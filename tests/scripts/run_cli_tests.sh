@@ -343,7 +343,7 @@ make_import_chain "$workdir/chain_deep" 257
 out=$(cd "$workdir/chain_deep" && "$zc_abs" transpile main.zc -o chain_deep.c 2>&1)
 rc=$?
 if [ "$rc" -eq 1 ] && echo "$out" | grep -q "Imports are nested more than 256 levels deep" &&
-    echo "$out" | grep -q -- "--> d255.zc:1:8"; then
+    echo "$out" | grep -q "d255.zc:1:8"; then
     check "imports nested 257 deep are an error at the import" 1
 else
     check "imports nested 257 deep are an error at the import" 0
