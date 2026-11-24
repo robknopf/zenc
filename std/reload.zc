@@ -40,10 +40,16 @@
 // changed in the module's types and globals, and what was done to the state (see
 // print_changes()).
 //
-// Old versions stay loaded, by default until free(): a trait object, a function pointer or
-// a string literal that the host kept from an old version still points into its memory,
-// and keeps working (it runs the old code). keep_old(false) deletes each old version when
-// the next one loads instead.
+// Code kept from an old version follows the new code where the Reloader can find it. A trait
+// object calls the newest code: its vtable's storage is kept like a global's, and refilled
+// with the new version's functions on every reload. A function pointer in the state (a
+// field of a function pointer type, in the host's block or a global, reached by value) is
+// pointed at the new version's function of the same name, unless its signature changed;
+// the reload says which. What it can't find keeps running the old code: a function pointer
+// behind another pointer, or handed to a library; a lambda (it keeps the body it was made
+// with, as in hotreload-hx); a string literal still points into the old version. So old
+// versions stay loaded, by default until free(); keep_old(false) deletes each old version
+// when the next one loads instead, for programs that keep nothing like that.
 //
 // The module's code can call the host's own functions, and any library linked into the
 // host, if the host exports its symbols (link it with -rdynamic).
@@ -77,7 +83,7 @@ raw {
     typedef struct { const char *name; long long value; const char *payload; } ZcMfVariant;
     typedef struct { const char *c_name; const char *zc_name; unsigned kind; unsigned size; unsigned align; unsigned nfields; const ZcMfField *fields; unsigned nvariants; const ZcMfVariant *variants; } ZcMfType;
     typedef struct { const char *name; const char *type; unsigned size; void *addr; const char *init; const void *init_value; unsigned flags; } ZcMfGlobal;
-    typedef struct { const char *name; const char *ret; unsigned nparams; const char *const *params; } ZcMfFunc;
+    typedef struct { const char *name; const char *ret; unsigned nparams; const char *const *params; void *addr; } ZcMfFunc;
     typedef struct { unsigned format; const char *zc_version; unsigned ntypes; const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; unsigned nfuncs; const ZcMfFunc *funcs; } ZcManifest;
     #endif
 
@@ -119,6 +125,10 @@ raw {
         unsigned char *state;   // the block the host passes to the module (keep_state), or NULL
         size_t state_size;
         char *moved;            // what the last reload did to move state, for print_changes()
+        ZcMfGlobal *old_vtables; // vtables in storage no longer the current one (old owners)
+        unsigned nold_vtables;
+        struct ZrFn { void *addr; char *name; char *sig; } *fns; // every version's functions
+        unsigned nfns, fns_cap;
         unsigned nstore;
     } ZrReloader;
 
@@ -380,7 +390,7 @@ raw {
     // doesn't know, or out of memory).
     static ZcManifest *zr_mf_copy(const ZcManifest *m)
     {
-        if (!m || m->format < 1 || m->format > 4) return NULL;
+        if (!m || m->format < 1 || m->format > 5) return NULL;
         ZcManifest *c = (ZcManifest *)calloc(1, sizeof(ZcManifest));
         ZcMfType *types = (ZcMfType *)calloc(m->ntypes ? m->ntypes : 1, sizeof(ZcMfType));
         if (!c || !types)
@@ -393,7 +403,7 @@ raw {
         c->zc_version = zr_strdup(m->zc_version);
         c->types = types;
         int ok = 1;
-        if (m->format >= 4 && m->nfuncs)
+        if (m->format >= 5 && m->nfuncs)
         {
             ZcMfFunc *f = (ZcMfFunc *)calloc(m->nfuncs, sizeof(ZcMfFunc));
             if (!f) ok = 0;
@@ -406,6 +416,7 @@ raw {
                     f[i].name = zr_strdup(m->funcs[i].name);
                     f[i].ret = zr_strdup(m->funcs[i].ret);
                     f[i].nparams = m->funcs[i].nparams;
+                    f[i].addr = m->funcs[i].addr;
                     char **ps = m->funcs[i].nparams ? (char **)calloc(m->funcs[i].nparams, sizeof(char *)) : NULL;
                     for (unsigned j = 0; ps && j < m->funcs[i].nparams; j++)
                         ps[j] = zr_strdup(m->funcs[i].params[j]);
@@ -760,6 +771,7 @@ raw {
         for (unsigned i = 0; i < now->nglobals; i++)
         {
             const ZcMfGlobal *b = &now->globals[i];
+            if (b->flags & 2) continue; // a vtable: refreshed, not the program's state
             const ZcMfGlobal *a = zr_global_find(old->globals, old->nglobals, b->name);
             const char *held = NULL;
             int same = a && !strcmp(zr_s(a->type), zr_s(b->type)) && a->size == b->size;
@@ -779,7 +791,7 @@ raw {
         for (unsigned i = 0; i < old->nglobals; i++)
         {
             const ZcMfGlobal *a = &old->globals[i];
-            if (zr_global_find(now->globals, now->nglobals, a->name)) continue;
+            if ((a->flags & 2) || zr_global_find(now->globals, now->nglobals, a->name)) continue;
             ZR_MF_HEADER();
             fputs(first ? "reload:   globals: " : ", ", out);
             first = 0;
@@ -1267,7 +1279,7 @@ raw {
         const ZcManifest *(*get)(void) =
             (const ZcManifest *(*)(void))tcc_get_symbol(v->tcc, "_zc_manifest");
         const ZcManifest *m = get ? get() : NULL;
-        return m && m->format >= 4 ? m : NULL; // the globals' layout this file reads
+        return m && m->format >= 5 ? m : NULL; // the layout this file reads
     }
 
     static void zr_store_free(ZrReloader *r)
@@ -1379,7 +1391,8 @@ raw {
         if (dry)
         {
             for (unsigned i = 0; i < nm->nglobals; i++)
-                zr_check_pointers(&mv, zr_s(nm->globals[i].name), nm->globals[i].type, 0);
+                if (!(nm->globals[i].flags & 2))
+                    zr_check_pointers(&mv, zr_s(nm->globals[i].name), nm->globals[i].type, 0);
             int amb = 0;
             const char *st = r->state ? zr_state_type(r, nm, &amb) : NULL;
             char root[256];
@@ -1402,7 +1415,7 @@ raw {
             {
                 const ZcMfGlobal *g = &live->globals[i];
                 const ZcMfGlobal *s = zr_global_find(r->store, r->nstore, g->name);
-                if (!s) continue;
+                if (!s || (g->flags & 2)) continue;
                 zr_move_value(&mv, zr_s(g->name), zr_s(s->type), s->size,
                               (const unsigned char *)s->addr, zr_s(g->type), g->size,
                               (unsigned char *)g->addr, 0);
@@ -1465,6 +1478,163 @@ raw {
         return mv.problems;
     }
 
+    // The vtables in the storage being replaced, to refresh from now on (zr_reset_globals).
+    static void zr_keep_old_vtables(ZrReloader *r)
+    {
+        for (unsigned i = 0; i < r->nstore; i++)
+        {
+            const ZcMfGlobal *g = &r->store[i];
+            if (!(g->flags & 2)) continue;
+            ZcMfGlobal *grown = (ZcMfGlobal *)realloc(r->old_vtables, (r->nold_vtables + 1) * sizeof(ZcMfGlobal));
+            if (!grown) return;
+            r->old_vtables = grown;
+            ZcMfGlobal *o = &r->old_vtables[r->nold_vtables++];
+            memset(o, 0, sizeof(*o));
+            o->name = zr_strdup(g->name);
+            o->type = zr_strdup(g->type);
+            o->size = g->size;
+            o->addr = g->addr;
+        }
+    }
+
+    // ---- Function pointers that follow the new code ------------------------------------
+    //
+    // Every loaded version's functions, by address, with their name and C signature. After a
+    // reload, a function pointer in the state (a field of a function pointer type, in the
+    // host's block or a global, reached by value) that holds one of them is pointed at the
+    // new version's function of the same name and signature.
+
+    static char *zr_fn_sig(const ZcMfFunc *f)
+    {
+        size_t n = strlen(zr_s(f->ret)) + 3;
+        for (unsigned j = 0; j < f->nparams; j++) n += strlen(zr_s(f->params[j])) + 2;
+        char *sig = (char *)malloc(n);
+        if (!sig) return NULL;
+        snprintf(sig, n, "%s(", zr_s(f->ret));
+        for (unsigned j = 0; j < f->nparams; j++)
+        {
+            if (j) strcat(sig, ", ");
+            strcat(sig, zr_s(f->params[j]));
+        }
+        strcat(sig, ")");
+        return sig;
+    }
+
+    static void zr_note_fns(ZrReloader *r, const ZcManifest *m)
+    {
+        for (unsigned i = 0; m && i < m->nfuncs; i++)
+        {
+            if (!m->funcs[i].addr) continue;
+            if (r->nfns == r->fns_cap)
+            {
+                unsigned cap = r->fns_cap ? r->fns_cap * 2 : 256;
+                struct ZrFn *grown = (struct ZrFn *)realloc(r->fns, cap * sizeof(struct ZrFn));
+                if (!grown) return;
+                r->fns = grown;
+                r->fns_cap = cap;
+            }
+            r->fns[r->nfns].addr = m->funcs[i].addr;
+            r->fns[r->nfns].name = zr_strdup(m->funcs[i].name);
+            r->fns[r->nfns].sig = zr_fn_sig(&m->funcs[i]);
+            r->nfns++;
+        }
+    }
+
+    static const struct ZrFn *zr_fn_at(ZrReloader *r, void *addr)
+    {
+        for (unsigned i = 0; i < r->nfns; i++)
+            if (r->fns[i].addr == addr) return &r->fns[i];
+        return NULL;
+    }
+
+    // Through the value of C type `type` at `p`, every function pointer to an old function,
+    // pointed at the new version's (manifest `m`). Each one moved, or kept, is noted in `log`.
+    static void zr_repoint(ZrReloader *r, const ZcManifest *m, const char *path, const char *type,
+                           unsigned char *p, unsigned size, FILE *log, int *n, int depth)
+    {
+        if (depth > 64 || !type) return;
+        char elem[256], sub[512];
+        unsigned count = 0;
+        if (zr_array_of(type, elem, sizeof elem, &count))
+        {
+            unsigned es = size / count;
+            for (unsigned i = 0; i < count; i++)
+            {
+                snprintf(sub, sizeof sub, "%s[%u]", path, i);
+                zr_repoint(r, m, sub, elem, p + i * es, es, log, n, depth + 1);
+            }
+            return;
+        }
+        if (strstr(type, "(*") && size == sizeof(void *))
+        {
+            void *fn;
+            memcpy(&fn, p, sizeof fn);
+            const struct ZrFn *was = fn ? zr_fn_at(r, fn) : NULL;
+            const ZcMfFunc *now = was ? zr_func_find(m, was->name) : NULL;
+            if (!was || (now && now->addr == fn)) return;
+            char *sig = now ? zr_fn_sig(now) : NULL;
+            int same = sig && was->sig && !strcmp(sig, was->sig);
+            free(sig);
+            fputs((*n)++ ? ", " : "reload: function pointers in the state: ", log);
+            if (same)
+            {
+                memcpy(p, &now->addr, sizeof fn);
+                fprintf(log, "%s now calls the new %s", path, was->name);
+            }
+            else
+                fprintf(log, "%s still calls the old %s (%s)", path, was->name,
+                        now ? "its signature changed" : "it's gone");
+            return;
+        }
+        const ZcMfType *t = zr_mf_find(m, type);
+        if (!t) return;
+        if (t->kind == 1)
+        {
+            for (unsigned i = 0; i < t->nfields; i++)
+            {
+                const ZcMfField *f = &t->fields[i];
+                if (f->bits) continue;
+                snprintf(sub, sizeof sub, "%s%s%s", path, *path ? "." : "", zr_s(f->name));
+                zr_repoint(r, m, sub, f->type, p + f->offset, f->size, log, n, depth + 1);
+            }
+        }
+        else if (t->kind == 4)
+        {
+            const ZcMfField *tag = zr_field_find(t, "tag"), *data = zr_field_find(t, "data");
+            const ZcMfVariant *v = tag ? zr_variant_by_value(t, zr_int_read(p + tag->offset, tag->size)) : NULL;
+            unsigned ps = v && v->payload ? zr_type_size(m, v->payload) : 0;
+            if (v && ps && data && ps <= data->size)
+            {
+                snprintf(sub, sizeof sub, "%s(%s)", path, zr_s(v->name));
+                zr_repoint(r, m, sub, v->payload, p + data->offset, ps, log, n, depth + 1);
+            }
+        }
+    }
+
+    // After a reload: the function pointers in the host's block and the globals.
+    static void zr_repoint_state(ZrReloader *r, FILE *log)
+    {
+        const ZcManifest *m = r->types_now;
+        int n = 0;
+        int amb = 0;
+        const char *st = r->state ? zr_state_type(r, m, &amb) : NULL;
+        const ZcMfType *t = st && !amb ? zr_mf_find(m, st) : NULL;
+        if (t && t->size <= r->state_size)
+        {
+            char root[256];
+            snprintf(root, sizeof root, "%s", st);
+            zr_repoint(r, m, "state", root, r->state, t->size, log, &n, 0);
+        }
+        const ZcManifest *live = zr_version_manifest(&r->current);
+        for (unsigned i = 0; live && i < live->nglobals; i++)
+        {
+            const ZcMfGlobal *g = &live->globals[i];
+            if (g->flags & 2) continue;
+            zr_repoint(r, m, zr_s(g->name), g->type, (unsigned char *)g->addr, g->size, log, &n, 0);
+        }
+        if (n) fputc('\n', log);
+    }
+
     // Globals back to their initial value: those marked @reset_on_reload, on every reload,
     // and those whose initial value was edited (as hotreload-hx does: an edited initial value
     // is taken to be what was meant). Each is listed in `log`.
@@ -1475,6 +1645,20 @@ raw {
         for (unsigned i = 0; live && i < live->nglobals; i++)
         {
             const ZcMfGlobal *g = &live->globals[i];
+            if (g->flags & 2)
+            {
+                // A vtable: this version's functions, here and in any old storage of it, so
+                // a trait object made by any version calls the newest code.
+                if (g->init_value) memcpy(g->addr, g->init_value, g->size);
+                for (unsigned j = 0; g->init_value && j < r->nold_vtables; j++)
+                {
+                    const ZcMfGlobal *o = &r->old_vtables[j];
+                    if (!strcmp(zr_s(o->name), zr_s(g->name)) && !strcmp(zr_s(o->type), zr_s(g->type)) &&
+                        o->size == g->size)
+                        memcpy(o->addr, g->init_value, g->size);
+                }
+                continue;
+            }
             const ZcMfGlobal *was = zr_global_find(r->types_prev->globals, r->types_prev->nglobals, g->name);
             int marked = g->flags & 1;
             int edited = was && strcmp(zr_s(was->init), zr_s(g->init)) != 0;
@@ -1633,7 +1817,10 @@ raw {
         FILE *log = open_memstream(&r->moved, &moved_len);
         if (r->types_prev && r->types_now)
             zr_move_state(r, &r->current, r->types_prev, r->types_now, 0, NULL, log);
+        if (r->current.owns_globals && r->store) zr_keep_old_vtables(r);
         if (r->types_prev && r->types_now && log) zr_reset_globals(r, log);
+        zr_note_fns(r, r->types_now);
+        if (r->types_prev && r->types_now && log) zr_repoint_state(r, log);
         if (log) fclose(log);
         if (r->current.owns_globals) zr_store_set(r, zr_version_manifest(&r->current));
 
@@ -1726,6 +1913,18 @@ raw {
         for (int i = 0; i < r->fetched_count; i++) free(r->fetched[i]);
         free(r->fetched);
         free(r->moved);
+        for (unsigned i = 0; i < r->nold_vtables; i++)
+        {
+            free((void *)r->old_vtables[i].name);
+            free((void *)r->old_vtables[i].type);
+        }
+        free(r->old_vtables);
+        for (unsigned i = 0; i < r->nfns; i++)
+        {
+            free(r->fns[i].name);
+            free(r->fns[i].sig);
+        }
+        free(r->fns);
         free(r->zc);
         free(r->zc_flags);
         free(r->source);

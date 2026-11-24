@@ -525,11 +525,13 @@ struct ParserContext
     // Codegen context (mutable state during code generation):
     struct
     {
-        Emitter emitter;    ///< Emitter for code generation.
-        FILE *hoist_out;    ///< File stream for hoisting code (e.g. from plugins).
-        int skip_preamble;  ///< If 1, codegen won't emit standard preamble (includes etc).
-        int is_repl;        ///< 1 if running in REPL mode.
-        int in_defer_block; ///< 1 if currently parsing inside a defer block.
+        Emitter emitter;         ///< Emitter for code generation.
+        FILE *hoist_out;         ///< File stream for hoisting code (e.g. from plugins).
+        char **reload_vtables;   ///< --reload: the vtables emitted, "Trait" then "Struct".
+        int reload_vtable_count; ///< Entries in it (two per vtable).
+        int skip_preamble;       ///< If 1, codegen won't emit standard preamble (includes etc).
+        int is_repl;             ///< 1 if running in REPL mode.
+        int in_defer_block;      ///< 1 if currently parsing inside a defer block.
 
         ASTNode *global_user_structs; ///< List of user defined structs.
         // The names of the structs and enums in that list, to answer "not there" without

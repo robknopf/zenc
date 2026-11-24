@@ -1,11 +1,16 @@
-// A function pointer from one version, kept in the host's block, is called after a reload.
-// It still calls that version's code, which must still be loaded.
+// A function pointer kept in the state (the host's block, or a global) is pointed at the new
+// version's function of the same name after a reload. One whose function's signature
+// changed keeps calling the old one, and the reload says so.
 fn greet() {
     println "greet version 1";
 }
+struct Hooks { on: fn*(); }
+let hooks: Hooks; // a global (a function pointer global of its own doesn't compile yet)
 struct State { hook: fn*(); }
 @link_name("reload_step")
 fn reload_step(state: State*) {
     if state.hook == NULL { state.hook = greet; }
+    if hooks.on == NULL { hooks.on = greet; }
     state.hook();
+    hooks.on();
 }

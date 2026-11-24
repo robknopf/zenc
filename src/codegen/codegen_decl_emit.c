@@ -571,36 +571,63 @@ void emit_impl_vtables(ParserContext *ctx)
                 continue;
             }
 
-            EMIT(ctx, "%s_VTable %s__%s__VTable = {", trait, strct, trait);
-
-            ASTNode *m = node->impl_trait.methods;
-            while (m)
+            // --reload: the vtable's storage is the host's, like a global's
+            // (reload_global_type), and a constant copy holds this version's functions, which
+            // the host copies into it on every reload. A trait object made by any version
+            // then calls the newest code.
+            int host_kept = ctx->config->reload_mode && !ctx->config->use_cpp;
+            if (host_kept)
             {
-                // Calculate expected prefix: Struct__Trait__
-                size_t pre_sz = strlen(strct) + strlen(trait) + 6;
-                char *prefix = xmalloc(pre_sz);
-                snprintf(prefix, pre_sz, "%s__%s__", strct, trait);
-
-                const char *orig_name = m->func.name;
-                if (strncmp(orig_name, prefix, strlen(prefix)) == 0)
+                EMIT(ctx, "#ifdef ZC_RELOAD_OWN_GLOBALS\n");
+            }
+            for (int copy = 0; copy < (host_kept ? 2 : 1); copy++)
+            {
+                if (copy == 1)
                 {
-                    orig_name += strlen(prefix);
+                    EMIT(ctx, "#else\nextern %s_VTable %s__%s__VTable;\n#endif\n", trait, strct,
+                         trait);
+                    EMIT(ctx, "static const %s_VTable _zc_mf_init_%s__%s__VTable = {", trait, strct,
+                         trait);
+                    ctx->cg.reload_vtables =
+                        xrealloc(ctx->cg.reload_vtables,
+                                 sizeof(char *) * (size_t)(ctx->cg.reload_vtable_count + 2));
+                    ctx->cg.reload_vtables[ctx->cg.reload_vtable_count++] = xstrdup(trait);
+                    ctx->cg.reload_vtables[ctx->cg.reload_vtable_count++] = xstrdup(strct);
                 }
                 else
                 {
-                    orig_name = parse_original_method_name(m->func.name);
+                    EMIT(ctx, "%s_VTable %s__%s__VTable = {", trait, strct, trait);
                 }
 
-                EMIT(ctx, ".%s = (__typeof__(((%s_VTable*)0)->%s))%s", orig_name, trait, orig_name,
-                     m->func.name);
-                zfree(prefix);
-                if (m->next)
+                ASTNode *m = node->impl_trait.methods;
+                while (m)
                 {
-                    EMIT(ctx, ", ");
+                    // Calculate expected prefix: Struct__Trait__
+                    size_t pre_sz = strlen(strct) + strlen(trait) + 6;
+                    char *prefix = xmalloc(pre_sz);
+                    snprintf(prefix, pre_sz, "%s__%s__", strct, trait);
+
+                    const char *orig_name = m->func.name;
+                    if (strncmp(orig_name, prefix, strlen(prefix)) == 0)
+                    {
+                        orig_name += strlen(prefix);
+                    }
+                    else
+                    {
+                        orig_name = parse_original_method_name(m->func.name);
+                    }
+
+                    EMIT(ctx, ".%s = (__typeof__(((%s_VTable*)0)->%s))%s", orig_name, trait,
+                         orig_name, m->func.name);
+                    zfree(prefix);
+                    if (m->next)
+                    {
+                        EMIT(ctx, ", ");
+                    }
+                    m = m->next;
                 }
-                m = m->next;
+                EMIT(ctx, "};\n");
             }
-            EMIT(ctx, "};\n");
         }
         ref = ref->next;
     }

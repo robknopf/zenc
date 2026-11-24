@@ -901,7 +901,7 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
               "typedef struct { const char *name; const char *type; unsigned size; void *addr; "
               "const char *init; const void *init_value; unsigned flags; } ZcMfGlobal;\n"
               "typedef struct { const char *name; const char *ret; unsigned nparams; "
-              "const char *const *params; } ZcMfFunc;\n"
+              "const char *const *params; void *addr; } ZcMfFunc;\n"
               "typedef struct { unsigned format; const char *zc_version; unsigned ntypes; "
               "const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; "
               "unsigned nfuncs; const ZcMfFunc *funcs; } ZcManifest;\n#endif\n");
@@ -1132,6 +1132,15 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
         }
         zfree(type);
     }
+    // The vtables (emit_impl_vtables), as globals refreshed on every reload (flag 2).
+    for (int i = 0; i + 1 < ctx->cg.reload_vtable_count; i += 2)
+    {
+        const char *trait = ctx->cg.reload_vtables[i], *strct = ctx->cg.reload_vtables[i + 1];
+        EMIT(ctx,
+             "    {\"%s__%s__VTable\", \"%s_VTable\", sizeof(%s__%s__VTable), "
+             "(void *)&%s__%s__VTable, \"(vtable)\", &_zc_mf_init_%s__%s__VTable, 2},\n",
+             strct, trait, trait, strct, trait, strct, trait, strct, trait);
+    }
     EMIT(ctx, "    {0}\n};\n");
 
     // The functions the module defines, with their C return and parameter types: what a
@@ -1182,13 +1191,14 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
         char *ret = f->func.ret_type_info ? type_to_c_string(f->func.ret_type_info, 0) : NULL;
         emit_manifest_string(ctx, ret ? ret : "void");
         zfree(ret);
+        const char *fname = f->link_name ? f->link_name : f->func.name;
         if (has_params)
         {
-            EMIT(ctx, ", %d, _zc_mf_p%d},\n", f->func.count, nfunc++);
+            EMIT(ctx, ", %d, _zc_mf_p%d, (void *)%s},\n", f->func.count, nfunc++, fname);
         }
         else
         {
-            EMIT(ctx, ", 0, 0},\n");
+            EMIT(ctx, ", 0, 0, (void *)%s},\n", fname);
         }
         if (f->cfg_condition)
         {
@@ -1197,7 +1207,7 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
     }
     EMIT(ctx, "    {0}\n};\n");
 
-    EMIT(ctx, "static const ZcManifest _zc_mf = {4, ");
+    EMIT(ctx, "static const ZcManifest _zc_mf = {5, ");
     emit_manifest_string(ctx, ZEN_VERSION);
     EMIT(ctx, ", sizeof(_zc_mf_types) / sizeof(_zc_mf_types[0]) - 1, _zc_mf_types,\n"
               "    sizeof(_zc_mf_globals) / sizeof(_zc_mf_globals[0]) - 1, _zc_mf_globals,\n"

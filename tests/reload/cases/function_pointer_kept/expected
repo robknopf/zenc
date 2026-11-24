@@ -1,4 +1,10 @@
 --- step 1
 greet version 1
---- step 2
 greet version 1
+--- step 2
+reload: function pointers in the state: state.hook now calls the new greet, hooks.on now calls the new greet
+greet version 2
+greet version 2
+--- step 3
+reload: function pointers in the state: state.hook still calls the old greet (its signature changed), hooks.on still calls the old greet (its signature changed)
+greet version 2
