@@ -1,6 +1,6 @@
 #!/bin/bash
 # Hot reload tests: each case in tests/reload/cases/ is a sequence of module versions
-# (step1.zc, step2.zc, ...) loaded one after another by tests/reload/host.c, with the
+# (step1.zc, step2.zc, ...) loaded one after another by tests/reload/host.zc (on std/reload.zc), with the
 # output compared to the case's `expected`.
 #
 # A case with an `xfail` file is known not to work yet; the file names the task that
@@ -36,8 +36,10 @@ if ! printf '#include <libtcc.h>\nint main(void) { tcc_delete(tcc_new()); return
     echo "Reload tests skipped: libtcc is not available"
     exit 0
 fi
-if ! $CC -std=gnu11 -Wall -Wextra -Werror "$ROOT/tests/reload/host.c" $TCC_DIRS \
-    -ltcc -ldl -lpthread -lm -o "$WORK/host" 2> "$WORK/host_build.log"; then
+if ! "$ZC" transpile -q "$ROOT/tests/reload/host.zc" -o "$WORK/host.c" \
+        > "$WORK/host_build.log" 2>&1 ||
+    ! $CC "$WORK/host.c" $TCC_DIRS -ltcc -ldl -lpthread -lm -o "$WORK/host" \
+        >> "$WORK/host_build.log" 2>&1; then
     echo "Reload tests: the host does not build"
     sed 's/^/  /' "$WORK/host_build.log" | head -10
     exit 1
@@ -67,7 +69,7 @@ for dir in "$CASES"/*/; do
     elif [ $rc -eq 0 ] && diff -u "$dir/expected" "$WORK/$name/out" > "$WORK/$name/diff"; then
         if [ -f "$dir/xfail" ]; then
             echo "  [XPASS] $name (now passes: remove its xfail file; with libtcc 0.9.28 a" \
-                "dangling pointer can also pass by luck, see host.c)"
+                "dangling pointer can also pass by luck, see std/reload.zc)"
             xpass=$((xpass + 1))
         else
             echo "  [PASS] $name"

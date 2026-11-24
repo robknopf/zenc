@@ -1,0 +1,70 @@
+// The reload tests' host, on std/reload.zc.
+//
+// Usage: host ZC CASE_DIR WORK_DIR [--delete-old]
+//
+// Each CASE_DIR/stepN.zc (N = 1, 2, ...) is one version of the module, in order. For each
+// step the host builds it with a Reloader and calls its `reload_step(void *state)`, as a
+// program's host would after a save. `state` is a zeroed block the host owns, the same one
+// for every step. A step that does not build leaves the previous version running.
+//
+// Old versions stay loaded (the Reloader's default); --delete-old deletes each when the
+// next one loads, to show what that breaks.
+//
+// The host prints "--- step N" before each step, so the expected output shows which
+// version printed what.
+
+import "std/reload.zc"
+
+include <stdio.h>
+include <stdlib.h>
+include <string.h>
+
+def STATE_BYTES = 65536;
+def MAX_STEPS = 64;
+
+fn exists(path: const char*) -> bool {
+    let f = fopen(path, "r");
+    if f == NULL { return false; }
+    fclose(f);
+    return true;
+}
+
+fn main(argc: int, argv: char**) -> int {
+    if argc < 4 {
+        fprintf(stderr, "usage: host ZC CASE_DIR WORK_DIR [--delete-old]\n");
+        return 2;
+    }
+    let case_dir: const char* = argv[2];
+    let delete_old = argc > 4 && strcmp(argv[4], "--delete-old") == 0;
+    setvbuf(stdout, NULL, _IONBF, 0); // the module's output and ours, in order
+
+    let c_file: char[4096];
+    snprintf(c_file, 4096, "%s/module.c", argv[3]);
+    let code = Reloader::new("", c_file);
+    code.set_zc(argv[1]);
+    code.keep_old(!delete_old);
+    code.verbose(false);
+
+    let state = calloc(1, STATE_BYTES);
+    let step: fn*(void*) = NULL;
+    let source: char[4096];
+    let n = 1;
+    while n <= MAX_STEPS {
+        snprintf(source, 4096, "%s/step%d.zc", case_dir, n);
+        if !exists(source) { break; }
+        println "--- step {n}";
+        code.set_source(source);
+        if code.build() {
+            step = code.symbol("reload_step"); // a void* converts to a function pointer
+            if step == NULL { fprintf(stderr, "host: step%d.zc has no reload_step\n", n); }
+        } else {
+            println "(build failed, running the previous module)";
+        }
+        if step != NULL { step(state); }
+        n = n + 1;
+    }
+
+    code.free();
+    free(state);
+    return 0;
+}

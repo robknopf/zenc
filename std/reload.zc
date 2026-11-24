@@ -1,0 +1,431 @@
+// Hot reload: a module of Zen C, rebuilt from source and loaded into this process through
+// libtcc, for a development host that keeps running while the module's code changes.
+//
+//     let code = Reloader::new("src/game/game.zc", "build/game.c");
+//     code.add_include("third_party/include");   (where the module's #includes are)
+//     if !code.build() { /* the errors are printed; fix and save */ }
+//     let frame: fn*(void*) = code.symbol("game_frame");
+//     ...
+//     // between frames, when none of the module's code is running:
+//     if code.poll() { frame = code.symbol("game_frame"); }
+//     ...
+//     code.free();
+//
+// A build runs `zc transpile --cc tcc` on the source, then compiles the C in memory. If
+// either fails, the errors are printed and the version already loaded stays in use.
+//
+// Old versions stay loaded, by default until free(): a trait object, a function pointer or
+// a string literal that the host kept from an old version still points into its memory,
+// and keeps working (it runs the old code). keep_old(false) deletes each old version when
+// the next one loads instead.
+//
+// The module's code can call the host's own functions, and any library linked into the
+// host, if the host exports its symbols (link it with -rdynamic).
+//
+// Needs libtcc (0.9.27 or 0.9.28), which the program must link itself: an imported file's
+// `//> link:` lines are not read. With zc: `zc build host.zc -l tcc -l dl -l pthread`; with
+// a C compiler: `-ltcc -ldl -lpthread -lm`. Not available on Windows yet. It is for development
+// hosts, and not written for --misra builds.
+
+include <libtcc.h>
+
+raw {
+    #include <dirent.h>
+    #include <stdint.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <sys/stat.h>
+    #include <time.h>
+    #include <unistd.h>
+
+    enum { ZR_MAX_INCLUDES = 32 };
+
+    typedef struct
+    {
+        TCCState *tcc;
+        void *mem;       // the code's memory, ours with libtcc 0.9.27; NULL with 0.9.28
+        size_t mem_size; // 0 when not known (0.9.28)
+    } ZrVersion;
+
+    typedef struct
+    {
+        char *zc;
+        char *zc_flags;
+        char *source;
+        char *c_file;
+        char *watch_dir;
+        char *includes[ZR_MAX_INCLUDES];
+        int include_count;
+        int keep_old;
+        int verbose;
+
+        ZrVersion current;
+        ZrVersion *old;
+        int old_count;
+        int old_cap;
+        int version;
+        int64_t seen; // newest .zc modification time at the last build, or -1
+    } ZrReloader;
+
+    static char *zr_strdup(const char *s)
+    {
+        if (!s) return NULL;
+        size_t n = strlen(s) + 1;
+        char *d = (char *)malloc(n);
+        if (d) memcpy(d, s, n);
+        return d;
+    }
+
+    static double zr_now_ms(void)
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+    }
+
+    static int64_t zr_mtime_ns(const struct stat *st)
+    {
+    #if defined(__APPLE__)
+        return (int64_t)st->st_mtimespec.tv_sec * 1000000000LL + st->st_mtimespec.tv_nsec;
+    #else
+        return (int64_t)st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
+    #endif
+    }
+
+    // The newest modification time of the .zc files under `dir`, searched recursively, or
+    // -1 if there are none.
+    static int64_t zr_newest_zc(const char *dir_path, int depth)
+    {
+        int64_t newest = -1;
+        if (depth > 16) return newest;
+        DIR *dir = opendir(dir_path);
+        if (!dir) return newest;
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL)
+        {
+            const char *name = entry->d_name;
+            if (name[0] == '.') continue;
+            size_t len = strlen(dir_path) + strlen(name) + 2;
+            char *path = (char *)malloc(len);
+            if (!path) break;
+            snprintf(path, len, "%s/%s", dir_path, name);
+            struct stat st;
+            if (stat(path, &st) == 0)
+            {
+                int64_t m = -1;
+                if (S_ISDIR(st.st_mode))
+                {
+                    m = zr_newest_zc(path, depth + 1);
+                }
+                else
+                {
+                    size_t n = strlen(name);
+                    if (n > 3 && strcmp(name + n - 3, ".zc") == 0) m = zr_mtime_ns(&st);
+                }
+                if (m > newest) newest = m;
+            }
+            free(path);
+        }
+        closedir(dir);
+        return newest;
+    }
+
+    static void zr_on_tcc_error(void *opaque, const char *msg)
+    {
+        (void)opaque;
+        fprintf(stderr, "reload: tcc: %s\n", msg);
+    }
+
+    // libtcc 0.9.27 compiles into memory the caller gives it; 0.9.28 always allocates it.
+    static int zr_relocate(ZrVersion *v)
+    {
+    #ifdef TCC_RELOCATE_AUTO
+        int size = tcc_relocate(v->tcc, NULL);
+        if (size < 0) return -1;
+        long page = sysconf(_SC_PAGESIZE);
+        v->mem_size = ((size_t)size + (size_t)page - 1) / (size_t)page * (size_t)page;
+        if (posix_memalign(&v->mem, (size_t)page, v->mem_size) != 0)
+        {
+            v->mem = NULL;
+            v->mem_size = 0;
+            return -1;
+        }
+        return tcc_relocate(v->tcc, v->mem);
+    #else
+        return tcc_relocate(v->tcc);
+    #endif
+    }
+
+    // Deletes a version. With libtcc 0.9.27 its memory is first filled with 0xCC (x86's
+    // breakpoint instruction), so anything still using it fails at once instead of reading
+    // what happens to be left in freed memory.
+    static void zr_version_delete(ZrVersion *v)
+    {
+        if (v->tcc) tcc_delete(v->tcc);
+        if (v->mem)
+        {
+            memset(v->mem, 0xCC, v->mem_size);
+            free(v->mem);
+        }
+        memset(v, 0, sizeof(*v));
+    }
+
+    static void *zr_new(const char *source, const char *c_file)
+    {
+        ZrReloader *r = (ZrReloader *)calloc(1, sizeof(ZrReloader));
+        if (!r) return NULL;
+        r->zc = zr_strdup("zc");
+        r->source = zr_strdup(source);
+        r->c_file = zr_strdup(c_file);
+        r->keep_old = 1;
+        r->verbose = 1;
+        r->seen = -1;
+        return r;
+    }
+
+    static void zr_set(char **field, const char *value)
+    {
+        free(*field);
+        *field = zr_strdup(value);
+    }
+
+    static void zr_set_zc(void *h, const char *zc) { zr_set(&((ZrReloader *)h)->zc, zc); }
+    static void zr_set_zc_flags(void *h, const char *f) { zr_set(&((ZrReloader *)h)->zc_flags, f); }
+    static void zr_set_source(void *h, const char *s) { zr_set(&((ZrReloader *)h)->source, s); }
+    static void zr_set_watch(void *h, const char *d) { zr_set(&((ZrReloader *)h)->watch_dir, d); }
+    static void zr_set_keep_old(void *h, int keep) { ((ZrReloader *)h)->keep_old = keep; }
+    static void zr_set_verbose(void *h, int verbose) { ((ZrReloader *)h)->verbose = verbose; }
+
+    static int zr_add_include(void *h, const char *dir)
+    {
+        ZrReloader *r = (ZrReloader *)h;
+        if (r->include_count >= ZR_MAX_INCLUDES) return 0;
+        r->includes[r->include_count++] = zr_strdup(dir);
+        return 1;
+    }
+
+    // The directory watched for changes: the one set, else the source's directory.
+    static char *zr_watch_dir(ZrReloader *r)
+    {
+        if (r->watch_dir) return zr_strdup(r->watch_dir);
+        char *dir = zr_strdup(r->source);
+        char *slash = strrchr(dir, '/');
+        if (slash) *slash = 0;
+        else zr_set(&dir, ".");
+        return dir;
+    }
+
+    static int64_t zr_newest(ZrReloader *r)
+    {
+        char *dir = zr_watch_dir(r);
+        int64_t newest = zr_newest_zc(dir, 0);
+        free(dir);
+        return newest;
+    }
+
+    // The old versions kept, and their memory when known.
+    static void zr_report_kept(ZrReloader *r)
+    {
+        size_t bytes = 0;
+        int known = 1;
+        for (int i = 0; i < r->old_count; i++)
+        {
+            if (r->old[i].mem_size == 0) known = 0;
+            bytes += r->old[i].mem_size;
+        }
+        if (r->old_count == 0) return;
+        if (known)
+        {
+            fprintf(stderr, "reload: %d old version%s kept loaded (%zu KB)\n", r->old_count,
+                    r->old_count == 1 ? "" : "s", bytes / 1024);
+        }
+        else
+        {
+            fprintf(stderr, "reload: %d old version%s kept loaded\n", r->old_count,
+                    r->old_count == 1 ? "" : "s");
+        }
+    }
+
+    static int zr_build(void *h)
+    {
+        ZrReloader *r = (ZrReloader *)h;
+        r->seen = zr_newest(r);
+        double t0 = zr_now_ms();
+
+        size_t len = strlen(r->zc) + strlen(r->source) + strlen(r->c_file) +
+                     (r->zc_flags ? strlen(r->zc_flags) : 0) + 64;
+        char *cmd = (char *)malloc(len);
+        if (!cmd) return 0;
+        snprintf(cmd, len, "\"%s\" transpile --cc tcc -q %s \"%s\" -o \"%s\" 1>&2", r->zc,
+                 r->zc_flags ? r->zc_flags : "", r->source, r->c_file);
+        int rc = system(cmd);
+        free(cmd);
+        if (rc != 0)
+        {
+            fprintf(stderr, "reload: %s did not build%s\n", r->source,
+                    r->current.tcc ? "; still running the previous version" : "");
+            return 0;
+        }
+        double t1 = zr_now_ms();
+
+        ZrVersion next;
+        memset(&next, 0, sizeof(next));
+        next.tcc = tcc_new();
+        if (!next.tcc) return 0;
+        tcc_set_error_func(next.tcc, NULL, zr_on_tcc_error);
+        tcc_set_output_type(next.tcc, TCC_OUTPUT_MEMORY);
+        for (int i = 0; i < r->include_count; i++) tcc_add_include_path(next.tcc, r->includes[i]);
+        if (tcc_add_file(next.tcc, r->c_file) == -1 || zr_relocate(&next) < 0)
+        {
+            zr_version_delete(&next);
+            fprintf(stderr, "reload: %s did not compile%s\n", r->c_file,
+                    r->current.tcc ? "; still running the previous version" : "");
+            return 0;
+        }
+
+        if (r->current.tcc)
+        {
+            if (r->keep_old)
+            {
+                if (r->old_count == r->old_cap)
+                {
+                    int cap = r->old_cap ? r->old_cap * 2 : 8;
+                    ZrVersion *grown = (ZrVersion *)realloc(r->old, (size_t)cap * sizeof(ZrVersion));
+                    if (!grown)
+                    {
+                        zr_version_delete(&next);
+                        return 0;
+                    }
+                    r->old = grown;
+                    r->old_cap = cap;
+                }
+                r->old[r->old_count++] = r->current;
+            }
+            else
+            {
+                zr_version_delete(&r->current);
+            }
+        }
+        r->current = next;
+        r->version++;
+        if (r->verbose)
+        {
+            fprintf(stderr, "reload: version %d of %s loaded (zc %.0f ms, tcc %.0f ms)\n",
+                    r->version, r->source, t1 - t0, zr_now_ms() - t1);
+            zr_report_kept(r);
+        }
+        return 1;
+    }
+
+    static int zr_poll(void *h)
+    {
+        ZrReloader *r = (ZrReloader *)h;
+        int64_t newest = zr_newest(r);
+        if (newest == r->seen) return 0;
+        if (r->verbose) fprintf(stderr, "reload: %s changed, rebuilding\n", r->source);
+        return zr_build(h);
+    }
+
+    static void *zr_symbol(void *h, const char *name)
+    {
+        ZrReloader *r = (ZrReloader *)h;
+        if (!r->current.tcc) return NULL;
+        return tcc_get_symbol(r->current.tcc, name);
+    }
+
+    static int zr_version(void *h) { return ((ZrReloader *)h)->version; }
+    static int zr_kept(void *h) { return ((ZrReloader *)h)->old_count; }
+
+    static void zr_free(void *h)
+    {
+        ZrReloader *r = (ZrReloader *)h;
+        if (!r) return;
+        for (int i = 0; i < r->old_count; i++) zr_version_delete(&r->old[i]);
+        free(r->old);
+        zr_version_delete(&r->current);
+        for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
+        free(r->zc);
+        free(r->zc_flags);
+        free(r->source);
+        free(r->c_file);
+        free(r->watch_dir);
+        free(r);
+    }
+}
+
+extern fn zr_new(source: const char*, c_file: const char*) -> void*;
+extern fn zr_set_zc(h: void*, zc: const char*);
+extern fn zr_set_zc_flags(h: void*, flags: const char*);
+extern fn zr_set_source(h: void*, source: const char*);
+extern fn zr_set_watch(h: void*, dir: const char*);
+extern fn zr_set_keep_old(h: void*, keep: c_int);
+extern fn zr_set_verbose(h: void*, verbose: c_int);
+extern fn zr_add_include(h: void*, dir: const char*) -> c_int;
+extern fn zr_build(h: void*) -> c_int;
+extern fn zr_poll(h: void*) -> c_int;
+extern fn zr_symbol(h: void*, name: const char*) -> void*;
+extern fn zr_version(h: void*) -> c_int;
+extern fn zr_kept(h: void*) -> c_int;
+extern fn zr_free(h: void*);
+
+/// A module rebuilt from Zen C source and reloaded into this process. See the top of
+/// std/reload.zc.
+struct Reloader {
+    handle: void*;
+}
+
+impl Reloader {
+    /// A reloader for the module whose root file is `source`; its C goes to `c_file`.
+    /// Nothing is built until build() or poll().
+    fn new(source: const char*, c_file: const char*) -> Reloader {
+        return Reloader { handle: zr_new(source, c_file) };
+    }
+
+    /// The zc to run (default "zc", found on PATH).
+    fn set_zc(self, zc: const char*) { zr_set_zc(self.handle, zc); }
+
+    /// More flags for `zc transpile`, as one string (for example "-D DEV").
+    fn set_zc_flags(self, flags: const char*) { zr_set_zc_flags(self.handle, flags); }
+
+    /// Build a different root file from now on.
+    fn set_source(self, source: const char*) { zr_set_source(self.handle, source); }
+
+    /// The directory whose .zc files (searched recursively) are watched by poll(). By
+    /// default, the source's directory.
+    fn watch(self, dir: const char*) { zr_set_watch(self.handle, dir); }
+
+    /// Keep old versions loaded until free() (the default), or delete each when the next
+    /// one loads.
+    fn keep_old(self, keep: bool) { zr_set_keep_old(self.handle, keep ? 1 : 0); }
+
+    /// Print a line for each version loaded (the default) or not. Errors are always printed.
+    fn verbose(self, on: bool) { zr_set_verbose(self.handle, on ? 1 : 0); }
+
+    /// A directory for the C compiler to search for the module's #includes.
+    fn add_include(self, dir: const char*) -> bool { return zr_add_include(self.handle, dir) != 0; }
+
+    /// Build now. True if a new version was loaded; on failure, the errors are printed and
+    /// the version already loaded, if any, stays in use.
+    fn build(self) -> bool { return zr_build(self.handle) != 0; }
+
+    /// Build if any watched .zc file changed since the last build. True if a new version
+    /// was loaded. Call it when none of the module's code is running.
+    fn poll(self) -> bool { return zr_poll(self.handle) != 0; }
+
+    /// The address of `name` in the version loaded now, or NULL. Look again after a
+    /// build() or poll() that returned true.
+    fn symbol(self, name: const char*) -> void* { return zr_symbol(self.handle, name); }
+
+    /// How many versions have been loaded.
+    fn version(self) -> int { return (int)zr_version(self.handle); }
+
+    /// How many old versions are kept loaded.
+    fn kept(self) -> int { return (int)zr_kept(self.handle); }
+
+    /// Delete every version and the reloader.
+    fn free(self) {
+        zr_free(self.handle);
+        self.handle = NULL;
+    }
+}
