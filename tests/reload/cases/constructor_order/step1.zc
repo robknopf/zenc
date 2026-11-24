@@ -1,0 +1,13 @@
+// Constructors and destructors run in the order a normal build of the same file runs them.
+@constructor
+fn first() { println "constructor first"; }
+@constructor
+fn second() { println "constructor second"; }
+@destructor
+fn first_down() { println "destructor first"; }
+@destructor
+fn second_down() { println "destructor second"; }
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "step";
+}

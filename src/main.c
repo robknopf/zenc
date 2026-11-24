@@ -296,6 +296,16 @@ int main(int argc, char **argv)
             zvec_push_Str(&cfg->cfg_defines, xstrdup("misra"));
             zvec_push_Str(&cfg->cfg_defines, xstrdup("ZC_MISRA"));
         }
+        else if (strcmp(arg, "--reload") == 0)
+        {
+            // A module for a reload host, which compiles it with libtcc: tcc's C unless --cc
+            // says otherwise.
+            cfg->reload_mode = 1;
+            if (!cfg->cc[0] || strcmp(cfg->cc, "gcc") == 0)
+            {
+                snprintf(cfg->cc, sizeof(cfg->cc), "tcc");
+            }
+        }
         else if (strcmp(arg, "--backend") == 0 && i + 1 < argc)
         {
             cfg->backend_name = argv[++i];

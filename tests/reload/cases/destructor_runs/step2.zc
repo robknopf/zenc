@@ -1,0 +1,14 @@
+// A version's @destructor runs when the next version replaces it (before the new one's
+// @constructor) and, for the last version, when the host is done with it.
+@constructor
+fn setup() {
+    println "setup version 2";
+}
+@destructor
+fn teardown() {
+    println "teardown version 2";
+}
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "step";
+}

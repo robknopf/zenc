@@ -62,6 +62,9 @@ typedef struct CompilerConfig
     int warn_as_errors;
     int no_suppress_warnings;
     int misra_mode;
+    /// 1 = the C is a module for a reload host (--reload): constructors and destructors run
+    /// only when the host calls _zc_module_init and _zc_module_fini.
+    int reload_mode;
     ZcProfile profile;
     int misra_output; ///< 1 = prefer MISRA-conforming generated C.
     uint64_t diag_mask;

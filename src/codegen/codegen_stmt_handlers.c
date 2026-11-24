@@ -155,8 +155,13 @@ void handle_node_function(ParserContext *ctx, ASTNode *node)
 
     // Emit GCC attributes before function
     {
-        int has_attrs = node->func.constructor || node->func.destructor || node->func.noinline ||
-                        node->func.unused || node->func.weak || node->func.cold || node->func.hot ||
+        // A reload module's constructors and destructors are run by _zc_module_init and
+        // _zc_module_fini, which the host calls; C's own attributes would run them a second
+        // time wherever the module is loaded with a loader that honours them.
+        int ctor = node->func.constructor && !ctx->config->reload_mode;
+        int dtor = node->func.destructor && !ctx->config->reload_mode;
+        int has_attrs = ctor || dtor || node->func.noinline || node->func.unused ||
+                        node->func.weak || node->func.cold || node->func.hot ||
                         node->func.noreturn || node->func.pure || node->func.section ||
                         node->func.is_export;
         if (has_attrs)
@@ -171,8 +176,8 @@ void handle_node_function(ParserContext *ctx, ASTNode *node)
         EMIT(ctx, name);                                                                           \
         first = 0;                                                                                 \
     }
-            EMIT_ATTR(node->func.constructor, "constructor");
-            EMIT_ATTR(node->func.destructor, "destructor");
+            EMIT_ATTR(ctor, "constructor");
+            EMIT_ATTR(dtor, "destructor");
             EMIT_ATTR(node->func.noinline, "noinline");
             EMIT_ATTR(node->func.unused, "unused");
             EMIT_ATTR(node->func.weak, "weak");

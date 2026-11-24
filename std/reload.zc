@@ -11,8 +11,12 @@
 //     ...
 //     code.free();
 //
-// A build runs `zc transpile --cc tcc` on the source, then compiles the C in memory. If
+// A build runs `zc transpile --reload` on the source, then compiles the C in memory. If
 // either fails, the errors are printed and the version already loaded stays in use.
+//
+// The module's @constructor functions run when a version is loaded, and its @destructor
+// functions when it is replaced by the next (before that one's constructors) and at free(),
+// as they would at the start and end of a program.
 //
 // Old versions stay loaded, by default until free(): a trait object, a function pointer or
 // a string literal that the host kept from an old version still points into its memory,
@@ -160,6 +164,14 @@ raw {
     // Deletes a version. With libtcc 0.9.27 its memory is first filled with 0xCC (x86's
     // breakpoint instruction), so anything still using it fails at once instead of reading
     // what happens to be left in freed memory.
+    // Runs a version's _zc_module_init or _zc_module_fini (from zc --reload), if it has one.
+    static void zr_version_call(ZrVersion *v, const char *name)
+    {
+        if (!v->tcc) return;
+        void (*fn)(void) = (void (*)(void))tcc_get_symbol(v->tcc, name);
+        if (fn) fn();
+    }
+
     static void zr_version_delete(ZrVersion *v)
     {
         if (v->tcc) tcc_delete(v->tcc);
@@ -257,7 +269,7 @@ raw {
                      (r->zc_flags ? strlen(r->zc_flags) : 0) + 64;
         char *cmd = (char *)malloc(len);
         if (!cmd) return 0;
-        snprintf(cmd, len, "\"%s\" transpile --cc tcc -q %s \"%s\" -o \"%s\" 1>&2", r->zc,
+        snprintf(cmd, len, "\"%s\" transpile --reload -q %s \"%s\" -o \"%s\" 1>&2", r->zc,
                  r->zc_flags ? r->zc_flags : "", r->source, r->c_file);
         int rc = system(cmd);
         free(cmd);
@@ -284,22 +296,28 @@ raw {
             return 0;
         }
 
+        // Room to keep the version being replaced, before anything about it changes.
+        if (r->current.tcc && r->keep_old && r->old_count == r->old_cap)
+        {
+            int cap = r->old_cap ? r->old_cap * 2 : 8;
+            ZrVersion *grown = (ZrVersion *)realloc(r->old, (size_t)cap * sizeof(ZrVersion));
+            if (!grown)
+            {
+                zr_version_delete(&next);
+                fprintf(stderr, "reload: out of memory; still running the previous version\n");
+                return 0;
+            }
+            r->old = grown;
+            r->old_cap = cap;
+        }
+
+        // The version being replaced stops being the program's code here, though it may stay
+        // loaded: its destructors run now, then the new version's constructors.
         if (r->current.tcc)
         {
+            zr_version_call(&r->current, "_zc_module_fini");
             if (r->keep_old)
             {
-                if (r->old_count == r->old_cap)
-                {
-                    int cap = r->old_cap ? r->old_cap * 2 : 8;
-                    ZrVersion *grown = (ZrVersion *)realloc(r->old, (size_t)cap * sizeof(ZrVersion));
-                    if (!grown)
-                    {
-                        zr_version_delete(&next);
-                        return 0;
-                    }
-                    r->old = grown;
-                    r->old_cap = cap;
-                }
                 r->old[r->old_count++] = r->current;
             }
             else
@@ -309,6 +327,7 @@ raw {
         }
         r->current = next;
         r->version++;
+        zr_version_call(&r->current, "_zc_module_init");
         if (r->verbose)
         {
             fprintf(stderr, "reload: version %d of %s loaded (zc %.0f ms, tcc %.0f ms)\n",
@@ -341,6 +360,7 @@ raw {
     {
         ZrReloader *r = (ZrReloader *)h;
         if (!r) return;
+        zr_version_call(&r->current, "_zc_module_fini");
         for (int i = 0; i < r->old_count; i++) zr_version_delete(&r->old[i]);
         free(r->old);
         zr_version_delete(&r->current);

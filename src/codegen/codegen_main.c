@@ -725,6 +725,69 @@ static void flatten_comptime_nodes(ASTNode *node)
 }
 
 // Main entry point for code generation.
+// A function @constructor or @destructor would mark, if it is emitted at all.
+static int reload_hook(ASTNode *f, int destructor)
+{
+    if (f->kind != NODE_FUNCTION || !f->func.body || f->func.generic_params)
+    {
+        return 0;
+    }
+    return destructor ? f->func.destructor : f->func.constructor;
+}
+
+static void emit_reload_call(ParserContext *ctx, ASTNode *f)
+{
+    const char *name = f->link_name ? f->link_name : f->func.name;
+    if (f->cfg_condition)
+    {
+        EMIT(ctx, "#if %s\n", f->cfg_condition);
+    }
+    EMIT(ctx, "    %s();\n", name);
+    if (f->cfg_condition)
+    {
+        EMIT(ctx, "#endif\n");
+    }
+}
+
+// --reload: what C's constructor and destructor attributes would do, for a host to call
+// after loading the module and before unloading it. The order is a normal build's: the
+// constructors in the order the C has them, and the destructors in the reverse order, as
+// .init_array and .fini_array run.
+static void emit_reload_entry_points(ParserContext *ctx, ASTNode *funcs)
+{
+    EMIT(ctx, "\nvoid _zc_module_init(void)\n{\n");
+    for (ASTNode *f = funcs; f; f = f->next)
+    {
+        if (reload_hook(f, 0))
+        {
+            emit_reload_call(ctx, f);
+        }
+    }
+    EMIT(ctx, "}\n");
+
+    int count = 0;
+    for (ASTNode *f = funcs; f; f = f->next)
+    {
+        count += reload_hook(f, 1) ? 1 : 0;
+    }
+    ASTNode **dtors = count ? xmalloc(sizeof(ASTNode *) * (size_t)count) : NULL;
+    int n = 0;
+    for (ASTNode *f = funcs; f; f = f->next)
+    {
+        if (reload_hook(f, 1))
+        {
+            dtors[n++] = f;
+        }
+    }
+    EMIT(ctx, "\nvoid _zc_module_fini(void)\n{\n");
+    while (n > 0)
+    {
+        emit_reload_call(ctx, dtors[--n]);
+    }
+    EMIT(ctx, "}\n");
+    zfree(dtors);
+}
+
 void codegen_c_program(ParserContext *ctx, ASTNode *node)
 {
     // Flatten any NODE_COMPTIME blocks into their generated AST nodes
@@ -1215,6 +1278,11 @@ void codegen_c_program(ParserContext *ctx, ASTNode *node)
         if (!has_user_main && test_count > 0)
         {
             EMIT(ctx, "\nint main() { return _z_run_tests(); }\n");
+        }
+
+        if (ctx->config->reload_mode)
+        {
+            emit_reload_entry_points(ctx, merged_funcs);
         }
 
         if (ctx->config->use_cpp && !ctx->config->use_cuda && !ctx->config->use_objc)

@@ -310,6 +310,30 @@ else
     check "emit-c #line of an imported method names the imported file" 0
 fi
 
+# --- --reload ------------------------------------------------------------
+
+# A module for a reload host: its constructors and destructors become calls in
+# _zc_module_init and _zc_module_fini (a @cfg one under its #if), and C's own
+# attributes are left off. Without --reload, nothing of that is emitted.
+printf '@constructor\nfn up() { }\n@cfg(RELOAD_X)\n@constructor\nfn up_x() { }\n@destructor\nfn down() { }\nfn main() { }\n' > "$workdir/reload_mod.zc"
+"$ZC" transpile --reload -q "$workdir/reload_mod.zc" -o "$workdir/reload_mod.c" >/dev/null 2>&1
+init=$(sed -n '/^void _zc_module_init(void)$/,/^}$/p' "$workdir/reload_mod.c" 2>/dev/null)
+fini=$(sed -n '/^void _zc_module_fini(void)$/,/^}$/p' "$workdir/reload_mod.c" 2>/dev/null)
+if echo "$init" | grep -q '^    up();$' && echo "$init" | grep -q '^#if defined(ZC_CFG_RELOAD_X)$' &&
+    echo "$fini" | grep -q '^    down();$' &&
+    ! grep -q '__attribute__((constructor\|__attribute__((destructor' "$workdir/reload_mod.c"; then
+    check "--reload runs constructors and destructors from _zc_module_init/_fini" 1
+else
+    check "--reload runs constructors and destructors from _zc_module_init/_fini" 0
+fi
+"$ZC" transpile -q "$workdir/reload_mod.zc" -o "$workdir/plain_mod.c" >/dev/null 2>&1
+if grep -q '__attribute__((constructor' "$workdir/plain_mod.c" &&
+    ! grep -q '_zc_module_init' "$workdir/plain_mod.c"; then
+    check "without --reload, constructors keep their C attribute" 1
+else
+    check "without --reload, constructors keep their C attribute" 0
+fi
+
 # --- Deeply nested imports -----------------------------------------------
 
 # A chain of imports (d0 imports d1, which imports d2...) puts the parser on the
