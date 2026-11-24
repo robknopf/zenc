@@ -799,15 +799,10 @@ void instantiate_generic(ParserContext *ctx, const char *tpl, const char *arg,
     strcat(m, clean_arg);
     zfree(clean_arg);
 
-    Instantiation *c = ctx->instantiations;
-    while (c)
+    if (instantiation_find(ctx, m))
     {
-        if (strcmp(c->name, m) == 0)
-        {
-            zfree(m);
-            return; // Already instantiated, DO NOTHING.
-        }
-        c = c->next;
+        zfree(m);
+        return; // Already instantiated, DO NOTHING.
     }
 
     GenericTemplate *t = ctx->templates;
@@ -834,6 +829,7 @@ void instantiate_generic(ParserContext *ctx, const char *tpl, const char *arg,
     ni->struct_node = NULL;                           // Placeholder to break cycles
     ni->next = ctx->instantiations;
     ctx->instantiations = ni;
+    instantiation_added(ctx, ni);
     type_name_note(ctx, ni->name);
 
     ASTNode *struct_node_copy = NULL;
@@ -1001,15 +997,10 @@ void instantiate_generic_multi(ParserContext *ctx, const char *tpl, char **args,
     }
 
     // Check if already instantiated
-    Instantiation *c = ctx->instantiations;
-    while (c)
+    if (instantiation_find(ctx, m))
     {
-        if (strcmp(c->name, m) == 0)
-        {
-            zfree(m);
-            return; // Already done
-        }
-        c = c->next;
+        zfree(m);
+        return; // Already done
     }
 
     // Find the template
@@ -1055,6 +1046,7 @@ void instantiate_generic_multi(ParserContext *ctx, const char *tpl, char **args,
     ni->struct_node = NULL;
     ni->next = ctx->instantiations;
     ctx->instantiations = ni;
+    instantiation_added(ctx, ni);
     type_name_note(ctx, ni->name);
 
     if (t->struct_node->kind == NODE_STRUCT)
