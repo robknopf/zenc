@@ -1,0 +1,29 @@
+// What moving does with fields whose type or shape changed: numbers converted, arrays
+// grown or shrunk, a renamed field dropped and added, a stored enum variant that is gone
+// not carried, a field retyped to a struct not carried. The reload lists each.
+enum Mode { Walk, Run, Fly }
+struct Pos { x: int; }
+struct State {
+    set: bool;
+    count: int;
+    ratio: f32;
+    grow: int[2];
+    shrink: int[4];
+    old_name: int;
+    mode: Mode;
+    where: int;
+}
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if !state.set {
+        state.set = true;
+        state.count = 7;
+        state.ratio = 1.5;
+        state.grow[0] = 1; state.grow[1] = 2;
+        state.shrink[0] = 1; state.shrink[1] = 2; state.shrink[2] = 3; state.shrink[3] = 4;
+        state.old_name = 9;
+        state.mode = Mode::Fly;
+        state.where = 5;
+    }
+    println "count {state.count} ratio {state.ratio} grow {state.grow[0]}{state.grow[1]} shrink {state.shrink[0]}{state.shrink[1]}{state.shrink[2]}{state.shrink[3]} old_name {state.old_name}";
+}

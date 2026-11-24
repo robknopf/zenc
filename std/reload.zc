@@ -2020,7 +2020,8 @@ impl Reloader {
         return zr_require_same(self.handle, type_name) != 0;
     }
 
-    /// How many builds were not loaded because of require_same().
+    /// How many builds were not loaded because their state couldn't be moved (or a type
+    /// given to require_same() changed). See HOT_RELOAD.md, "What a reload refuses".
     fn refused(self) -> int { return (int)zr_refused(self.handle); }
 
     /// Build now. True if a new version was loaded; on failure, the errors are printed and

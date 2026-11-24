@@ -1,0 +1,23 @@
+// What moving does with fields whose type or shape changed: numbers converted, arrays
+// grown or shrunk, a renamed field dropped and added, a stored enum variant that is gone
+// not carried, a field retyped to a struct not carried. The reload lists each.
+// count: int to f64; ratio: f32 to f64; grow: 2 to 4 elements; shrink: 4 to 2; old_name
+// renamed new_name; Fly removed from Mode; where: int to Pos.
+enum Mode { Walk, Run }
+struct Pos { x: int; }
+struct State {
+    set: bool;
+    count: f64;
+    ratio: f64;
+    grow: int[4];
+    shrink: int[2];
+    new_name: int;
+    mode: Mode;
+    where: Pos;
+}
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    let mode = 0;
+    match state.mode { Mode::Walk => { mode = 1; }, Mode::Run => { mode = 2; }, }
+    println "count {state.count} ratio {state.ratio} grow {state.grow[0]}{state.grow[1]}{state.grow[2]}{state.grow[3]} shrink {state.shrink[0]}{state.shrink[1]} new_name {state.new_name} mode {mode} where {state.where.x}";
+}

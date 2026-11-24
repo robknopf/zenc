@@ -1,0 +1,8 @@
+--- step 1
+count 7 ratio 1.500000 grow 12 shrink 1234 old_name 9
+--- step 2
+reload: changes in version 2:
+reload:   Mode: Fly removed
+reload:   State: size 48 -> 64 bytes, alignment 4 -> 8, count retyped from int32_t to double, count moved from byte 4 to 8, ratio retyped from float to double, ratio moved from byte 8 to 16, grow retyped from int32_t[2] to int32_t[4], grow moved from byte 12 to 24, shrink retyped from int32_t[4] to int32_t[2], shrink moved from byte 20 to 40, new_name added at byte 48, mode moved from byte 40 to 52, where retyped from int32_t to Pos, where moved from byte 44 to 56, old_name removed
+reload: moved the state (State) to the new layout: count converted from int32_t to double, ratio converted from float to double, grow now has 4 elements (was 2), shrink now has 2 elements (was 4), new_name added, mode was Fly, which is gone; not carried, where retyped from int32_t to Pos, not carried, old_name dropped
+count 7.000000 ratio 1.500000 grow 1200 shrink 12 new_name 0 mode 1 where 0
