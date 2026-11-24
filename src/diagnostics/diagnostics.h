@@ -146,6 +146,8 @@ typedef struct ZenDiagnostic
     Token token;              ///< Where it happened (TOKEN_UNKNOWN if nowhere).
     const char *message;      ///< The formatted message.
     const char *const *hints; ///< NULL, or a NULL-terminated array of hints.
+    Token related;            ///< A second location the diagnostic refers to (if related_message).
+    const char *related_message; ///< What `related` is (e.g. "Previous declaration"), or NULL.
 } ZenDiagnostic;
 
 /**

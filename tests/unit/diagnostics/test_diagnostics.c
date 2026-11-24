@@ -71,7 +71,7 @@ UTEST(diag_render_text, error_with_position_and_hints)
     t.col = 9;
     t.file = "demo.zc";
     const char *hints[] = {"first hint", "second hint", NULL};
-    ZenDiagnostic d = {1, 1, DIAG_NONE, t, "Something went wrong", hints};
+    ZenDiagnostic d = {1, 1, DIAG_NONE, t, "Something went wrong", hints, TOKEN_UNKNOWN, NULL};
 
     char out[1024];
     render_text(&d, out, sizeof(out));
@@ -92,7 +92,7 @@ UTEST(diag_render_text, warning_without_position)
     Token t = {0};
     t.file = "demo.zc";
     const char *hints[] = {"a note", NULL};
-    ZenDiagnostic d = {0, 0, DIAG_NONE, t, "Something looks odd", hints};
+    ZenDiagnostic d = {0, 0, DIAG_NONE, t, "Something looks odd", hints, TOKEN_UNKNOWN, NULL};
 
     char out[1024];
     render_text(&d, out, sizeof(out));
@@ -148,7 +148,7 @@ UTEST(diag_render_json, error_with_hints)
     t.col = 9;
     t.file = "demo.zc";
     const char *hints[] = {"first hint", "second hint", NULL};
-    ZenDiagnostic d = {1, 1, DIAG_NONE, t, "Something went wrong", hints};
+    ZenDiagnostic d = {1, 1, DIAG_NONE, t, "Something went wrong", hints, TOKEN_UNKNOWN, NULL};
 
     char out[1024];
     render_json(&d, out, sizeof(out));
@@ -165,7 +165,7 @@ UTEST(diag_render_json, warning_with_a_code)
     t.line = 4;
     t.col = 1;
     t.file = "demo.zc";
-    ZenDiagnostic d = {0, 0, DIAG_UNUSED_VAR, t, "Unused variable 'x'", NULL};
+    ZenDiagnostic d = {0, 0, DIAG_UNUSED_VAR, t, "Unused variable 'x'", NULL, TOKEN_UNKNOWN, NULL};
 
     char out[1024];
     render_json(&d, out, sizeof(out));

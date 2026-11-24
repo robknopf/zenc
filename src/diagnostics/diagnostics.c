@@ -102,6 +102,11 @@ void diag_render_text(void *data, const ZenDiagnostic *d)
         fprintf(out, COLOR_CYAN "   = %s: " COLOR_RESET "%s\n", kind, *h);
         h++;
     }
+    if (d->related_message)
+    {
+        fprintf(out, COLOR_CYAN "   = note: " COLOR_RESET "%s at %s:%d:%d\n", d->related_message,
+                d->related.file, d->related.line, d->related.col);
+    }
 }
 
 // Prints a diagnostic as one JSON line to `data`, a FILE * (stderr when NULL), for tools
@@ -126,6 +131,15 @@ void diag_render_json(void *data, const ZenDiagnostic *d)
     {
         cJSON_AddStringToObject(root, "suggestion", joined_hints);
     }
+    if (d->related_message)
+    {
+        cJSON *related = cJSON_CreateObject();
+        cJSON_AddStringToObject(related, "file", d->related.file);
+        cJSON_AddNumberToObject(related, "line", d->related.line);
+        cJSON_AddNumberToObject(related, "col", d->related.col);
+        cJSON_AddStringToObject(related, "message", d->related_message);
+        cJSON_AddItemToObject(root, "related", related);
+    }
 
     char *json = cJSON_PrintUnformatted(root);
     fprintf(out, "%s\n", json);
@@ -136,8 +150,8 @@ void diag_render_json(void *data, const ZenDiagnostic *d)
 // The single path of every diagnostic: silence, count, hand it to the compiler's consumer
 // (or print it as text if there is none) and, for a fatal error, mark had_error when
 // recovering or stop. `hints` is NULL or a NULL-terminated array.
-static void diag_emit(int is_error, int fatal, int diag_id, Token t, const char *msg,
-                      const char *const *hints)
+static void diag_emit_related(int is_error, int fatal, int diag_id, Token t, const char *msg,
+                              const char *const *hints, Token related, const char *related_message)
 {
     ParserContext *pctx = d_ctx.parser_ctx;
     if (is_error && pctx && pctx->suppress_errors)
@@ -162,7 +176,12 @@ static void diag_emit(int is_error, int fatal, int diag_id, Token t, const char 
         diag_compiler()->warning_count++;
     }
 
-    ZenDiagnostic d = {is_error, fatal, diag_id, t, msg, hints};
+    // A related location is only kept when it can be shown (built-ins have none).
+    if (!related.file || related.line <= 0)
+    {
+        related_message = NULL;
+    }
+    ZenDiagnostic d = {is_error, fatal, diag_id, t, msg, hints, related, related_message};
 
     ZenCompiler *compiler = diag_compiler();
     if (compiler->diag_consumer)
@@ -183,6 +202,12 @@ static void diag_emit(int is_error, int fatal, int diag_id, Token t, const char 
     {
         exit(1);
     }
+}
+
+static void diag_emit(int is_error, int fatal, int diag_id, Token t, const char *msg,
+                      const char *const *hints)
+{
+    diag_emit_related(is_error, fatal, diag_id, t, msg, hints, TOKEN_UNKNOWN, NULL);
 }
 
 void zfatal(const char *fmt, ...)
@@ -306,16 +331,9 @@ void warn_shadowing(Token t, const char *var_name, Token prev)
     char msg[MAX_SHORT_MSG_LEN];
     snprintf(msg, sizeof(msg), "Variable '%s' shadows a previous declaration", var_name);
 
-    // Say where the shadowed declaration is, when it has a location (built-ins have none).
-    char where[MAX_PATH_LEN + 64];
-    where[0] = 0;
-    if (prev.file && prev.line > 0)
-    {
-        snprintf(where, sizeof(where), "Previous declaration is at %s:%d:%d", prev.file, prev.line,
-                 prev.col);
-    }
-    const char *hints[] = {"This can lead to confusion", where[0] ? where : NULL, NULL};
-    diag_emit(0, 0, DIAG_NONE, t, msg, hints);
+    // Say where the shadowed declaration is: a note in text, a related location for tools.
+    const char *hints[] = {"This can lead to confusion", NULL};
+    diag_emit_related(0, 0, DIAG_NONE, t, msg, hints, prev, "Previous declaration");
 }
 
 void warn_comparison_always_true(Token t, const char *reason)

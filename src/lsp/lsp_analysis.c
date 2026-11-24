@@ -22,6 +22,11 @@ typedef struct Diagnostic
     int severity;
     int id;
     char *message;
+    char *related_path;    ///< File of the related location, or NULL if there is none.
+    char *related_message; ///< What the related location is.
+    int related_line;
+    int related_col;
+    int related_len;
     struct Diagnostic *next;
 } Diagnostic;
 
@@ -54,7 +59,8 @@ static void send_json_response(cJSON *root)
 }
 
 // Appends a diagnostic to `data`, a DiagnosticList.
-static void diagnostic_list_add(void *data, Token t, int severity, const char *msg, int diag_id)
+static Diagnostic *diagnostic_list_add(void *data, Token t, int severity, const char *msg,
+                                       int diag_id)
 {
     DiagnosticList *list = (DiagnosticList *)data;
     Diagnostic *d = calloc(1, sizeof(Diagnostic));
@@ -76,6 +82,7 @@ static void diagnostic_list_add(void *data, Token t, int severity, const char *m
         list->tail->next = d;
         list->tail = d;
     }
+    return d;
 }
 
 // Consumer of the server's diagnostics. `data` is the DiagnosticList of the document
@@ -97,8 +104,16 @@ void lsp_diagnose_consumer(void *data, const ZenDiagnostic *d)
     {
         snprintf(msg, sizeof(msg), "%s", d->message);
     }
-    diagnostic_list_add(data, d->token, d->is_error ? LSP_SEVERITY_ERROR : LSP_SEVERITY_WARNING,
-                        msg, d->id);
+    Diagnostic *added = diagnostic_list_add(
+        data, d->token, d->is_error ? LSP_SEVERITY_ERROR : LSP_SEVERITY_WARNING, msg, d->id);
+    if (d->related_message)
+    {
+        added->related_path = xstrdup(d->related.file);
+        added->related_message = xstrdup(d->related_message);
+        added->related_line = d->related.line - 1;
+        added->related_col = d->related.col > 0 ? d->related.col - 1 : 0;
+        added->related_len = (int)(d->related.len);
+    }
 }
 
 void lsp_close_file(const char *uri)
@@ -198,6 +213,30 @@ void lsp_check_file(const char *uri, const char *json_src, int id)
             snprintf(code_str, sizeof(code_str), "W%d", d->id);
             cJSON_AddStringToObject(diag, "code", code_str);
         }
+        if (d->related_path)
+        {
+            // A location the client can jump to (e.g. the declaration that is shadowed).
+            char related_uri[MAX_PATH_LEN + 8];
+            snprintf(related_uri, sizeof(related_uri), "file://%s", d->related_path);
+            cJSON *r_start = cJSON_CreateObject();
+            cJSON_AddNumberToObject(r_start, "line", d->related_line);
+            cJSON_AddNumberToObject(r_start, "character", d->related_col);
+            cJSON *r_end = cJSON_CreateObject();
+            cJSON_AddNumberToObject(r_end, "line", d->related_line);
+            cJSON_AddNumberToObject(r_end, "character", d->related_col + d->related_len);
+            cJSON *r_range = cJSON_CreateObject();
+            cJSON_AddItemToObject(r_range, "start", r_start);
+            cJSON_AddItemToObject(r_range, "end", r_end);
+            cJSON *location = cJSON_CreateObject();
+            cJSON_AddStringToObject(location, "uri", related_uri);
+            cJSON_AddItemToObject(location, "range", r_range);
+            cJSON *info = cJSON_CreateObject();
+            cJSON_AddItemToObject(info, "location", location);
+            cJSON_AddStringToObject(info, "message", d->related_message);
+            cJSON *related = cJSON_CreateArray();
+            cJSON_AddItemToArray(related, info);
+            cJSON_AddItemToObject(diag, "relatedInformation", related);
+        }
 
         cJSON_AddItemToArray(diag_array, diag);
 
@@ -217,6 +256,8 @@ void lsp_check_file(const char *uri, const char *json_src, int id)
     {
         Diagnostic *next = cur->next;
         zfree(cur->message);
+        zfree(cur->related_path);
+        zfree(cur->related_message);
         zfree(cur);
         cur = next;
     }

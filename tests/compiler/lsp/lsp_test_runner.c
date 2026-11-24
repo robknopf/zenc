@@ -1937,6 +1937,14 @@ static void test_shadow_warning_location(void)
         printf("diagnostics: %s\n", diagnostics);
         fail("Shadowing a global of another file was not reported at the shadowing names");
     }
+    // The shadowed declaration is a related location the client can jump to.
+    if (!strstr(diagnostics, "relatedInformation") ||
+        !strstr(diagnostics, "file:///tmp/zc_lsp_shadow/globals.zc") ||
+        !strstr(diagnostics, "Previous declaration"))
+    {
+        printf("diagnostics: %s\n", diagnostics);
+        fail("The shadowing warning does not point at the shadowed declaration");
+    }
     free(diagnostics);
 
     diagnostics = open_and_get_diagnostics(1402, "same.zc", same_src);
