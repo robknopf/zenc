@@ -1,0 +1,96 @@
+#!/bin/bash
+# Hot reload tests: each case in tests/reload/cases/ is a sequence of module versions
+# (step1.zc, step2.zc, ...) loaded one after another by tests/reload/host.c, with the
+# output compared to the case's `expected`.
+#
+# A case with an `xfail` file is known not to work yet; the file names the task that
+# should fix it (see the hot reload task list). It reports XFAIL, and XPASS when it
+# starts to pass, which means its xfail file can go. A case with a `keep-old` file is
+# run with the host keeping every previous module loaded.
+#
+# A step that does not build fails the case, even an xfail one, unless `expected` says it
+# does not build.
+#
+# Usage: tests/scripts/run_reload_tests.sh [ZC]   (default ./zc)
+# Env:   TCC_DIR=dir   a libtcc installed under dir/include and dir/lib (default: the
+#                      system's, or /usr/local's)
+# Skipped, successfully, when libtcc is not available.
+
+ZC="${1:-./zc}"
+ZC="$(cd "$(dirname "$ZC")" && pwd)/$(basename "$ZC")"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+CASES="$ROOT/tests/reload/cases"
+WORK="$(mktemp -d)"
+cd "$ROOT" || exit 1
+trap 'rm -rf "$WORK"' EXIT
+
+TCC_DIRS=""
+if [ -n "$TCC_DIR" ]; then
+    TCC_DIRS="-I$TCC_DIR/include -L$TCC_DIR/lib"
+elif [ -f /usr/local/lib/libtcc.a ]; then
+    TCC_DIRS="-I/usr/local/include -L/usr/local/lib"
+fi
+CC="${CC:-cc}"
+if ! printf '#include <libtcc.h>\nint main(void) { tcc_delete(tcc_new()); return 0; }\n' |
+    $CC -x c - -o "$WORK/probe" $TCC_DIRS -ltcc -ldl -lpthread -lm > /dev/null 2>&1; then
+    echo "Reload tests skipped: libtcc is not available"
+    exit 0
+fi
+if ! $CC -std=gnu11 -Wall -Wextra -Werror "$ROOT/tests/reload/host.c" $TCC_DIRS \
+    -ltcc -ldl -lpthread -lm -o "$WORK/host" 2> "$WORK/host_build.log"; then
+    echo "Reload tests: the host does not build"
+    sed 's/^/  /' "$WORK/host_build.log" | head -10
+    exit 1
+fi
+
+passed=0; failed=0; xfail=0; xpass=0
+failed_names=""
+for dir in "$CASES"/*/; do
+    name="$(basename "$dir")"
+    mkdir -p "$WORK/$name"
+    export ERR="$WORK/$name/err"
+    flag=""
+    [ -f "$dir/keep-old" ] && flag="--keep-old"
+    # A crash is the expected result of some xfail cases. The inner bash, which waits for
+    # the host instead of becoming it ("; exit"), reports it on its own stderr, discarded,
+    # so it does not appear in the output; the host's stderr still goes to err.
+    bash -c '"$@" 2> "$ERR"; exit $?' _ timeout 60 "$WORK/host" "$ZC" "$dir" "$WORK/$name" \
+        $flag > "$WORK/$name/out" 2> /dev/null
+    rc=$?
+    want_failed=$(grep -c "^(build failed" "$dir/expected")
+    got_failed=$(grep -c "^(build failed" "$WORK/$name/out")
+    if [ "$got_failed" -gt "$want_failed" ]; then
+        echo "  [FAIL] $name (a step did not build)"
+        sed 's/^/      stderr: /' "$WORK/$name/err" | head -10
+        failed=$((failed + 1))
+        failed_names="$failed_names $name"
+    elif [ $rc -eq 0 ] && diff -u "$dir/expected" "$WORK/$name/out" > "$WORK/$name/diff"; then
+        if [ -f "$dir/xfail" ]; then
+            echo "  [XPASS] $name (now passes: remove its xfail file; with libtcc 0.9.28 a" \
+                "dangling pointer can also pass by luck, see host.c)"
+            xpass=$((xpass + 1))
+        else
+            echo "  [PASS] $name"
+            passed=$((passed + 1))
+        fi
+    elif [ -f "$dir/xfail" ]; then
+        echo "  [XFAIL] $name: $(head -1 "$dir/xfail")"
+        xfail=$((xfail + 1))
+    else
+        echo "  [FAIL] $name (host exit $rc)"
+        diff -u "$dir/expected" "$WORK/$name/out" | sed 's/^/      /' | head -20
+        sed 's/^/      stderr: /' "$WORK/$name/err" | head -10
+        failed=$((failed + 1))
+        failed_names="$failed_names $name"
+    fi
+done
+
+echo "----------------------------------------"
+echo "Results (reload):"
+echo "-> Passed:  $passed"
+echo "-> Failed:  $failed"
+echo "-> Known not to work yet (XFAIL): $xfail"
+[ $xpass -ne 0 ] && echo "-> Unexpectedly passing (XPASS): $xpass"
+echo "----------------------------------------"
+[ $failed -ne 0 ] && { echo "Failed:$failed_names"; exit 1; }
+exit 0

@@ -1,0 +1,7 @@
+// A global keeps its value across a reload.
+let count: int = 0;
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    count = count + 1;
+    println "count {count}";
+}

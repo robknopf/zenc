@@ -1,0 +1,9 @@
+// A @constructor runs once each time the module is loaded, as it would at program start.
+@constructor
+fn setup() {
+    println "setup ran";
+}
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "step";
+}

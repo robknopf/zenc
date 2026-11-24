@@ -1,0 +1,17 @@
+// A trait object made by one version and kept in the host's block is called after a
+// reload. Its vtable is in the module that made it, so that module must still be loaded.
+trait Speak { fn speak(self) -> int; }
+struct Dog { n: int; }
+impl Speak for Dog { fn speak(self) -> int { println "dog version 2"; return self.n; } }
+struct State { dog: Dog; pet: Speak; made: bool; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if !state.made {
+        state.dog = Dog { n: 7 };
+        let dog: Dog* = &state.dog; // `state.pet = &state.dog` doesn't compile yet
+        state.pet = dog;
+        state.made = true;
+    }
+    let n = state.pet.speak();
+    println "speak returned {n}";
+}

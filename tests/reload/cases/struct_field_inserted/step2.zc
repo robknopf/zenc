@@ -1,0 +1,6 @@
+struct State { score: int; lives: int; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.lives == 0 { state.lives = 3; }
+    println "score {state.score} lives {state.lives}";
+}

@@ -1,0 +1,5 @@
+// The new code runs after a reload.
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "version 2";
+}

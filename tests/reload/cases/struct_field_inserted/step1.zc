@@ -1,0 +1,7 @@
+// A field keeps its value when another field is added before it.
+struct State { lives: int; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.lives == 0 { state.lives = 3; }
+    println "lives {state.lives}";
+}

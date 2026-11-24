@@ -1,0 +1,5 @@
+// A version that does not build leaves the previous one running.
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "version 1";
+}

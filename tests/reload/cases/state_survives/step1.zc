@@ -1,0 +1,7 @@
+// State in the host's block keeps its value while the code changes.
+struct State { count: int; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    state.count = state.count + 1;
+    println "count {state.count}";
+}

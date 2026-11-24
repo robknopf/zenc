@@ -1,0 +1,1 @@
+task 4: libtcc runs constructors only through tcc_run, and the host never calls it

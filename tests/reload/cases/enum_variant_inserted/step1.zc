@@ -1,0 +1,11 @@
+// A stored enum value keeps its meaning when a variant is added before it.
+enum Mode { Walk, Run }
+struct State { mode: Mode; set: bool; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if !state.set { state.mode = Mode::Run; state.set = true; }
+    match state.mode {
+        Mode::Walk => { println "walk"; },
+        Mode::Run => { println "run"; },
+    }
+}

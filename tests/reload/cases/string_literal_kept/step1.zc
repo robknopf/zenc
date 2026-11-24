@@ -1,0 +1,8 @@
+// A string literal from one version, kept in the host's block, is read after a reload.
+// The literal is in the module's memory, so that module must still be loaded.
+struct State { msg: string; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.msg == NULL { state.msg = "hello from version 1"; }
+    println "{state.msg}";
+}

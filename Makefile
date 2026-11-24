@@ -541,10 +541,15 @@ test: $(TARGET) $(PLUGINS)
 	./tests/scripts/run_example_build.sh $(filter %.zc,$(only))
 	./tests/scripts/run_repl_tests.sh
 	./tests/scripts/run_cli_tests.sh
+	./tests/scripts/run_reload_tests.sh
 	./tests/scripts/run_diagnostic_output_tests.sh
 	./tests/scripts/run_check_clean.sh
 	$(MAKE) test-unit
 	$(MAKE) test-misra
+
+# Hot reload of modules through libtcc (skipped without libtcc).
+test-reload: $(TARGET)
+	./tests/scripts/run_reload_tests.sh
 
 # Files that the full typechecker (`zc check`) must accept with no errors.
 test-check: $(TARGET)
