@@ -1,6 +1,6 @@
 // A minimal reload host for testing hot reload of Zen C modules.
 //
-// Usage: host ZC CASE_DIR WORK_DIR [--keep-old]
+// Usage: host ZC CASE_DIR WORK_DIR [--delete-old]
 //
 // Each CASE_DIR/stepN.zc (N = 1, 2, ...) is one version of the module, in order. For each
 // step the host transpiles it with `ZC transpile --cc tcc`, compiles the C in memory with
@@ -8,8 +8,12 @@
 // `state` is a zeroed block the host owns, the same one for every step.
 //
 // A step that fails to build is reported and the previous module is called again, as a
-// host keeps running the last good code. After a good build the previous module is deleted,
-// unless --keep-old is given.
+// host keeps running the last good code.
+//
+// Previous modules stay loaded until the host exits, so anything that still points into
+// one (a trait object's vtable, a string literal, a function pointer) keeps working, and
+// calls the old code. --delete-old deletes the previous module after each good build
+// instead, to show what that breaks.
 //
 // The host prints "--- step N" before each step, so the expected output shows which
 // module printed what.
@@ -122,13 +126,13 @@ int main(int argc, char **argv)
 {
     if (argc < 4)
     {
-        fprintf(stderr, "usage: host ZC CASE_DIR WORK_DIR [--keep-old]\n");
+        fprintf(stderr, "usage: host ZC CASE_DIR WORK_DIR [--delete-old]\n");
         return 2;
     }
     const char *zc = argv[1];
     const char *case_dir = argv[2];
     const char *work_dir = argv[3];
-    int keep_old = argc > 4 && strcmp(argv[4], "--keep-old") == 0;
+    int keep_old = !(argc > 4 && strcmp(argv[4], "--delete-old") == 0);
 
     setvbuf(stdout, NULL, _IONBF, 0); // the module's output and ours, in order
 

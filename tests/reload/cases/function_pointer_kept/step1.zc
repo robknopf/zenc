@@ -1,0 +1,11 @@
+// A function pointer from one version, kept in the host's block, is called after a reload.
+// It still calls that version's code, which must still be loaded.
+fn greet() {
+    println "greet version 1";
+}
+struct State { hook: fn*(); }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.hook == NULL { state.hook = greet; }
+    state.hook();
+}

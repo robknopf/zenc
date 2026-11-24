@@ -5,8 +5,8 @@
 #
 # A case with an `xfail` file is known not to work yet; the file names the task that
 # should fix it (see the hot reload task list). It reports XFAIL, and XPASS when it
-# starts to pass, which means its xfail file can go. A case with a `keep-old` file is
-# run with the host keeping every previous module loaded.
+# starts to pass, which means its xfail file can go. The host keeps every previous module
+# loaded; a case with a `delete-old` file is run with it deleting them instead.
 #
 # A step that does not build fails the case, even an xfail one, unless `expected` says it
 # does not build.
@@ -50,7 +50,7 @@ for dir in "$CASES"/*/; do
     mkdir -p "$WORK/$name"
     export ERR="$WORK/$name/err"
     flag=""
-    [ -f "$dir/keep-old" ] && flag="--keep-old"
+    [ -f "$dir/delete-old" ] && flag="--delete-old"
     # A crash is the expected result of some xfail cases. The inner bash, which waits for
     # the host instead of becoming it ("; exit"), reports it on its own stderr, discarded,
     # so it does not appear in the output; the host's stderr still goes to err.
