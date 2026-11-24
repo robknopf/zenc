@@ -297,7 +297,7 @@ void warn_unused_variable(Token t, const char *var_name)
     zwarn_with_suggestion(t, msg, "Consider removing it or prefixing with '_'");
 }
 
-void warn_shadowing(Token t, const char *var_name)
+void warn_shadowing(Token t, const char *var_name, Token prev)
 {
     if (!is_diag_enabled(DIAG_STYLE_SHADOWING))
     {
@@ -305,7 +305,17 @@ void warn_shadowing(Token t, const char *var_name)
     }
     char msg[MAX_SHORT_MSG_LEN];
     snprintf(msg, sizeof(msg), "Variable '%s' shadows a previous declaration", var_name);
-    zwarn_with_suggestion(t, msg, "This can lead to confusion");
+
+    // Say where the shadowed declaration is, when it has a location (built-ins have none).
+    char where[MAX_PATH_LEN + 64];
+    where[0] = 0;
+    if (prev.file && prev.line > 0)
+    {
+        snprintf(where, sizeof(where), "Previous declaration is at %s:%d:%d", prev.file, prev.line,
+                 prev.col);
+    }
+    const char *hints[] = {"This can lead to confusion", where[0] ? where : NULL, NULL};
+    diag_emit(0, 0, DIAG_NONE, t, msg, hints);
 }
 
 void warn_comparison_always_true(Token t, const char *reason)

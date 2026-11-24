@@ -79,7 +79,8 @@ void zwarn_with_suggestion_diag(int diag_id, Token t, const char *msg, const cha
 
 void warn_unused_variable(Token t, const char *var_name);
 void warn_unused_parameter(Token t, const char *param_name, const char *func_name);
-void warn_shadowing(Token t, const char *var_name);
+/** @brief `prev` is the shadowed declaration (TOKEN_UNKNOWN if it has no location). */
+void warn_shadowing(Token t, const char *var_name, Token prev);
 void warn_comparison_always_true(Token t, const char *reason);
 void warn_comparison_always_false(Token t, const char *reason);
 void warn_array_bounds(Token t, int index, int size);

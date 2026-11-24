@@ -122,7 +122,7 @@ void audit_section_5(ParserContext *ctx, Scope *scope, const char *name, const c
                 }
                 else
                 {
-                    warn_shadowing(tok, name);
+                    warn_shadowing(tok, name, sh->decl_token);
                 }
             }
 

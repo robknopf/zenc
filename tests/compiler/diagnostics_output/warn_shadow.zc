@@ -1,0 +1,12 @@
+// ARGS: check
+// A shadowing warning says where the shadowed declaration is.
+let counter: int = 0;
+
+fn bump(step: int) -> int {
+    let counter = step + 1;
+    return counter;
+}
+
+fn main() {
+    println "{bump(counter)}";
+}
