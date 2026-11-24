@@ -334,6 +334,81 @@ else
     check "without --reload, constructors keep their C attribute" 0
 fi
 
+# --reload also describes the module's types, for a reload host to compare versions:
+# _zc_manifest(). The numbers are the C compiler's, so the test compiles the module
+# and prints the tables.
+cat > "$workdir/manifest_mod.zc" <<'ZCEOF'
+enum Code { A = 5, B, C = 10 }
+enum Shape { Circle(f32), Rect(f32, f32), None }
+struct Vec2 { x: f32, y: f32 }
+struct Box<T> { v: T, n: int }
+struct Flags { a: u32 : 3, b: u32 : 5 }
+@cfg(RELOAD_NEVER_DEFINED) struct Hidden { q: i64 }
+struct State { pos: Vec2, code: Code, shape: Shape, b: Box<int>, flags: Flags, name: char[16] }
+fn tick(s: State*) -> int { return 0; }
+ZCEOF
+cat > "$workdir/manifest_print.c" <<'CEOF'
+#include <stdio.h>
+#include "manifest_mod.c"
+int main(void)
+{
+    const ZcManifest *m = _zc_manifest();
+    printf("format %u\n", m->format);
+    for (unsigned i = 0; i < m->ntypes; i++)
+    {
+        const ZcMfType *t = &m->types[i];
+        printf("%s (%s) kind %u size %u align %u\n", t->c_name, t->zc_name, t->kind, t->size,
+               t->align);
+        for (unsigned j = 0; j < t->nfields; j++)
+        {
+            printf("  %s: %s @%u size %u bits %u\n", t->fields[j].name, t->fields[j].type,
+                   t->fields[j].offset, t->fields[j].size, t->fields[j].bits);
+        }
+        for (unsigned j = 0; j < t->nvariants; j++)
+        {
+            printf("  %s = %lld %s\n", t->variants[j].name, t->variants[j].value,
+                   t->variants[j].payload ? t->variants[j].payload : "-");
+        }
+    }
+    return 0;
+}
+CEOF
+"$ZC" transpile --reload --cc "${CC:-cc}" -q "$workdir/manifest_mod.zc" \
+    -o "$workdir/manifest_mod.c" >/dev/null 2>&1
+out=$("${CC:-cc}" -w -I"$workdir" "$workdir/manifest_print.c" -o "$workdir/manifest_print" 2>&1 &&
+    "$workdir/manifest_print")
+manifest_ok=1
+for want in 'format 1' \
+    'Vec2 (Vec2) kind 1 size 8 align 4' '  x: float @0 size 4 bits 0' \
+    '  y: float @4 size 4 bits 0' 'Box__int32_t (Box<int32_t>) kind 1 size 8 align 4' \
+    'Code (Code) kind 3 size 4 align 4' '  A = 5 -' '  B = 6 -' '  C = 10 -' \
+    'Shape (Shape) kind 4 size 12 align 4' '  Circle = 0 float' \
+    '  Rect = 1 Tuple__float__float' '  None = 2 -' '  a: uint32_t @0 size 0 bits 3' \
+    '  b: uint32_t @0 size 0 bits 5' '  pos: Vec2 @0 size 8 bits 0' \
+    '  shape: Shape @12 size 12 bits 0' '  name: char[16] @36 size 16 bits 0'; do
+    if ! printf '%s\n' "$out" | grep -qxF -- "$want"; then
+        manifest_ok=0
+        echo "    missing: $want"
+    fi
+done
+if printf '%s\n' "$out" | grep -q '^Hidden '; then
+    manifest_ok=0
+    echo "    a type left out by @cfg is described"
+fi
+check "--reload describes the module's types in _zc_manifest()" $manifest_ok
+[ $manifest_ok = 1 ] || printf '%s\n' "$out" | head -40
+if grep -q '_zc_manifest\|ZcManifest' "$workdir/plain_mod.c"; then
+    check "without --reload, no manifest is emitted" 0
+else
+    check "without --reload, no manifest is emitted" 1
+fi
+if "$ZC" transpile --reload --misra -q "$workdir/reload_mod.zc" -o "$workdir/reload_misra.c" 2>&1 |
+    grep -q 'does not support MISRA'; then
+    check "--reload with --misra is a clear error" 1
+else
+    check "--reload with --misra is a clear error" 0
+fi
+
 # --- Deeply nested imports -----------------------------------------------
 
 # A chain of imports (d0 imports d1, which imports d2...) puts the parser on the

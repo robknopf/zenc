@@ -45,6 +45,17 @@ raw {
 
     enum { ZR_MAX_INCLUDES = 32 };
 
+    // What `zc transpile --reload` writes about a module's types, returned by its
+    // `_zc_manifest()`. The same definitions are in the module's C (codegen_main.c,
+    // emit_reload_manifest); a change to them is a change of `format`.
+    #ifndef ZC_MANIFEST_TYPES
+    #define ZC_MANIFEST_TYPES
+    typedef struct { const char *name; const char *type; unsigned offset; unsigned size; unsigned bits; } ZcMfField;
+    typedef struct { const char *name; long long value; const char *payload; } ZcMfVariant;
+    typedef struct { const char *c_name; const char *zc_name; unsigned kind; unsigned size; unsigned align; unsigned nfields; const ZcMfField *fields; unsigned nvariants; const ZcMfVariant *variants; } ZcMfType;
+    typedef struct { unsigned format; const char *zc_version; unsigned ntypes; const ZcMfType *types; } ZcManifest;
+    #endif
+
     typedef struct
     {
         TCCState *tcc;
@@ -353,6 +364,12 @@ raw {
         return tcc_get_symbol(r->current.tcc, name);
     }
 
+    static const void *zr_manifest(void *h)
+    {
+        const ZcManifest *(*get)(void) = (const ZcManifest *(*)(void))zr_symbol(h, "_zc_manifest");
+        return get ? get() : NULL;
+    }
+
     static int zr_version(void *h) { return ((ZrReloader *)h)->version; }
     static int zr_kept(void *h) { return ((ZrReloader *)h)->old_count; }
 
@@ -385,6 +402,7 @@ extern fn zr_add_include(h: void*, dir: const char*) -> c_int;
 extern fn zr_build(h: void*) -> c_int;
 extern fn zr_poll(h: void*) -> c_int;
 extern fn zr_symbol(h: void*, name: const char*) -> void*;
+extern fn zr_manifest(h: void*) -> const void*;
 extern fn zr_version(h: void*) -> c_int;
 extern fn zr_kept(h: void*) -> c_int;
 extern fn zr_free(h: void*);
@@ -436,6 +454,10 @@ impl Reloader {
     /// The address of `name` in the version loaded now, or NULL. Look again after a
     /// build() or poll() that returned true.
     fn symbol(self, name: const char*) -> void* { return zr_symbol(self.handle, name); }
+
+    /// The version loaded now's description of its types (a `const ZcManifest*`, declared
+    /// in this file's C), or NULL.
+    fn manifest(self) -> const void* { return zr_manifest(self.handle); }
 
     /// How many versions have been loaded.
     fn version(self) -> int { return (int)zr_version(self.handle); }

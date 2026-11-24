@@ -1,0 +1,4 @@
+// Each version's manifest describes its types as the C compiler laid them out.
+struct State { count: int; flag: u8; speed: f32; name: char[8]; }
+@link_name("reload_step")
+fn reload_step(state: State*) { println "step two"; }

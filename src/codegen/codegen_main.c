@@ -788,6 +788,251 @@ static void emit_reload_entry_points(ParserContext *ctx, ASTNode *funcs)
     zfree(dtors);
 }
 
+// --reload's manifest: a C string literal, or a null pointer.
+static void emit_manifest_string(ParserContext *ctx, const char *s)
+{
+    if (!s)
+    {
+        EMIT(ctx, "0");
+        return;
+    }
+    EMIT(ctx, "\"");
+    for (const char *p = s; *p; p++)
+    {
+        if (*p == '"' || *p == '\\')
+        {
+            EMIT(ctx, "\\%c", *p);
+        }
+        else if (*p == '\n')
+        {
+            EMIT(ctx, "\\n");
+        }
+        else
+        {
+            EMIT(ctx, "%c", *p);
+        }
+    }
+    EMIT(ctx, "\"");
+}
+
+// Kinds of type in the manifest (ZcMfType.kind).
+enum
+{
+    ZC_MF_STRUCT = 1,
+    ZC_MF_UNION = 2,
+    ZC_MF_ENUM = 3,
+    ZC_MF_SUM_ENUM = 4,
+    ZC_MF_VECTOR = 5
+};
+
+// The manifest kind of a struct or enum the program emits a definition for, or 0.
+static int manifest_kind(ASTNode *t)
+{
+    if (t->kind == NODE_STRUCT)
+    {
+        if (t->strct.is_template || t->strct.is_incomplete || t->strct.crepr_c_type ||
+            !t->strct.name)
+        {
+            return 0;
+        }
+        if (t->type_info && t->type_info->kind == TYPE_VECTOR)
+        {
+            return ZC_MF_VECTOR;
+        }
+        return t->strct.is_union ? ZC_MF_UNION : ZC_MF_STRUCT;
+    }
+    if (t->kind == NODE_ENUM && !t->enm.is_template && t->enm.name)
+    {
+        return enum_has_payload(t) ? ZC_MF_SUM_ENUM : ZC_MF_ENUM;
+    }
+    return 0;
+}
+
+// --reload: a description of every struct and enum the module defines, for a reload host
+// to tell what a new version changed. Sizes, alignment and offsets are left to the C
+// compiler (sizeof, __alignof__, offsetof), so they are the module's own. A host gets it
+// through `const ZcManifest *_zc_manifest(void)`. std/reload.zc declares the same types: a
+// change to them is a change of `format`, in both.
+static void emit_reload_manifest(ParserContext *ctx, ASTNode *types)
+{
+    EMIT(ctx, "\n#ifndef ZC_MANIFEST_TYPES\n#define ZC_MANIFEST_TYPES\n"
+              "typedef struct { const char *name; const char *type; unsigned offset; "
+              "unsigned size; unsigned bits; } ZcMfField;\n"
+              "typedef struct { const char *name; long long value; const char *payload; } "
+              "ZcMfVariant;\n"
+              "typedef struct { const char *c_name; const char *zc_name; unsigned kind; "
+              "unsigned size; unsigned align; unsigned nfields; const ZcMfField *fields; "
+              "unsigned nvariants; const ZcMfVariant *variants; } ZcMfType;\n"
+              "typedef struct { unsigned format; const char *zc_version; unsigned ntypes; "
+              "const ZcMfType *types; } ZcManifest;\n#endif\n");
+
+    // The types to describe. One can be in the list more than once; it is described once
+    // per @cfg.
+    CodegenKeySet seen = {0};
+    int count = 0;
+    int cap = 0;
+    ASTNode **list = NULL;
+    for (ASTNode *t = types; t; t = t->next)
+    {
+        if (!manifest_kind(t))
+        {
+            continue;
+        }
+        const char *name = t->kind == NODE_STRUCT ? t->strct.name : t->enm.name;
+        if (codegen_keyset_has(&seen, (int)t->kind, name, t->cfg_condition))
+        {
+            continue;
+        }
+        codegen_keyset_add(&seen, (int)t->kind, name, t->cfg_condition);
+        if (count == cap)
+        {
+            cap = cap ? cap * 2 : 32;
+            list = xrealloc(list, sizeof(ASTNode *) * (size_t)cap);
+        }
+        list[count++] = t;
+    }
+    codegen_keyset_free(&seen);
+    int *has_fields = count ? xcalloc((size_t)count, sizeof(int)) : NULL;
+
+    // Each type's fields and variants.
+    for (int i = 0; i < count; i++)
+    {
+        ASTNode *t = list[i];
+        int kind = manifest_kind(t);
+        const char *c_name =
+            t->link_name ? t->link_name : (t->kind == NODE_STRUCT ? t->strct.name : t->enm.name);
+        if (t->cfg_condition)
+        {
+            EMIT(ctx, "#if %s\n", t->cfg_condition);
+        }
+        if (kind == ZC_MF_STRUCT || kind == ZC_MF_UNION)
+        {
+            int any = 0;
+            for (ASTNode *f = t->strct.fields; f; f = f->next)
+            {
+                if (f->kind != NODE_FIELD || !f->field.name)
+                {
+                    continue;
+                }
+                if (!any)
+                {
+                    EMIT(ctx, "static const ZcMfField _zc_mf_f%d[] = {\n", i);
+                    any = 1;
+                }
+                EMIT(ctx, "    {");
+                emit_manifest_string(ctx, f->field.name);
+                EMIT(ctx, ", ");
+                emit_manifest_string(ctx, f->field.type);
+                if (f->field.bit_width > 0)
+                {
+                    // A bit-field has no offset or size of its own.
+                    EMIT(ctx, ", 0, 0, %d},\n", f->field.bit_width);
+                }
+                else
+                {
+                    EMIT(ctx, ", offsetof(%s, %s), sizeof(((%s *)0)->%s), 0},\n", c_name,
+                         f->field.name, c_name, f->field.name);
+                }
+            }
+            if (any)
+            {
+                EMIT(ctx, "};\n");
+            }
+            has_fields[i] = any;
+        }
+        else if (kind == ZC_MF_SUM_ENUM)
+        {
+            EMIT(ctx, "static const ZcMfField _zc_mf_f%d[] = {\n", i);
+            EMIT(ctx, "    {\"tag\", \"%s_Tag\", offsetof(%s, tag), sizeof(((%s *)0)->tag), 0},\n",
+                 c_name, c_name, c_name);
+            EMIT(ctx,
+                 "    {\"data\", \"union\", offsetof(%s, data), sizeof(((%s *)0)->data), 0},\n",
+                 c_name, c_name);
+            EMIT(ctx, "};\n");
+            has_fields[i] = 1;
+        }
+        if (kind == ZC_MF_ENUM || kind == ZC_MF_SUM_ENUM)
+        {
+            EMIT(ctx, "static const ZcMfVariant _zc_mf_v%d[] = {\n", i);
+            for (ASTNode *v = t->enm.variants; v; v = v->next)
+            {
+                EMIT(ctx, "    {");
+                emit_manifest_string(ctx, v->variant.name);
+                EMIT(ctx, ", %d, ", v->variant.tag_id);
+                char *payload = v->variant.payload ? type_to_c_string(v->variant.payload, 0) : NULL;
+                emit_manifest_string(ctx, payload);
+                zfree(payload);
+                EMIT(ctx, "},\n");
+            }
+            EMIT(ctx, "};\n");
+        }
+        if (t->cfg_condition)
+        {
+            EMIT(ctx, "#endif\n");
+        }
+    }
+
+    // The table of types. It ends with an empty entry, so it has one when every type is
+    // left out by @cfg.
+    EMIT(ctx, "static const ZcMfType _zc_mf_types[] = {\n");
+    for (int i = 0; i < count; i++)
+    {
+        ASTNode *t = list[i];
+        int kind = manifest_kind(t);
+        int has_variants = kind == ZC_MF_ENUM || kind == ZC_MF_SUM_ENUM;
+        const char *name = t->kind == NODE_STRUCT ? t->strct.name : t->enm.name;
+        const char *c_name = t->link_name ? t->link_name : name;
+        if (t->cfg_condition)
+        {
+            EMIT(ctx, "#if %s\n", t->cfg_condition);
+        }
+        EMIT(ctx, "    {");
+        emit_manifest_string(ctx, c_name);
+        EMIT(ctx, ", ");
+        Instantiation *inst = instantiation_find(ctx, name);
+        if (inst && inst->template_name && inst->unmangled_arg)
+        {
+            size_t len = strlen(inst->template_name) + strlen(inst->unmangled_arg) + 3;
+            char *zc_name = xmalloc(len);
+            snprintf(zc_name, len, "%s<%s>", inst->template_name, inst->unmangled_arg);
+            emit_manifest_string(ctx, zc_name);
+            zfree(zc_name);
+        }
+        else
+        {
+            emit_manifest_string(ctx, name);
+        }
+        EMIT(ctx, ", %d, sizeof(%s), __alignof__(%s), ", kind, c_name, c_name);
+        if (has_fields[i])
+        {
+            EMIT(ctx, "sizeof(_zc_mf_f%d) / sizeof(_zc_mf_f%d[0]), _zc_mf_f%d, ", i, i, i);
+        }
+        else
+        {
+            EMIT(ctx, "0, 0, ");
+        }
+        if (has_variants)
+        {
+            EMIT(ctx, "sizeof(_zc_mf_v%d) / sizeof(_zc_mf_v%d[0]), _zc_mf_v%d},\n", i, i, i);
+        }
+        else
+        {
+            EMIT(ctx, "0, 0},\n");
+        }
+        if (t->cfg_condition)
+        {
+            EMIT(ctx, "#endif\n");
+        }
+    }
+    EMIT(ctx, "    {0}\n};\n");
+    zfree(has_fields);
+    zfree(list);
+    EMIT(ctx, "static const ZcManifest _zc_mf = {1, ");
+    emit_manifest_string(ctx, ZEN_VERSION);
+    EMIT(ctx, ", sizeof(_zc_mf_types) / sizeof(_zc_mf_types[0]) - 1, _zc_mf_types};\n");
+    EMIT(ctx, "const ZcManifest *_zc_manifest(void)\n{\n    return &_zc_mf;\n}\n");
+}
+
 void codegen_c_program(ParserContext *ctx, ASTNode *node)
 {
     // Flatten any NODE_COMPTIME blocks into their generated AST nodes
@@ -1283,6 +1528,7 @@ void codegen_c_program(ParserContext *ctx, ASTNode *node)
         if (ctx->config->reload_mode)
         {
             emit_reload_entry_points(ctx, merged_funcs);
+            emit_reload_manifest(ctx, sorted);
         }
 
         if (ctx->config->use_cpp && !ctx->config->use_cuda && !ctx->config->use_objc)

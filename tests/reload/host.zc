@@ -11,13 +11,40 @@
 // next one loads, to show what that breaks.
 //
 // The host prints "--- step N" before each step, so the expected output shows which
-// version printed what.
+// version printed what. If CASE_DIR has a `print-type` file, it names a type whose layout
+// the host prints from each version's manifest when it loads (Reloader.manifest()).
 
 import "std/reload.zc"
 
 include <stdio.h>
 include <stdlib.h>
 include <string.h>
+
+raw {
+    // The layout of the type `name` in a module's manifest, one line per field or variant.
+    static void print_type(const void *manifest, const char *name)
+    {
+        const ZcManifest *m = (const ZcManifest *)manifest;
+        if (!m)
+        {
+            printf("(no manifest)\n");
+            return;
+        }
+        for (unsigned i = 0; i < m->ntypes; i++)
+        {
+            const ZcMfType *t = &m->types[i];
+            if (strcmp(t->c_name, name) != 0) continue;
+            printf("%s: size %u align %u\n", t->zc_name, t->size, t->align);
+            for (unsigned j = 0; j < t->nfields; j++)
+                printf("  %s: %s at %u\n", t->fields[j].name, t->fields[j].type, t->fields[j].offset);
+            for (unsigned j = 0; j < t->nvariants; j++)
+                printf("  %s = %lld\n", t->variants[j].name, t->variants[j].value);
+            return;
+        }
+        printf("(%s is not in the manifest)\n", name);
+    }
+}
+extern fn print_type(manifest: const void*, name: const char*);
 
 def STATE_BYTES = 65536;
 def MAX_STEPS = 64;
@@ -45,6 +72,17 @@ fn main(argc: int, argv: char**) -> int {
     code.keep_old(!delete_old);
     code.verbose(false);
 
+    // The type to print from each version's manifest, if any.
+    let print_name: char[256];
+    print_name[0] = 0;
+    let type_path: char[4096];
+    snprintf(type_path, 4096, "%s/print-type", case_dir);
+    let tf = fopen(type_path, "r");
+    if tf != NULL {
+        if fgets(print_name, 256, tf) != NULL { print_name[strcspn(print_name, "\r\n")] = 0; }
+        fclose(tf);
+    }
+
     let state = calloc(1, STATE_BYTES);
     let step: fn*(void*) = NULL;
     let source: char[4096];
@@ -57,6 +95,7 @@ fn main(argc: int, argv: char**) -> int {
         if code.build() {
             step = code.symbol("reload_step"); // a void* converts to a function pointer
             if step == NULL { fprintf(stderr, "host: step%d.zc has no reload_step\n", n); }
+            if print_name[0] != 0 { print_type(code.manifest(), print_name); }
         } else {
             println "(build failed, running the previous module)";
         }

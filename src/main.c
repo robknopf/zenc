@@ -626,6 +626,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (cfg->reload_mode && cfg->misra_output)
+    {
+        fprintf(stderr, COLOR_BOLD COLOR_RED "error" COLOR_RESET
+                                             ": --reload does not support MISRA output yet\n");
+        return 1;
+    }
+
     // Compute input directory
     input_file_copy = xstrdup(cfg->input_file);
     char *last_slash = z_path_last_sep(input_file_copy);

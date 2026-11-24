@@ -1,0 +1,12 @@
+--- step 1
+State: size 8 align 4
+  count: int32_t at 0
+  speed: float at 4
+step one
+--- step 2
+State: size 20 align 4
+  count: int32_t at 0
+  flag: uint8_t at 4
+  speed: float at 8
+  name: char[8] at 12
+step two
