@@ -1,0 +1,7 @@
+--- step 1
+speed 13 ticks 1
+--- step 2
+reload: back to their initial values: speed (initial value edited: 3 to 4)
+speed 14 ticks 2
+--- step 3
+speed 24 ticks 3

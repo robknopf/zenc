@@ -63,6 +63,9 @@ typedef struct DeclarationAttributes
     int is_hot;
     int is_constructor;
     int is_destructor;
+    int is_before_reload;   // @before_reload: run on the old code just before a reload
+    int is_after_reload;    // @after_reload: run on the new code just after a reload
+    int is_reset_on_reload; // @reset_on_reload: a global back to its initial value on reloads
     int is_unused;
     int is_weak;
     int is_export;

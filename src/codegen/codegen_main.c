@@ -6,6 +6,7 @@
 #include "../zprep.h"
 #include "codegen.h"
 #include "codegen_internal.h"
+#include "../utils/format_expr.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -725,14 +726,34 @@ static void flatten_comptime_nodes(ASTNode *node)
 }
 
 // Main entry point for code generation.
-// A function @constructor or @destructor would mark, if it is emitted at all.
-static int reload_hook(ASTNode *f, int destructor)
+// The kinds of function a reload host calls: @constructor, @destructor, @before_reload,
+// @after_reload.
+enum
+{
+    RELOAD_CONSTRUCTOR,
+    RELOAD_DESTRUCTOR,
+    RELOAD_BEFORE,
+    RELOAD_AFTER
+};
+
+// A function of that kind, if it is emitted at all.
+static int reload_hook(ASTNode *f, int kind)
 {
     if (f->kind != NODE_FUNCTION || !f->func.body || f->func.generic_params)
     {
         return 0;
     }
-    return destructor ? f->func.destructor : f->func.constructor;
+    switch (kind)
+    {
+    case RELOAD_CONSTRUCTOR:
+        return f->func.constructor;
+    case RELOAD_DESTRUCTOR:
+        return f->func.destructor;
+    case RELOAD_BEFORE:
+        return f->func.before_reload;
+    default:
+        return f->func.after_reload;
+    }
 }
 
 static void emit_reload_call(ParserContext *ctx, ASTNode *f)
@@ -750,31 +771,43 @@ static void emit_reload_call(ParserContext *ctx, ASTNode *f)
 }
 
 // --reload: what C's constructor and destructor attributes would do, for a host to call
-// after loading the module and before unloading it. The order is a normal build's: the
-// constructors in the order the C has them, and the destructors in the reverse order, as
-// .init_array and .fini_array run.
+// when the program starts and ends, and the @before_reload and @after_reload functions, for
+// it to call on the old and the new version around a reload. The order is a normal
+// build's: the constructors in the order the C has them, and the destructors in the
+// reverse order, as .init_array and .fini_array run; the reload functions in the
+// constructors' order.
 static void emit_reload_entry_points(ParserContext *ctx, ASTNode *funcs)
 {
-    EMIT(ctx, "\nvoid _zc_module_init(void)\n{\n");
-    for (ASTNode *f = funcs; f; f = f->next)
+    static const struct
     {
-        if (reload_hook(f, 0))
+        const char *name;
+        int kind;
+    } forward[] = {{"_zc_module_init", RELOAD_CONSTRUCTOR},
+                   {"_zc_module_before_reload", RELOAD_BEFORE},
+                   {"_zc_module_after_reload", RELOAD_AFTER}};
+    for (size_t k = 0; k < sizeof(forward) / sizeof(forward[0]); k++)
+    {
+        EMIT(ctx, "\nvoid %s(void)\n{\n", forward[k].name);
+        for (ASTNode *f = funcs; f; f = f->next)
         {
-            emit_reload_call(ctx, f);
+            if (reload_hook(f, forward[k].kind))
+            {
+                emit_reload_call(ctx, f);
+            }
         }
+        EMIT(ctx, "}\n");
     }
-    EMIT(ctx, "}\n");
 
     int count = 0;
     for (ASTNode *f = funcs; f; f = f->next)
     {
-        count += reload_hook(f, 1) ? 1 : 0;
+        count += reload_hook(f, RELOAD_DESTRUCTOR) ? 1 : 0;
     }
     ASTNode **dtors = count ? xmalloc(sizeof(ASTNode *) * (size_t)count) : NULL;
     int n = 0;
     for (ASTNode *f = funcs; f; f = f->next)
     {
-        if (reload_hook(f, 1))
+        if (reload_hook(f, RELOAD_DESTRUCTOR))
         {
             dtors[n++] = f;
         }
@@ -865,8 +898,8 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
               "typedef struct { const char *c_name; const char *zc_name; unsigned kind; "
               "unsigned size; unsigned align; unsigned nfields; const ZcMfField *fields; "
               "unsigned nvariants; const ZcMfVariant *variants; } ZcMfType;\n"
-              "typedef struct { const char *name; const char *type; unsigned size; void *addr; } "
-              "ZcMfGlobal;\n"
+              "typedef struct { const char *name; const char *type; unsigned size; void *addr; "
+              "const char *init; const void *init_value; unsigned flags; } ZcMfGlobal;\n"
               "typedef struct { const char *name; const char *ret; unsigned nparams; "
               "const char *const *params; } ZcMfFunc;\n"
               "typedef struct { unsigned format; const char *zc_version; unsigned ntypes; "
@@ -1036,7 +1069,34 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
     zfree(list);
 
     // The globals whose storage the host keeps (reload_global_type), with their addresses:
-    // in a version compiled with ZC_RELOAD_OWN_GLOBALS its own, otherwise the host's.
+    // in a version compiled with ZC_RELOAD_OWN_GLOBALS its own, otherwise the host's. Each
+    // has its initial value, as text (to tell that it was edited) and as a constant the host
+    // can copy, and whether it is @reset_on_reload (flag 1).
+    for (ASTNode *g = globals; g; g = g->next)
+    {
+        char *type = reload_global_type(ctx, g);
+        if (!type || !g->var_decl.init_expr)
+        {
+            zfree(type);
+            continue;
+        }
+        if (g->cfg_condition)
+        {
+            EMIT(ctx, "#if %s\n", g->cfg_condition);
+        }
+        EMIT(ctx, "static const ");
+        char init_name[512];
+        snprintf(init_name, sizeof(init_name), "_zc_mf_init_%s", g->var_decl.name);
+        emit_var_decl_type(ctx, type, init_name);
+        EMIT(ctx, " = ");
+        codegen_expression(ctx, g->var_decl.init_expr);
+        EMIT(ctx, ";\n");
+        if (g->cfg_condition)
+        {
+            EMIT(ctx, "#endif\n");
+        }
+        zfree(type);
+    }
     EMIT(ctx, "static const ZcMfGlobal _zc_mf_globals[] = {\n");
     for (ASTNode *g = globals; g; g = g->next)
     {
@@ -1053,7 +1113,19 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
         emit_manifest_string(ctx, g->var_decl.name);
         EMIT(ctx, ", ");
         emit_manifest_string(ctx, type);
-        EMIT(ctx, ", sizeof(%s), (void *)&%s},\n", g->var_decl.name, g->var_decl.name);
+        EMIT(ctx, ", sizeof(%s), (void *)&%s, ", g->var_decl.name, g->var_decl.name);
+        if (g->var_decl.init_expr)
+        {
+            char *text = format_expression_as_c(ctx, g->var_decl.init_expr);
+            emit_manifest_string(ctx, text ? text : "?");
+            zfree(text);
+            EMIT(ctx, ", &_zc_mf_init_%s", g->var_decl.name);
+        }
+        else
+        {
+            EMIT(ctx, "0, 0");
+        }
+        EMIT(ctx, ", %d},\n", g->var_decl.reset_on_reload ? 1 : 0);
         if (g->cfg_condition)
         {
             EMIT(ctx, "#endif\n");
@@ -1125,7 +1197,7 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
     }
     EMIT(ctx, "    {0}\n};\n");
 
-    EMIT(ctx, "static const ZcManifest _zc_mf = {3, ");
+    EMIT(ctx, "static const ZcManifest _zc_mf = {4, ");
     emit_manifest_string(ctx, ZEN_VERSION);
     EMIT(ctx, ", sizeof(_zc_mf_types) / sizeof(_zc_mf_types[0]) - 1, _zc_mf_types,\n"
               "    sizeof(_zc_mf_globals) / sizeof(_zc_mf_globals[0]) - 1, _zc_mf_globals,\n"

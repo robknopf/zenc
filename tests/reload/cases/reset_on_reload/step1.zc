@@ -1,0 +1,11 @@
+// A global marked @reset_on_reload goes back to its initial value on every reload, for
+// things derived from code, like a cache.
+@reset_on_reload
+let cache: int = 0;
+let kept: int = 0;
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    cache = cache + 1;
+    kept = kept + 1;
+    println "cache {cache} kept {kept}";
+}

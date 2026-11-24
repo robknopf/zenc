@@ -1,5 +1,5 @@
-// A version's @destructor runs when the next version replaces it (before the new one's
-// @constructor) and, for the last version, when the host is done with it.
+// The @destructor functions run once, at the end, on the version current then: replacing a
+// version doesn't run its destructors (or the new one's constructors).
 @constructor
 fn setup() {
     println "setup version 1";

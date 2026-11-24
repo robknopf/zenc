@@ -378,7 +378,7 @@ CEOF
 out=$("${CC:-cc}" -w -I"$workdir" "$workdir/manifest_print.c" -o "$workdir/manifest_print" 2>&1 &&
     "$workdir/manifest_print")
 manifest_ok=1
-for want in 'format 3' \
+for want in 'format 4' \
     'Vec2 (Vec2) kind 1 size 8 align 4' '  x: float @0 size 4 bits 0' \
     '  y: float @4 size 4 bits 0' 'Box__int32_t (Box<int32_t>) kind 1 size 8 align 4' \
     'Code (Code) kind 3 size 4 align 4' '  A = 5 -' '  B = 6 -' '  C = 10 -' \
@@ -403,7 +403,8 @@ printf 'let count: int = 3;\nfn tick() { count = count + 1; }\n' > "$workdir/rel
 "$ZC" transpile --reload -q "$workdir/reload_global.zc" -o "$workdir/reload_global.c" >/dev/null 2>&1
 if grep -qx '#ifdef ZC_RELOAD_OWN_GLOBALS' "$workdir/reload_global.c" &&
     grep -qx 'extern int32_t count;' "$workdir/reload_global.c" &&
-    grep -qF '{"count", "int32_t", sizeof(count), (void *)&count},' "$workdir/reload_global.c"; then
+    grep -qF '{"count", "int32_t", sizeof(count), (void *)&count, "3", &_zc_mf_init_count, 0},' \
+        "$workdir/reload_global.c"; then
     check "--reload lets the host keep a global's storage" 1
 else
     check "--reload lets the host keep a global's storage" 0

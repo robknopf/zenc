@@ -105,6 +105,18 @@ DeclarationAttributes parse_attributes(ParserContext *ctx, Lexer *l)
         {
             res.is_destructor = 1;
         }
+        else if (0 == strncmp(attr.start, "before_reload", 13) && 13 == attr.len)
+        {
+            res.is_before_reload = 1;
+        }
+        else if (0 == strncmp(attr.start, "after_reload", 12) && 12 == attr.len)
+        {
+            res.is_after_reload = 1;
+        }
+        else if (0 == strncmp(attr.start, "reset_on_reload", 15) && 15 == attr.len)
+        {
+            res.is_reset_on_reload = 1;
+        }
         else if (0 == strncmp(attr.start, "unused", 6) && 6 == attr.len)
         {
             res.is_unused = 1;

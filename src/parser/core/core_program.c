@@ -298,6 +298,10 @@ static ASTNode *parse_top_level_nodes(ParserContext *ctx, Lexer *l)
             {
                 s = parse_var_decl(ctx, l, attrs.is_export);
                 check_global_initializers(s);
+                if (s && s->kind == NODE_VAR_DECL)
+                {
+                    s->var_decl.reset_on_reload = attrs.is_reset_on_reload;
+                }
             }
             else if (t.len == 6 && strncmp(t.start, "extern", 6) == 0)
             {
@@ -508,6 +512,8 @@ static ASTNode *parse_top_level_nodes(ParserContext *ctx, Lexer *l)
             s->func.noinline = attrs.is_noinline;
             s->func.constructor = attrs.is_constructor;
             s->func.destructor = attrs.is_destructor;
+            s->func.before_reload = attrs.is_before_reload;
+            s->func.after_reload = attrs.is_after_reload;
             s->func.unused = attrs.is_unused;
             s->func.weak = attrs.is_weak;
             s->func.is_export = attrs.is_export;

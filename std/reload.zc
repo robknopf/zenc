@@ -14,10 +14,13 @@
 // A build runs `zc transpile --reload` on the source, then compiles the C in memory. If
 // either fails, the errors are printed and the version already loaded stays in use.
 //
-// The module's @constructor functions run when a version is loaded, and its @destructor
-// functions when it is replaced by the next (before that one's constructors) and at free(),
-// as they would at the start and end of a program. A constructor that sets a global sets it
-// again on every reload.
+// The module's @constructor functions run when the first version loads, and the current
+// version's @destructor functions at free(), as at the start and end of a program: a reload
+// doesn't start the program again. Work to redo on each reload goes in @before_reload
+// functions (run on the old version, just before it's replaced) and @after_reload ones (run
+// on the new version, once the state has moved to it). A global marked @reset_on_reload goes
+// back to its initial value on every reload, and one whose initial value was edited takes
+// the new value.
 //
 // State survives reloads, and follows the code when its layout changes. The module's
 // globals keep their values: each version uses the storage of the one that defined them, so
@@ -73,7 +76,7 @@ raw {
     typedef struct { const char *name; const char *type; unsigned offset; unsigned size; unsigned bits; } ZcMfField;
     typedef struct { const char *name; long long value; const char *payload; } ZcMfVariant;
     typedef struct { const char *c_name; const char *zc_name; unsigned kind; unsigned size; unsigned align; unsigned nfields; const ZcMfField *fields; unsigned nvariants; const ZcMfVariant *variants; } ZcMfType;
-    typedef struct { const char *name; const char *type; unsigned size; void *addr; } ZcMfGlobal;
+    typedef struct { const char *name; const char *type; unsigned size; void *addr; const char *init; const void *init_value; unsigned flags; } ZcMfGlobal;
     typedef struct { const char *name; const char *ret; unsigned nparams; const char *const *params; } ZcMfFunc;
     typedef struct { unsigned format; const char *zc_version; unsigned ntypes; const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; unsigned nfuncs; const ZcMfFunc *funcs; } ZcManifest;
     #endif
@@ -357,6 +360,7 @@ raw {
         {
             free((void *)m->globals[i].name);
             free((void *)m->globals[i].type);
+            free((void *)m->globals[i].init);
         }
         free((void *)m->globals);
         for (unsigned i = 0; i < m->nfuncs; i++)
@@ -376,7 +380,7 @@ raw {
     // doesn't know, or out of memory).
     static ZcManifest *zr_mf_copy(const ZcManifest *m)
     {
-        if (!m || m->format < 1 || m->format > 3) return NULL;
+        if (!m || m->format < 1 || m->format > 4) return NULL;
         ZcManifest *c = (ZcManifest *)calloc(1, sizeof(ZcManifest));
         ZcMfType *types = (ZcMfType *)calloc(m->ntypes ? m->ntypes : 1, sizeof(ZcMfType));
         if (!c || !types)
@@ -389,7 +393,7 @@ raw {
         c->zc_version = zr_strdup(m->zc_version);
         c->types = types;
         int ok = 1;
-        if (m->format >= 3 && m->nfuncs)
+        if (m->format >= 4 && m->nfuncs)
         {
             ZcMfFunc *f = (ZcMfFunc *)calloc(m->nfuncs, sizeof(ZcMfFunc));
             if (!f) ok = 0;
@@ -410,7 +414,7 @@ raw {
                 }
             }
         }
-        if (m->format >= 2 && m->nglobals)
+        if (m->format >= 4 && m->nglobals)
         {
             ZcMfGlobal *g = (ZcMfGlobal *)calloc(m->nglobals, sizeof(ZcMfGlobal));
             if (!g) ok = 0;
@@ -423,6 +427,8 @@ raw {
                     g[i] = m->globals[i];
                     g[i].name = zr_strdup(m->globals[i].name);
                     g[i].type = zr_strdup(m->globals[i].type);
+                    g[i].init = m->format >= 4 ? zr_strdup(m->globals[i].init) : NULL;
+                    if (m->format < 4) { g[i].init_value = NULL; g[i].flags = 0; }
                 }
             }
         }
@@ -1261,7 +1267,7 @@ raw {
         const ZcManifest *(*get)(void) =
             (const ZcManifest *(*)(void))tcc_get_symbol(v->tcc, "_zc_manifest");
         const ZcManifest *m = get ? get() : NULL;
-        return m && m->format >= 2 ? m : NULL;
+        return m && m->format >= 4 ? m : NULL; // the globals' layout this file reads
     }
 
     static void zr_store_free(ZrReloader *r)
@@ -1289,6 +1295,7 @@ raw {
             r->store[i] = m->globals[i];
             r->store[i].name = zr_strdup(m->globals[i].name);
             r->store[i].type = zr_strdup(m->globals[i].type);
+            r->store[i].init = NULL; // the store only needs names, types and addresses
         }
     }
 
@@ -1458,6 +1465,31 @@ raw {
         return mv.problems;
     }
 
+    // Globals back to their initial value: those marked @reset_on_reload, on every reload,
+    // and those whose initial value was edited (as hotreload-hx does: an edited initial value
+    // is taken to be what was meant). Each is listed in `log`.
+    static void zr_reset_globals(ZrReloader *r, FILE *log)
+    {
+        const ZcManifest *live = zr_version_manifest(&r->current);
+        int n = 0;
+        for (unsigned i = 0; live && i < live->nglobals; i++)
+        {
+            const ZcMfGlobal *g = &live->globals[i];
+            const ZcMfGlobal *was = zr_global_find(r->types_prev->globals, r->types_prev->nglobals, g->name);
+            int marked = g->flags & 1;
+            int edited = was && strcmp(zr_s(was->init), zr_s(g->init)) != 0;
+            if (!marked && !edited) continue;
+            if (g->init_value) memcpy(g->addr, g->init_value, g->size);
+            else memset(g->addr, 0, g->size);
+            fputs(n++ ? ", " : "reload: back to their initial values: ", log);
+            if (marked) fprintf(log, "%s (@reset_on_reload)", zr_s(g->name));
+            else
+                fprintf(log, "%s (initial value edited: %s to %s)", zr_s(g->name),
+                        was->init ? was->init : "zero", g->init ? g->init : "zero");
+        }
+        if (n) fputc('\n', log);
+    }
+
     static int zr_build(void *h)
     {
         ZrReloader *r = (ZrReloader *)h;
@@ -1568,10 +1600,14 @@ raw {
         }
 
         // The version being replaced stops being the program's code here, though it may stay
-        // loaded: its destructors run now, then the new version's constructors.
+        // loaded. Its @before_reload functions run first; its destructors don't (they run once,
+        // at free(), on the version current then), and the new version's constructors don't
+        // either (they ran when the first version loaded): a reload doesn't start the program
+        // again. The new version's @after_reload functions run once the state has moved.
+        int first = !r->current.tcc;
         if (r->current.tcc)
         {
-            zr_version_call(&r->current, "_zc_module_fini");
+            zr_version_call(&r->current, "_zc_module_before_reload");
             if (keep_current)
             {
                 r->old[r->old_count++] = r->current;
@@ -1597,10 +1633,11 @@ raw {
         FILE *log = open_memstream(&r->moved, &moved_len);
         if (r->types_prev && r->types_now)
             zr_move_state(r, &r->current, r->types_prev, r->types_now, 0, NULL, log);
+        if (r->types_prev && r->types_now && log) zr_reset_globals(r, log);
         if (log) fclose(log);
         if (r->current.owns_globals) zr_store_set(r, zr_version_manifest(&r->current));
 
-        zr_version_call(&r->current, "_zc_module_init");
+        zr_version_call(&r->current, first ? "_zc_module_init" : "_zc_module_after_reload");
         if (r->verbose)
         {
             fprintf(stderr, "reload: version %d of %s loaded (zc %.0f ms, tcc %.0f ms)\n",

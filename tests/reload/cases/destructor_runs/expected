@@ -2,7 +2,5 @@
 setup version 1
 step
 --- step 2
-teardown version 1
-setup version 2
 step
 teardown version 2

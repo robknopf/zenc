@@ -1,0 +1,6 @@
+--- step 1
+step, version 1
+--- step 2
+before reload, version 1, count 1
+after reload, version 2
+step, version 2

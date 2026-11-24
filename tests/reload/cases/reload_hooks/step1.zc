@@ -1,0 +1,12 @@
+// @before_reload runs on the old version just before a reload, and @after_reload on the
+// new one, once the state has moved; neither runs at the first load.
+let count: int = 0;
+@before_reload
+fn going() { println "before reload, version 1, count {count}"; }
+@after_reload
+fn arrived() { println "after reload, version 1"; }
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    count = count + 1;
+    println "step, version 1";
+}

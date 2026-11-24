@@ -249,19 +249,21 @@ struct ASTNode
             int is_inline;
             int required; // @required: warn if return value is discarded.
             // GCC attributes
-            int noinline;    // @noinline
-            int constructor; // @constructor
-            int destructor;  // @destructor
-            int unused;      // @unused
-            int weak;        // @weak
-            int is_export;   // @export (visibility default).
-            int cold;        // @cold
-            int hot;         // @hot
-            int noreturn;    // @noreturn
-            int pure;        // @pure
-            char *section;   // @section("name")
-            int is_comptime; // @comptime function
-            int is_extern;   // extern fn (C linkage in C++ mode)
+            int noinline;      // @noinline
+            int constructor;   // @constructor
+            int destructor;    // @destructor
+            int before_reload; // @before_reload (zc transpile --reload)
+            int after_reload;  // @after_reload (zc transpile --reload)
+            int unused;        // @unused
+            int weak;          // @weak
+            int is_export;     // @export (visibility default).
+            int cold;          // @cold
+            int hot;           // @hot
+            int noreturn;      // @noreturn
+            int pure;          // @pure
+            char *section;     // @section("name")
+            int is_comptime;   // @comptime function
+            int is_extern;     // extern fn (C linkage in C++ mode)
             // CUDA qualifiers
             int cuda_global; // @global -> __global__
             int cuda_device; // @device -> __device__
@@ -296,6 +298,7 @@ struct ASTNode
             Type *type_info;
             int is_static;
             int is_thread_local;
+            int reset_on_reload; // @reset_on_reload (zc transpile --reload)
             int is_export;
         } var_decl;
 

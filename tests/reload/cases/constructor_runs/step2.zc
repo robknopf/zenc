@@ -1,4 +1,5 @@
-// A @constructor runs once each time the module is loaded, as it would at program start.
+// A @constructor runs once, when the first version loads, as at program start: a reload
+// doesn't run it again.
 @constructor
 fn setup() {
     println "setup ran";

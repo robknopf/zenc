@@ -1,0 +1,10 @@
+// A global whose initial value is edited takes the new value (that's taken to be what was
+// meant); the others keep theirs.
+let speed: int = 3;
+let ticks: int = 0;
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    ticks = ticks + 1;
+    speed = speed + 10;
+    println "speed {speed} ticks {ticks}";
+}
