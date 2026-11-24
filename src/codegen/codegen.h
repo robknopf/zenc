@@ -91,6 +91,7 @@ void emit_trait_defs(ParserContext *ctx, ASTNode *node, VisitedModules **visited
 void emit_trait_wrappers(ParserContext *ctx, ASTNode *node, VisitedModules **visited);
 void emit_enum_protos(ParserContext *ctx, ASTNode *node);
 void emit_globals(ParserContext *ctx, ASTNode *node, VisitedModules **visited);
+char *reload_global_type(ParserContext *ctx, ASTNode *node);
 void emit_lambda_defs(ParserContext *ctx);
 void emit_protos(ParserContext *ctx, ASTNode *node, VisitedModules **visited);
 void emit_impl_vtables(ParserContext *ctx);

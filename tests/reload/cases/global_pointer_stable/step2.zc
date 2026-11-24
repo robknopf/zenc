@@ -1,0 +1,9 @@
+// A pointer to a global, kept in the host's state, still points at the global after a
+// reload (old versions deleted).
+struct State { p: int*; }
+let count: int = 0;
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    *state.p = *state.p + 10;
+    println "count {count}, same address: {state.p == &count}";
+}

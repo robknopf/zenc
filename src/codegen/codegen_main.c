@@ -848,12 +848,13 @@ static int manifest_kind(ASTNode *t)
     return 0;
 }
 
-// --reload: a description of every struct and enum the module defines, for a reload host
-// to tell what a new version changed. Sizes, alignment and offsets are left to the C
-// compiler (sizeof, __alignof__, offsetof), so they are the module's own. A host gets it
+// --reload: a description of every struct and enum the module defines, and of the globals
+// whose storage the host keeps, for a reload host to tell what a new version changed.
+// Sizes, alignment and offsets are left to the C compiler (sizeof, __alignof__, offsetof),
+// so they are the module's own. A host gets it
 // through `const ZcManifest *_zc_manifest(void)`. std/reload.zc declares the same types: a
 // change to them is a change of `format`, in both.
-static void emit_reload_manifest(ParserContext *ctx, ASTNode *types)
+static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *globals)
 {
     EMIT(ctx, "\n#ifndef ZC_MANIFEST_TYPES\n#define ZC_MANIFEST_TYPES\n"
               "typedef struct { const char *name; const char *type; unsigned offset; "
@@ -863,8 +864,11 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types)
               "typedef struct { const char *c_name; const char *zc_name; unsigned kind; "
               "unsigned size; unsigned align; unsigned nfields; const ZcMfField *fields; "
               "unsigned nvariants; const ZcMfVariant *variants; } ZcMfType;\n"
+              "typedef struct { const char *name; const char *type; unsigned size; void *addr; } "
+              "ZcMfGlobal;\n"
               "typedef struct { unsigned format; const char *zc_version; unsigned ntypes; "
-              "const ZcMfType *types; } ZcManifest;\n#endif\n");
+              "const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; } "
+              "ZcManifest;\n#endif\n");
 
     // The types to describe. One can be in the list more than once; it is described once
     // per @cfg.
@@ -1027,9 +1031,38 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types)
     EMIT(ctx, "    {0}\n};\n");
     zfree(has_fields);
     zfree(list);
-    EMIT(ctx, "static const ZcManifest _zc_mf = {1, ");
+
+    // The globals whose storage the host keeps (reload_global_type), with their addresses:
+    // in a version compiled with ZC_RELOAD_OWN_GLOBALS its own, otherwise the host's.
+    EMIT(ctx, "static const ZcMfGlobal _zc_mf_globals[] = {\n");
+    for (ASTNode *g = globals; g; g = g->next)
+    {
+        char *type = reload_global_type(ctx, g);
+        if (!type)
+        {
+            continue;
+        }
+        if (g->cfg_condition)
+        {
+            EMIT(ctx, "#if %s\n", g->cfg_condition);
+        }
+        EMIT(ctx, "    {");
+        emit_manifest_string(ctx, g->var_decl.name);
+        EMIT(ctx, ", ");
+        emit_manifest_string(ctx, type);
+        EMIT(ctx, ", sizeof(%s), (void *)&%s},\n", g->var_decl.name, g->var_decl.name);
+        if (g->cfg_condition)
+        {
+            EMIT(ctx, "#endif\n");
+        }
+        zfree(type);
+    }
+    EMIT(ctx, "    {0}\n};\n");
+
+    EMIT(ctx, "static const ZcManifest _zc_mf = {2, ");
     emit_manifest_string(ctx, ZEN_VERSION);
-    EMIT(ctx, ", sizeof(_zc_mf_types) / sizeof(_zc_mf_types[0]) - 1, _zc_mf_types};\n");
+    EMIT(ctx, ", sizeof(_zc_mf_types) / sizeof(_zc_mf_types[0]) - 1, _zc_mf_types,\n"
+              "    sizeof(_zc_mf_globals) / sizeof(_zc_mf_globals[0]) - 1, _zc_mf_globals};\n");
     EMIT(ctx, "const ZcManifest *_zc_manifest(void)\n{\n    return &_zc_mf;\n}\n");
 }
 
@@ -1528,7 +1561,7 @@ void codegen_c_program(ParserContext *ctx, ASTNode *node)
         if (ctx->config->reload_mode)
         {
             emit_reload_entry_points(ctx, merged_funcs);
-            emit_reload_manifest(ctx, sorted);
+            emit_reload_manifest(ctx, sorted, merged_globals);
         }
 
         if (ctx->config->use_cpp && !ctx->config->use_cuda && !ctx->config->use_objc)

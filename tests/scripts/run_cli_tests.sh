@@ -378,7 +378,7 @@ CEOF
 out=$("${CC:-cc}" -w -I"$workdir" "$workdir/manifest_print.c" -o "$workdir/manifest_print" 2>&1 &&
     "$workdir/manifest_print")
 manifest_ok=1
-for want in 'format 1' \
+for want in 'format 2' \
     'Vec2 (Vec2) kind 1 size 8 align 4' '  x: float @0 size 4 bits 0' \
     '  y: float @4 size 4 bits 0' 'Box__int32_t (Box<int32_t>) kind 1 size 8 align 4' \
     'Code (Code) kind 3 size 4 align 4' '  A = 5 -' '  B = 6 -' '  C = 10 -' \
@@ -397,6 +397,17 @@ if printf '%s\n' "$out" | grep -q '^Hidden '; then
 fi
 check "--reload describes the module's types in _zc_manifest()" $manifest_ok
 [ $manifest_ok = 1 ] || printf '%s\n' "$out" | head -40
+# A global is defined when the host compiles the module to own its globals, and extern
+# otherwise, so a later version can use the first one's storage.
+printf 'let count: int = 3;\nfn tick() { count = count + 1; }\n' > "$workdir/reload_global.zc"
+"$ZC" transpile --reload -q "$workdir/reload_global.zc" -o "$workdir/reload_global.c" >/dev/null 2>&1
+if grep -qx '#ifdef ZC_RELOAD_OWN_GLOBALS' "$workdir/reload_global.c" &&
+    grep -qx 'extern int32_t count;' "$workdir/reload_global.c" &&
+    grep -qF '{"count", "int32_t", sizeof(count), (void *)&count},' "$workdir/reload_global.c"; then
+    check "--reload lets the host keep a global's storage" 1
+else
+    check "--reload lets the host keep a global's storage" 0
+fi
 if grep -q '_zc_manifest\|ZcManifest' "$workdir/plain_mod.c"; then
     check "without --reload, no manifest is emitted" 0
 else

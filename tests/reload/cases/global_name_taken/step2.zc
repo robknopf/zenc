@@ -1,0 +1,9 @@
+// A global added with the name of a variable the process already has (libc's opterr)
+// gets its own storage, not that variable.
+let count: int = 0;
+let opterr: int = 5;
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    count = count + 1;
+    println "count {count}, opterr {opterr}";
+}

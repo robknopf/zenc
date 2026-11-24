@@ -16,7 +16,16 @@
 //
 // The module's @constructor functions run when a version is loaded, and its @destructor
 // functions when it is replaced by the next (before that one's constructors) and at free(),
-// as they would at the start and end of a program.
+// as they would at the start and end of a program. A constructor that sets a global sets it
+// again on every reload.
+//
+// The module's globals keep their values across reloads: each version uses the storage of
+// the one that defined them, so a pointer to a global stays valid too. When the globals
+// change (one is added, or its type changes), the new version gets new storage, with the
+// values of those whose name and type are the same; a retyped one starts again from its
+// initial value, and a pointer to an old global points at the old storage, which stays
+// loaded. Each reload says what changed in the module's types and globals (see
+// print_changes()).
 //
 // Old versions stay loaded, by default until free(): a trait object, a function pointer or
 // a string literal that the host kept from an old version still points into its memory,
@@ -54,7 +63,8 @@ raw {
     typedef struct { const char *name; const char *type; unsigned offset; unsigned size; unsigned bits; } ZcMfField;
     typedef struct { const char *name; long long value; const char *payload; } ZcMfVariant;
     typedef struct { const char *c_name; const char *zc_name; unsigned kind; unsigned size; unsigned align; unsigned nfields; const ZcMfField *fields; unsigned nvariants; const ZcMfVariant *variants; } ZcMfType;
-    typedef struct { unsigned format; const char *zc_version; unsigned ntypes; const ZcMfType *types; } ZcManifest;
+    typedef struct { const char *name; const char *type; unsigned size; void *addr; } ZcMfGlobal;
+    typedef struct { unsigned format; const char *zc_version; unsigned ntypes; const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; } ZcManifest;
     #endif
 
     typedef struct
@@ -62,6 +72,7 @@ raw {
         TCCState *tcc;
         void *mem;       // the code's memory, ours with libtcc 0.9.27; NULL with 0.9.28
         size_t mem_size; // 0 when not known (0.9.28)
+        int owns_globals; // compiled with ZC_RELOAD_OWN_GLOBALS: the globals' storage is here
     } ZrVersion;
 
     typedef struct
@@ -84,6 +95,8 @@ raw {
         int64_t seen; // newest .zc modification time at the last build, or -1
         ZcManifest *types_now;  // a copy of the current version's manifest, or NULL
         ZcManifest *types_prev; // the same for the version before it
+        ZcMfGlobal *store;      // the module's globals: in the version that owns them
+        unsigned nstore;
     } ZrReloader;
 
     static char *zr_strdup(const char *s)
@@ -153,6 +166,12 @@ raw {
     {
         (void)opaque;
         fprintf(stderr, "reload: tcc: %s\n", msg);
+    }
+
+    static void zr_on_tcc_quiet(void *opaque, const char *msg)
+    {
+        (void)opaque;
+        (void)msg;
     }
 
     // libtcc 0.9.27 compiles into memory the caller gives it; 0.9.28 always allocates it.
@@ -306,6 +325,12 @@ raw {
             free((void *)t->fields);
             free((void *)t->variants);
         }
+        for (unsigned i = 0; i < m->nglobals; i++)
+        {
+            free((void *)m->globals[i].name);
+            free((void *)m->globals[i].type);
+        }
+        free((void *)m->globals);
         free((void *)m->types);
         free((void *)m->zc_version);
         free(m);
@@ -315,7 +340,7 @@ raw {
     // doesn't know, or out of memory).
     static ZcManifest *zr_mf_copy(const ZcManifest *m)
     {
-        if (!m || m->format != 1) return NULL;
+        if (!m || m->format < 1 || m->format > 2) return NULL;
         ZcManifest *c = (ZcManifest *)calloc(1, sizeof(ZcManifest));
         ZcMfType *types = (ZcMfType *)calloc(m->ntypes ? m->ntypes : 1, sizeof(ZcMfType));
         if (!c || !types)
@@ -328,6 +353,22 @@ raw {
         c->zc_version = zr_strdup(m->zc_version);
         c->types = types;
         int ok = 1;
+        if (m->format >= 2 && m->nglobals)
+        {
+            ZcMfGlobal *g = (ZcMfGlobal *)calloc(m->nglobals, sizeof(ZcMfGlobal));
+            if (!g) ok = 0;
+            else
+            {
+                c->globals = g;
+                c->nglobals = m->nglobals;
+                for (unsigned i = 0; i < m->nglobals; i++)
+                {
+                    g[i] = m->globals[i];
+                    g[i].name = zr_strdup(m->globals[i].name);
+                    g[i].type = zr_strdup(m->globals[i].type);
+                }
+            }
+        }
         for (unsigned i = 0; i < m->ntypes; i++)
         {
             const ZcMfType *t = &m->types[i];
@@ -580,13 +621,20 @@ raw {
         fputc('\n', out);
     }
 
-    // What changed between two versions' types, or nothing if no type changed.
+    static const ZcMfGlobal *zr_global_find(const ZcMfGlobal *g, unsigned n, const char *name)
+    {
+        for (unsigned i = 0; i < n; i++)
+            if (strcmp(zr_s(g[i].name), zr_s(name)) == 0) return &g[i];
+        return NULL;
+    }
+
+    // What changed between two versions' types and globals, or nothing if none did.
     static void zr_mf_report(FILE *out, const ZcManifest *old, const ZcManifest *now, int version)
     {
         if (!old || !now) return;
         int header = 0;
 #define ZR_MF_HEADER() \
-        do { if (!header) { fprintf(out, "reload: version %d changes types:\n", version); header = 1; } } while (0)
+        do { if (!header) { fprintf(out, "reload: changes in version %d:\n", version); header = 1; } } while (0)
 
         // Types whose own description changed.
         for (unsigned i = 0; i < now->ntypes; i++)
@@ -632,7 +680,137 @@ raw {
             any = 1;
         }
         if (any) fputc('\n', out);
+        // Globals added, removed and retyped. A retyped one starts again from its initial
+        // value; the others keep theirs.
+        int first = 1;
+        for (unsigned i = 0; i < now->nglobals; i++)
+        {
+            const ZcMfGlobal *b = &now->globals[i];
+            const ZcMfGlobal *a = zr_global_find(old->globals, old->nglobals, b->name);
+            if (a && !strcmp(zr_s(a->type), zr_s(b->type)) && a->size == b->size) continue;
+            ZR_MF_HEADER();
+            fputs(first ? "reload:   globals: " : ", ", out);
+            first = 0;
+            if (a)
+                fprintf(out, "%s retyped from %s to %s (back to its initial value)", zr_s(b->name),
+                        zr_s(a->type), zr_s(b->type));
+            else
+                fprintf(out, "%s added", zr_s(b->name));
+        }
+        for (unsigned i = 0; i < old->nglobals; i++)
+        {
+            const ZcMfGlobal *a = &old->globals[i];
+            if (zr_global_find(now->globals, now->nglobals, a->name)) continue;
+            ZR_MF_HEADER();
+            fputs(first ? "reload:   globals: " : ", ", out);
+            first = 0;
+            fprintf(out, "%s removed", zr_s(a->name));
+        }
+        if (!first) fputc('\n', out);
 #undef ZR_MF_HEADER
+    }
+
+    // ---- Globals that outlive the code ---------------------------------------------------
+    //
+    // The module's globals (those `zc transpile --reload` lists in the manifest) are defined
+    // when it is compiled with ZC_RELOAD_OWN_GLOBALS and declared extern otherwise. The first
+    // version defines them; every later one is compiled to use that version's storage, so
+    // the values, and pointers to them, survive the reload. When the globals change (one is
+    // added or retyped), the new version defines them again, and the values whose name and
+    // type are the same are copied into it. A version that owns globals is never deleted
+    // before free(): something may still point into its storage.
+
+    static const ZcManifest *zr_version_manifest(ZrVersion *v)
+    {
+        const ZcManifest *(*get)(void) =
+            (const ZcManifest *(*)(void))tcc_get_symbol(v->tcc, "_zc_manifest");
+        const ZcManifest *m = get ? get() : NULL;
+        return m && m->format >= 2 ? m : NULL;
+    }
+
+    static void zr_store_free(ZrReloader *r)
+    {
+        for (unsigned i = 0; i < r->nstore; i++)
+        {
+            free((void *)r->store[i].name);
+            free((void *)r->store[i].type);
+        }
+        free(r->store);
+        r->store = NULL;
+        r->nstore = 0;
+    }
+
+    // The globals of `m`, from the version that owns them, as the ones to share from now on.
+    static void zr_store_set(ZrReloader *r, const ZcManifest *m)
+    {
+        zr_store_free(r);
+        if (!m || !m->nglobals) return;
+        r->store = (ZcMfGlobal *)calloc(m->nglobals, sizeof(ZcMfGlobal));
+        if (!r->store) return;
+        r->nstore = m->nglobals;
+        for (unsigned i = 0; i < m->nglobals; i++)
+        {
+            r->store[i] = m->globals[i];
+            r->store[i].name = zr_strdup(m->globals[i].name);
+            r->store[i].type = zr_strdup(m->globals[i].type);
+        }
+    }
+
+    // Compile the module's C into `v`, defining its globals (`own`) or using the ones in the
+    // store. Errors are printed only for a version that defines them: a failure to use the
+    // store is retried that way.
+    static int zr_compile(ZrReloader *r, ZrVersion *v, int own)
+    {
+        memset(v, 0, sizeof(*v));
+        v->tcc = tcc_new();
+        if (!v->tcc) return -1;
+        tcc_set_error_func(v->tcc, NULL, own ? zr_on_tcc_error : zr_on_tcc_quiet);
+        tcc_set_output_type(v->tcc, TCC_OUTPUT_MEMORY);
+        for (int i = 0; i < r->include_count; i++) tcc_add_include_path(v->tcc, r->includes[i]);
+        if (own) tcc_define_symbol(v->tcc, "ZC_RELOAD_OWN_GLOBALS", "1");
+        else
+            for (unsigned i = 0; i < r->nstore; i++)
+                tcc_add_symbol(v->tcc, r->store[i].name, r->store[i].addr);
+        if (tcc_add_file(v->tcc, r->c_file) == -1 || zr_relocate(v) < 0)
+        {
+            zr_version_delete(v);
+            return -1;
+        }
+        // A version owns globals only if it has some.
+        const ZcManifest *m = own ? zr_version_manifest(v) : NULL;
+        v->owns_globals = m && m->nglobals > 0;
+        return 0;
+    }
+
+    // `v`, compiled to use the store, really does: each of its globals is one in the store,
+    // of the same type, at the store's address (not, say, a variable of the same name that
+    // the host exports).
+    static int zr_globals_shared(ZrReloader *r, ZrVersion *v)
+    {
+        const ZcManifest *m = zr_version_manifest(v);
+        if (!m) return 0;
+        for (unsigned i = 0; i < m->nglobals; i++)
+        {
+            const ZcMfGlobal *g = &m->globals[i];
+            const ZcMfGlobal *s = zr_global_find(r->store, r->nstore, g->name);
+            if (!s || strcmp(zr_s(s->type), zr_s(g->type)) || s->size != g->size || s->addr != g->addr)
+                return 0;
+        }
+        return 1;
+    }
+
+    // Into the globals `v` defines, the values of the store's with the same name and type.
+    static void zr_carry_globals(ZrReloader *r, ZrVersion *v)
+    {
+        const ZcManifest *m = zr_version_manifest(v);
+        if (!m) return;
+        for (unsigned i = 0; i < m->nglobals; i++)
+        {
+            const ZcMfGlobal *g = &m->globals[i];
+            const ZcMfGlobal *s = zr_global_find(r->store, r->nstore, g->name);
+            if (s && !strcmp(zr_s(s->type), zr_s(g->type)) && s->size == g->size)
+                memcpy(g->addr, s->addr, g->size);
+        }
     }
 
     static int zr_build(void *h)
@@ -657,23 +835,29 @@ raw {
         }
         double t1 = zr_now_ms();
 
+        // Using the globals already there if it can; defining them again if they changed.
         ZrVersion next;
-        memset(&next, 0, sizeof(next));
-        next.tcc = tcc_new();
-        if (!next.tcc) return 0;
-        tcc_set_error_func(next.tcc, NULL, zr_on_tcc_error);
-        tcc_set_output_type(next.tcc, TCC_OUTPUT_MEMORY);
-        for (int i = 0; i < r->include_count; i++) tcc_add_include_path(next.tcc, r->includes[i]);
-        if (tcc_add_file(next.tcc, r->c_file) == -1 || zr_relocate(&next) < 0)
+        int compiled = -1;
+        if (r->current.tcc && r->store)
         {
-            zr_version_delete(&next);
+            compiled = zr_compile(r, &next, 0);
+            if (compiled == 0 && !zr_globals_shared(r, &next))
+            {
+                zr_version_delete(&next);
+                compiled = -1;
+            }
+        }
+        if (compiled != 0) compiled = zr_compile(r, &next, 1);
+        if (compiled != 0)
+        {
             fprintf(stderr, "reload: %s did not compile%s\n", r->c_file,
                     r->current.tcc ? "; still running the previous version" : "");
             return 0;
         }
 
         // Room to keep the version being replaced, before anything about it changes.
-        if (r->current.tcc && r->keep_old && r->old_count == r->old_cap)
+        int keep_current = r->current.tcc && (r->keep_old || r->current.owns_globals);
+        if (keep_current && r->old_count == r->old_cap)
         {
             int cap = r->old_cap ? r->old_cap * 2 : 8;
             ZrVersion *grown = (ZrVersion *)realloc(r->old, (size_t)cap * sizeof(ZrVersion));
@@ -692,7 +876,7 @@ raw {
         if (r->current.tcc)
         {
             zr_version_call(&r->current, "_zc_module_fini");
-            if (r->keep_old)
+            if (keep_current)
             {
                 r->old[r->old_count++] = r->current;
             }
@@ -710,6 +894,13 @@ raw {
         zr_mf_free(r->types_prev);
         r->types_prev = r->types_now;
         r->types_now = manifest ? zr_mf_copy(manifest()) : NULL;
+
+        // New storage for the globals: the values the old ones had, where they still fit.
+        if (r->current.owns_globals)
+        {
+            zr_carry_globals(r, &r->current);
+            zr_store_set(r, zr_version_manifest(&r->current));
+        }
 
         zr_version_call(&r->current, "_zc_module_init");
         if (r->verbose)
@@ -772,6 +963,7 @@ raw {
         zr_version_delete(&r->current);
         zr_mf_free(r->types_now);
         zr_mf_free(r->types_prev);
+        zr_store_free(r);
         for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
         free(r->zc);
         free(r->zc_flags);

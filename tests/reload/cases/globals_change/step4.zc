@@ -1,0 +1,11 @@
+// Globals added, retyped and removed: the others keep their values, a retyped one starts
+// from its initial value again, and the reload says so.
+// c is removed: the rest keep their storage and values.
+let a: int = 1;
+let b: i64 = 10;
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    a = a + 1;
+    b = b + 1;
+    println "a {a} b {b}";
+}

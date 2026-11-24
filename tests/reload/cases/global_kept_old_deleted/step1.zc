@@ -1,0 +1,8 @@
+// A global keeps its value across reloads, with old versions deleted: the version that
+// owns its storage stays loaded.
+let count: int = 0;
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    count = count + 1;
+    println "count {count}";
+}

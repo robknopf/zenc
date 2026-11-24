@@ -12,6 +12,31 @@
 #include "../platform/misra.h"
 #include "codegen_internal.h"
 
+// --reload: the C type of a global whose storage a reload host keeps, or NULL for one the
+// module keeps itself (a constant, a thread-local, or one whose type only the C compiler
+// infers). Such a global is defined when the host compiles the module with
+// ZC_RELOAD_OWN_GLOBALS, and declared extern otherwise: the host then points it at the
+// storage of the version that defined it, so its value outlives the code.
+char *reload_global_type(ParserContext *ctx, ASTNode *node)
+{
+    if (!ctx->config->reload_mode || ctx->config->use_cpp || node->kind != NODE_VAR_DECL ||
+        node->var_decl.is_thread_local || !node->var_decl.name)
+    {
+        return NULL;
+    }
+    if (node->var_decl.type_str)
+    {
+        return xstrdup(node->var_decl.type_str);
+    }
+    char *inferred = node->var_decl.init_expr ? infer_type(ctx, node->var_decl.init_expr) : NULL;
+    if (inferred && strcmp(inferred, "__auto_type") == 0)
+    {
+        zfree(inferred);
+        return NULL;
+    }
+    return inferred;
+}
+
 static void emit_globals_internal(ParserContext *ctx, ASTNode *node, VisitedModules **visited,
                                   int depth)
 {
@@ -36,6 +61,11 @@ static void emit_globals_internal(ParserContext *ctx, ASTNode *node, VisitedModu
             if (node->cfg_condition)
             {
                 EMIT(ctx, "#if %s\n", node->cfg_condition); // on a line of its own
+            }
+            char *host_type = reload_global_type(ctx, node);
+            if (host_type)
+            {
+                EMIT(ctx, "#ifdef ZC_RELOAD_OWN_GLOBALS\n");
             }
             EMIT(ctx, "ZC_GLOBAL ");
             if (node->kind == NODE_CONST)
@@ -93,6 +123,13 @@ static void emit_globals_internal(ParserContext *ctx, ASTNode *node, VisitedModu
                 }
             }
             EMIT(ctx, ";\n");
+            if (host_type)
+            {
+                EMIT(ctx, "#else\nextern ");
+                emit_var_decl_type(ctx, host_type, node->var_decl.name);
+                EMIT(ctx, ";\n#endif\n");
+                zfree(host_type);
+            }
             if (ctx->config->use_cpp && node->kind == NODE_VAR_DECL)
             {
                 char *tname =
