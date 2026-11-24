@@ -778,8 +778,11 @@ raw {
             if (b->flags & 2) continue; // a vtable: refreshed, not the program's state
             const ZcMfGlobal *a = zr_global_find(old->globals, old->nglobals, b->name);
             const char *held = NULL;
-            int same = a && !strcmp(zr_s(a->type), zr_s(b->type)) && a->size == b->size;
-            int held_changed = same && zr_global_type_changed(old, now, b, &held);
+            // The same type name, but its layout (and so maybe its size) changed: that's the
+            // type changing, not the global being retyped.
+            int same_name = a && !strcmp(zr_s(a->type), zr_s(b->type));
+            int same = same_name && a->size == b->size;
+            int held_changed = same_name && zr_global_type_changed(old, now, b, &held);
             if (same && !held_changed) continue;
             ZR_MF_HEADER();
             fputs(first ? "reload:   globals: " : ", ", out);

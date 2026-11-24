@@ -1,0 +1,10 @@
+// A global struct whose type gains a field (so its size changes) is moved to the new
+// layout, and the reload says its type changed, not that it was retyped.
+struct Game { score: int; lives: int; }
+let game: Game;
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    if game.lives == 0 { game.lives = 3; }
+    game.score = game.score + 10;
+    println "score {game.score} lives {game.lives}";
+}

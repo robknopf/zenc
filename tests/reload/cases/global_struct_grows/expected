@@ -1,0 +1,8 @@
+--- step 1
+score 10 lives 3
+--- step 2
+reload: changes in version 2:
+reload:   Game: size 8 -> 12 bytes, wave added at byte 0, 2 fields shifted down 4 bytes (score to lives)
+reload:   globals: game's type Game changed
+reload: moved the globals: game.wave added
+score 20 lives 3 wave 1
