@@ -1,0 +1,5 @@
+--- step 1
+value 6
+--- step 2
+(build failed, running the previous module)
+value 7

@@ -1,0 +1,18 @@
+// The state is moved to a new layout all the way down: nested structs by field name, arrays
+// element by element, enums with payloads by variant name, numbers converted. A field that
+// is gone is dropped, and the reload lists what was not simply kept.
+// Pos gains z before x, Rock's fields swap, Shape gains a variant first, score becomes an
+// i64, and old goes.
+struct Pos { z: f32; x: f32; y: f32; }
+struct Rock { size: int; pos: Pos; }
+enum Shape { Line, Dot, Ring(f32), Box(int, int) }
+struct State { started: bool; rocks: Rock[3]; shape: Shape; score: i64; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    state.score = state.score + 1;
+    println "score {state.score} rock0 {state.rocks[0].pos.x},{state.rocks[0].pos.y} size {state.rocks[0].size} rock2 {state.rocks[2].pos.x} z {state.rocks[0].pos.z}";
+    match state.shape {
+        Shape::Ring(r) => { println "ring {r}"; },
+        _ => { println "not a ring"; },
+    }
+}

@@ -854,7 +854,8 @@ static int manifest_kind(ASTNode *t)
 // so they are the module's own. A host gets it
 // through `const ZcManifest *_zc_manifest(void)`. std/reload.zc declares the same types: a
 // change to them is a change of `format`, in both.
-static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *globals)
+static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *globals,
+                                 ASTNode *funcs)
 {
     EMIT(ctx, "\n#ifndef ZC_MANIFEST_TYPES\n#define ZC_MANIFEST_TYPES\n"
               "typedef struct { const char *name; const char *type; unsigned offset; "
@@ -866,9 +867,11 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
               "unsigned nvariants; const ZcMfVariant *variants; } ZcMfType;\n"
               "typedef struct { const char *name; const char *type; unsigned size; void *addr; } "
               "ZcMfGlobal;\n"
+              "typedef struct { const char *name; const char *ret; unsigned nparams; "
+              "const char *const *params; } ZcMfFunc;\n"
               "typedef struct { unsigned format; const char *zc_version; unsigned ntypes; "
-              "const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; } "
-              "ZcManifest;\n#endif\n");
+              "const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; "
+              "unsigned nfuncs; const ZcMfFunc *funcs; } ZcManifest;\n#endif\n");
 
     // The types to describe. One can be in the list more than once; it is described once
     // per @cfg.
@@ -1059,10 +1062,74 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
     }
     EMIT(ctx, "    {0}\n};\n");
 
-    EMIT(ctx, "static const ZcManifest _zc_mf = {2, ");
+    // The functions the module defines, with their C return and parameter types: what a
+    // host that looks one up calls it with.
+    int nfunc = 0;
+    for (ASTNode *f = funcs; f; f = f->next)
+    {
+        if (f->kind != NODE_FUNCTION || !f->func.body || f->func.generic_params ||
+            f->func.count <= 0 || !f->func.arg_types)
+        {
+            continue;
+        }
+        if (f->cfg_condition)
+        {
+            EMIT(ctx, "#if %s\n", f->cfg_condition);
+        }
+        EMIT(ctx, "static const char *const _zc_mf_p%d[] = {", nfunc);
+        for (int i = 0; i < f->func.count; i++)
+        {
+            char *t = f->func.arg_types[i] ? type_to_c_string(f->func.arg_types[i], 0) : NULL;
+            emit_manifest_string(ctx, t ? t : "?");
+            EMIT(ctx, i + 1 < f->func.count ? ", " : "");
+            zfree(t);
+        }
+        EMIT(ctx, "};\n");
+        if (f->cfg_condition)
+        {
+            EMIT(ctx, "#endif\n");
+        }
+        nfunc++;
+    }
+    EMIT(ctx, "static const ZcMfFunc _zc_mf_funcs[] = {\n");
+    nfunc = 0;
+    for (ASTNode *f = funcs; f; f = f->next)
+    {
+        if (f->kind != NODE_FUNCTION || !f->func.body || f->func.generic_params)
+        {
+            continue;
+        }
+        int has_params = f->func.count > 0 && f->func.arg_types;
+        if (f->cfg_condition)
+        {
+            EMIT(ctx, "#if %s\n", f->cfg_condition);
+        }
+        EMIT(ctx, "    {");
+        emit_manifest_string(ctx, f->link_name ? f->link_name : f->func.name);
+        EMIT(ctx, ", ");
+        char *ret = f->func.ret_type_info ? type_to_c_string(f->func.ret_type_info, 0) : NULL;
+        emit_manifest_string(ctx, ret ? ret : "void");
+        zfree(ret);
+        if (has_params)
+        {
+            EMIT(ctx, ", %d, _zc_mf_p%d},\n", f->func.count, nfunc++);
+        }
+        else
+        {
+            EMIT(ctx, ", 0, 0},\n");
+        }
+        if (f->cfg_condition)
+        {
+            EMIT(ctx, "#endif\n");
+        }
+    }
+    EMIT(ctx, "    {0}\n};\n");
+
+    EMIT(ctx, "static const ZcManifest _zc_mf = {3, ");
     emit_manifest_string(ctx, ZEN_VERSION);
     EMIT(ctx, ", sizeof(_zc_mf_types) / sizeof(_zc_mf_types[0]) - 1, _zc_mf_types,\n"
-              "    sizeof(_zc_mf_globals) / sizeof(_zc_mf_globals[0]) - 1, _zc_mf_globals};\n");
+              "    sizeof(_zc_mf_globals) / sizeof(_zc_mf_globals[0]) - 1, _zc_mf_globals,\n"
+              "    sizeof(_zc_mf_funcs) / sizeof(_zc_mf_funcs[0]) - 1, _zc_mf_funcs};\n");
     EMIT(ctx, "const ZcManifest *_zc_manifest(void)\n{\n    return &_zc_mf;\n}\n");
 }
 
@@ -1561,7 +1628,7 @@ void codegen_c_program(ParserContext *ctx, ASTNode *node)
         if (ctx->config->reload_mode)
         {
             emit_reload_entry_points(ctx, merged_funcs);
-            emit_reload_manifest(ctx, sorted, merged_globals);
+            emit_reload_manifest(ctx, sorted, merged_globals, merged_funcs);
         }
 
         if (ctx->config->use_cpp && !ctx->config->use_cuda && !ctx->config->use_objc)

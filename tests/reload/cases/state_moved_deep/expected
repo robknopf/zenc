@@ -1,0 +1,11 @@
+--- step 1
+score 42 rock0 1.500000,2.500000 size 3 rock2 7.000000
+--- step 2
+reload: changes in version 2:
+reload:   Pos: size 8 -> 12 bytes, z added at byte 0, 2 fields shifted down 4 bytes (x to y)
+reload:   Rock: size 12 -> 16 bytes, size moved from byte 8 to 0, pos resized from 8 to 12 bytes, pos moved from byte 0 to 4
+reload:   Shape: Line added (= 0), Dot renumbered from 0 to 1, Ring renumbered from 1 to 2, Box renumbered from 2 to 3
+reload:   State: size 60 -> 72 bytes, alignment 4 -> 8, rocks resized from 36 to 48 bytes, shape moved from byte 40 to 52, score retyped from int32_t to int64_t, score moved from byte 52 to 64, old removed
+reload: moved the state (State) to the new layout: rocks[].pos.z added, score converted from int32_t to int64_t, old dropped
+score 43 rock0 1.500000,2.500000 size 3 rock2 7.000000 z 0.000000
+ring 4.500000

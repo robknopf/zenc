@@ -378,7 +378,7 @@ CEOF
 out=$("${CC:-cc}" -w -I"$workdir" "$workdir/manifest_print.c" -o "$workdir/manifest_print" 2>&1 &&
     "$workdir/manifest_print")
 manifest_ok=1
-for want in 'format 2' \
+for want in 'format 3' \
     'Vec2 (Vec2) kind 1 size 8 align 4' '  x: float @0 size 4 bits 0' \
     '  y: float @4 size 4 bits 0' 'Box__int32_t (Box<int32_t>) kind 1 size 8 align 4' \
     'Code (Code) kind 3 size 4 align 4' '  A = 5 -' '  B = 6 -' '  C = 10 -' \

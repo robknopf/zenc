@@ -1,5 +1,8 @@
 --- step 1
 run
 --- step 2
-(state reset: State changed)
+reload: changes in version 2:
+reload:   Mode: Stand added (= 0), Walk renumbered from 0 to 1, Run renumbered from 1 to 2
+reload:   also changed: State (holds Mode)
+reload: moved the state (State) to the new layout
 run

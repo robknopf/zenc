@@ -1,6 +1,5 @@
-// A global whose struct type is rearranged, at the same size, starts again from its
-// initial value rather than have its old bytes read as the new layout.
-// Read as the new layout, the old bytes would give a 2 b 1.
+// A global whose struct type is rearranged, at the same size, is moved field by field:
+// a and b keep their values (read as it was, the old bytes would give a 2 b 1).
 struct Pair { b: int; a: int; }
 let p: Pair;
 @link_name("reload_step")

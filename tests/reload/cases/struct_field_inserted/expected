@@ -1,5 +1,7 @@
 --- step 1
 lives 2
 --- step 2
-(state reset: State changed)
-score 0 lives 2
+reload: changes in version 2:
+reload:   State: size 4 -> 8 bytes, score added at byte 0, lives moved from byte 0 to 4
+reload: moved the state (State) to the new layout: score added
+score 0 lives 1

@@ -1,0 +1,15 @@
+// A pointer in the state to a type whose layout changed can't be moved: what it points to
+// is in the old layout, and how much of it there is isn't known. That version is not
+// loaded, and the running one keeps going.
+include <stdlib.h>
+struct Node { value: int; }
+struct State { node: Node*; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.node == NULL {
+        state.node = (Node*)calloc(1, sizeof(Node));
+        state.node.value = 5;
+    }
+    state.node.value = state.node.value + 1;
+    println "value {state.node.value}";
+}

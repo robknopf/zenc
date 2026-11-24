@@ -19,12 +19,22 @@
 // as they would at the start and end of a program. A constructor that sets a global sets it
 // again on every reload.
 //
-// The module's globals keep their values across reloads: each version uses the storage of
-// the one that defined them, so a pointer to a global stays valid too. When the globals
-// change (one is added, or its type changes), the new version gets new storage, with the
-// values of those whose name and type are the same; a retyped one starts again from its
-// initial value, and a pointer to an old global points at the old storage, which stays
-// loaded. Each reload says what changed in the module's types and globals (see
+// State survives reloads, and follows the code when its layout changes. The module's
+// globals keep their values: each version uses the storage of the one that defined them, so
+// a pointer to a global stays valid too. The host's own block, if it gives it to the
+// Reloader (keep_state), keeps its contents. When an edit changes the layout of a type the
+// state is made of, the state is moved to the new layout: fields by name (in nested structs
+// and arrays too), enums by variant name, numbers converted to a new numeric type; a field
+// that is new is zero (a global, its initial value), and one that is gone is dropped. When
+// the globals themselves change (one added, or retyped), the new version gets new storage
+// with the old values moved into it; a pointer to an old global then points at the old
+// storage, which stays loaded.
+//
+// What can't be moved is data behind a pointer to a type whose layout changed: it is in the
+// old layout, and how much of it there is isn't known. A version that would need that, or
+// whose functions that the host looked up take other parameters, is not loaded: the running
+// version stays in use, and the reload says why and to restart. Each reload says what
+// changed in the module's types and globals, and what was done to the state (see
 // print_changes()).
 //
 // Old versions stay loaded, by default until free(): a trait object, a function pointer or
@@ -64,7 +74,8 @@ raw {
     typedef struct { const char *name; long long value; const char *payload; } ZcMfVariant;
     typedef struct { const char *c_name; const char *zc_name; unsigned kind; unsigned size; unsigned align; unsigned nfields; const ZcMfField *fields; unsigned nvariants; const ZcMfVariant *variants; } ZcMfType;
     typedef struct { const char *name; const char *type; unsigned size; void *addr; } ZcMfGlobal;
-    typedef struct { unsigned format; const char *zc_version; unsigned ntypes; const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; } ZcManifest;
+    typedef struct { const char *name; const char *ret; unsigned nparams; const char *const *params; } ZcMfFunc;
+    typedef struct { unsigned format; const char *zc_version; unsigned ntypes; const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; unsigned nfuncs; const ZcMfFunc *funcs; } ZcManifest;
     #endif
 
     typedef struct
@@ -98,7 +109,13 @@ raw {
         ZcManifest *types_now;  // a copy of the current version's manifest, or NULL
         ZcManifest *types_prev; // the same for the version before it
         ZcMfGlobal *store;      // the module's globals: in the version that owns them
-        int refused;            // builds not loaded because of require_same()
+        int refused;            // builds not loaded: require_same(), or state that can't move
+        char **fetched;         // the names the host looked up with symbol()
+        int fetched_count;
+        int fetched_cap;
+        unsigned char *state;   // the block the host passes to the module (keep_state), or NULL
+        size_t state_size;
+        char *moved;            // what the last reload did to move state, for print_changes()
         unsigned nstore;
     } ZrReloader;
 
@@ -342,6 +359,14 @@ raw {
             free((void *)m->globals[i].type);
         }
         free((void *)m->globals);
+        for (unsigned i = 0; i < m->nfuncs; i++)
+        {
+            free((void *)m->funcs[i].name);
+            free((void *)m->funcs[i].ret);
+            for (unsigned j = 0; j < m->funcs[i].nparams; j++) free((void *)m->funcs[i].params[j]);
+            free((void *)m->funcs[i].params);
+        }
+        free((void *)m->funcs);
         free((void *)m->types);
         free((void *)m->zc_version);
         free(m);
@@ -351,7 +376,7 @@ raw {
     // doesn't know, or out of memory).
     static ZcManifest *zr_mf_copy(const ZcManifest *m)
     {
-        if (!m || m->format < 1 || m->format > 2) return NULL;
+        if (!m || m->format < 1 || m->format > 3) return NULL;
         ZcManifest *c = (ZcManifest *)calloc(1, sizeof(ZcManifest));
         ZcMfType *types = (ZcMfType *)calloc(m->ntypes ? m->ntypes : 1, sizeof(ZcMfType));
         if (!c || !types)
@@ -364,6 +389,27 @@ raw {
         c->zc_version = zr_strdup(m->zc_version);
         c->types = types;
         int ok = 1;
+        if (m->format >= 3 && m->nfuncs)
+        {
+            ZcMfFunc *f = (ZcMfFunc *)calloc(m->nfuncs, sizeof(ZcMfFunc));
+            if (!f) ok = 0;
+            else
+            {
+                c->funcs = f;
+                c->nfuncs = m->nfuncs;
+                for (unsigned i = 0; i < m->nfuncs; i++)
+                {
+                    f[i].name = zr_strdup(m->funcs[i].name);
+                    f[i].ret = zr_strdup(m->funcs[i].ret);
+                    f[i].nparams = m->funcs[i].nparams;
+                    char **ps = m->funcs[i].nparams ? (char **)calloc(m->funcs[i].nparams, sizeof(char *)) : NULL;
+                    for (unsigned j = 0; ps && j < m->funcs[i].nparams; j++)
+                        ps[j] = zr_strdup(m->funcs[i].params[j]);
+                    if (m->funcs[i].nparams && !ps) { f[i].nparams = 0; ok = 0; }
+                    f[i].params = (const char *const *)ps;
+                }
+            }
+        }
         if (m->format >= 2 && m->nglobals)
         {
             ZcMfGlobal *g = (ZcMfGlobal *)calloc(m->nglobals, sizeof(ZcMfGlobal));
@@ -717,10 +763,10 @@ raw {
             fputs(first ? "reload:   globals: " : ", ", out);
             first = 0;
             if (held_changed)
-                fprintf(out, "%s back to its initial value (%s changed)", zr_s(b->name), held);
+                fprintf(out, "%s's type %s changed", zr_s(b->name), held);
             else if (a)
-                fprintf(out, "%s retyped from %s to %s (back to its initial value)", zr_s(b->name),
-                        zr_s(a->type), zr_s(b->type));
+                fprintf(out, "%s retyped from %s to %s", zr_s(b->name), zr_s(a->type),
+                        zr_s(b->type));
             else
                 fprintf(out, "%s added", zr_s(b->name));
         }
@@ -735,6 +781,469 @@ raw {
         }
         if (!first) fputc('\n', out);
 #undef ZR_MF_HEADER
+    }
+
+    static const ZcMfFunc *zr_func_find(const ZcManifest *m, const char *name)
+    {
+        for (unsigned i = 0; m && i < m->nfuncs; i++)
+            if (strcmp(zr_s(m->funcs[i].name), name) == 0) return &m->funcs[i];
+        return NULL;
+    }
+
+    // ---- Moving state to a new layout -------------------------------------------------
+    //
+    // When a type the program's state is made of changes, the state's bytes are moved to the
+    // new layout using both versions' manifests: fields by name (into nested structs too),
+    // arrays element by element, enums by variant name, numbers converted to a new numeric
+    // type. A field that is new keeps what the destination already holds (zero, or a
+    // global's initial value). What can't be moved is a pointer to a type that changed: the
+    // data behind it is in the old layout, and how much of it there is isn't known. A version
+    // that would need that is not loaded.
+
+    typedef struct
+    {
+        int dry;          // only find problems; write nothing
+        int problems;     // things that can't be moved
+        FILE *notes;      // what was not simply kept, "; "-separated, or NULL
+        int nnotes;
+        FILE *why;        // the problems, for the refusal message
+        const ZcManifest *old;
+        const ZcManifest *now;
+    } ZrMove;
+
+    static void zr_move_note(ZrMove *mv, const char *path, const char *fmt, ...)
+    {
+        if (mv->dry || !mv->notes) return;
+        fputs(mv->nnotes++ ? ", " : "", mv->notes);
+        if (path && *path) fprintf(mv->notes, "%s ", path);
+        va_list ap;
+        va_start(ap, fmt);
+        vfprintf(mv->notes, fmt, ap);
+        va_end(ap);
+    }
+
+    static void zr_move_problem(ZrMove *mv, const char *path, const char *fmt, ...)
+    {
+        if (mv->why)
+        {
+            fputs(mv->problems ? "; " : "", mv->why);
+            fprintf(mv->why, "%s ", path && *path ? path : "the state");
+            va_list ap;
+            va_start(ap, fmt);
+            vfprintf(mv->why, fmt, ap);
+            va_end(ap);
+        }
+        mv->problems++;
+    }
+
+    // C's numeric types, for converting a value whose type changed.
+    typedef struct { const char *name; unsigned size; int is_float; int is_signed; } ZrNum;
+    static const ZrNum zr_nums[] = {
+        {"int8_t", 1, 0, 1}, {"uint8_t", 1, 0, 0}, {"int16_t", 2, 0, 1}, {"uint16_t", 2, 0, 0},
+        {"int32_t", 4, 0, 1}, {"uint32_t", 4, 0, 0}, {"int64_t", 8, 0, 1}, {"uint64_t", 8, 0, 0},
+        {"char", sizeof(char), 0, (char)-1 < 0}, {"signed char", 1, 0, 1}, {"unsigned char", 1, 0, 0},
+        {"short", sizeof(short), 0, 1}, {"unsigned short", sizeof(short), 0, 0},
+        {"int", sizeof(int), 0, 1}, {"unsigned int", sizeof(int), 0, 0}, {"unsigned", sizeof(int), 0, 0},
+        {"long", sizeof(long), 0, 1}, {"unsigned long", sizeof(long), 0, 0},
+        {"long long", sizeof(long long), 0, 1}, {"unsigned long long", sizeof(long long), 0, 0},
+        {"size_t", sizeof(size_t), 0, 0}, {"ptrdiff_t", sizeof(ptrdiff_t), 0, 1},
+        {"intptr_t", sizeof(intptr_t), 0, 1}, {"uintptr_t", sizeof(uintptr_t), 0, 0},
+        {"bool", sizeof(_Bool), 0, 0}, {"_Bool", sizeof(_Bool), 0, 0},
+        {"float", sizeof(float), 1, 1}, {"double", sizeof(double), 1, 1},
+    };
+
+    static const ZrNum *zr_num(const char *type)
+    {
+        for (size_t i = 0; i < sizeof(zr_nums) / sizeof(zr_nums[0]); i++)
+            if (strcmp(zr_nums[i].name, type) == 0) return &zr_nums[i];
+        return NULL;
+    }
+
+    static long double zr_num_read(const ZrNum *n, const unsigned char *p, int *is_int, long long *i,
+                                   unsigned long long *u)
+    {
+        *is_int = !n->is_float;
+        if (n->is_float)
+        {
+            if (n->size == sizeof(float)) { float f; memcpy(&f, p, sizeof f); return f; }
+            double d; memcpy(&d, p, sizeof d); return d;
+        }
+        unsigned long long raw = 0;
+        switch (n->size)
+        {
+        case 1: { uint8_t v; memcpy(&v, p, 1); raw = v; if (n->is_signed) *i = (int8_t)v; break; }
+        case 2: { uint16_t v; memcpy(&v, p, 2); raw = v; if (n->is_signed) *i = (int16_t)v; break; }
+        case 4: { uint32_t v; memcpy(&v, p, 4); raw = v; if (n->is_signed) *i = (int32_t)v; break; }
+        default: { uint64_t v; memcpy(&v, p, 8); raw = v; if (n->is_signed) *i = (int64_t)v; break; }
+        }
+        if (!n->is_signed) *i = (long long)raw;
+        *u = n->is_signed ? (unsigned long long)*i : raw;
+        return n->is_signed ? (long double)*i : (long double)raw;
+    }
+
+    static void zr_num_write(const ZrNum *n, unsigned char *p, long double f, int is_int, long long i,
+                             unsigned long long u)
+    {
+        if (n->is_float)
+        {
+            if (n->size == sizeof(float)) { float v = (float)f; memcpy(p, &v, sizeof v); }
+            else { double v = (double)f; memcpy(p, &v, sizeof v); }
+            return;
+        }
+        unsigned long long raw = is_int ? (n->is_signed ? (unsigned long long)i : u)
+                                        : (unsigned long long)(long long)f;
+        switch (n->size)
+        {
+        case 1: { uint8_t v = (uint8_t)raw; memcpy(p, &v, 1); break; }
+        case 2: { uint16_t v = (uint16_t)raw; memcpy(p, &v, 2); break; }
+        case 4: { uint32_t v = (uint32_t)raw; memcpy(p, &v, 4); break; }
+        default: { uint64_t v = (uint64_t)raw; memcpy(p, &v, 8); break; }
+        }
+    }
+
+    static long long zr_int_read(const unsigned char *p, unsigned size)
+    {
+        switch (size)
+        {
+        case 1: { int8_t v; memcpy(&v, p, 1); return v; }
+        case 2: { int16_t v; memcpy(&v, p, 2); return v; }
+        case 4: { int32_t v; memcpy(&v, p, 4); return v; }
+        default: { int64_t v; memcpy(&v, p, 8); return v; }
+        }
+    }
+
+    static void zr_int_write(unsigned char *p, unsigned size, long long value)
+    {
+        switch (size)
+        {
+        case 1: { int8_t v = (int8_t)value; memcpy(p, &v, 1); break; }
+        case 2: { int16_t v = (int16_t)value; memcpy(p, &v, 2); break; }
+        case 4: { int32_t v = (int32_t)value; memcpy(p, &v, 4); break; }
+        default: { int64_t v = (int64_t)value; memcpy(p, &v, 8); break; }
+        }
+    }
+
+    // "T[N]...": the element type ("T..." with the first [N] removed) into `elem`, and N.
+    static int zr_array_of(const char *type, char *elem, size_t size, unsigned *count)
+    {
+        const char *lb = strchr(type, '[');
+        if (!lb || strchr(type, '(')) return 0;
+        const char *rb = strchr(lb, ']');
+        if (!rb) return 0;
+        *count = (unsigned)strtoul(lb + 1, NULL, 10);
+        size_t head = (size_t)(lb - type);
+        while (head > 0 && type[head - 1] == ' ') head--;
+        if (head + strlen(rb + 1) + 1 > size || *count == 0) return 0;
+        memcpy(elem, type, head);
+        strcpy(elem + head, rb + 1);
+        return 1;
+    }
+
+    // The type a pointer type points to ("State" for "State*"), into `buf`, or NULL.
+    static const char *zr_pointee(const char *type, char *buf, size_t size)
+    {
+        if (strchr(type, '(')) return NULL; // a function pointer
+        size_t n = strlen(type);
+        while (n > 0 && type[n - 1] == ' ') n--;
+        if (n == 0 || type[n - 1] != '*') return NULL;
+        n--;
+        while (n > 0 && type[n - 1] == ' ') n--;
+        const char *t = type;
+        if (strncmp(t, "const ", 6) == 0) { t += 6; n -= 6; }
+        if (strncmp(t, "struct ", 7) == 0) { t += 7; n -= 7; }
+        if (n == 0 || n >= size) return NULL;
+        memcpy(buf, t, n);
+        buf[n] = 0;
+        return buf;
+    }
+
+    static const ZcMfField *zr_field_find(const ZcMfType *t, const char *name)
+    {
+        for (unsigned i = 0; i < t->nfields; i++)
+            if (strcmp(zr_s(t->fields[i].name), name) == 0) return &t->fields[i];
+        return NULL;
+    }
+
+    static const ZcMfVariant *zr_variant_by_name(const ZcMfType *t, const char *name)
+    {
+        for (unsigned i = 0; i < t->nvariants; i++)
+            if (strcmp(zr_s(t->variants[i].name), name) == 0) return &t->variants[i];
+        return NULL;
+    }
+
+    static const ZcMfVariant *zr_variant_by_value(const ZcMfType *t, long long value)
+    {
+        for (unsigned i = 0; i < t->nvariants; i++)
+            if (t->variants[i].value == value) return &t->variants[i];
+        return NULL;
+    }
+
+    static void zr_move_value(ZrMove *mv, const char *path, const char *otype, unsigned osize,
+                              const unsigned char *src, const char *ntype, unsigned nsize,
+                              unsigned char *dst, int depth);
+
+    // The size of a value of C type `type`, if the manifests or zr_nums know it, else 0.
+    static unsigned zr_type_size(const ZcManifest *m, const char *type)
+    {
+        const ZcMfType *t = zr_mf_find(m, type);
+        if (t) return t->size;
+        const ZrNum *n = zr_num(type);
+        if (n) return n->size;
+        char buf[256];
+        if (zr_pointee(type, buf, sizeof buf)) return sizeof(void *);
+        return 0;
+    }
+
+    // A struct or union described by both manifests, moved field by field.
+    static void zr_move_fields(ZrMove *mv, const char *path, const ZcMfType *ot,
+                               const unsigned char *src, const ZcMfType *nt, unsigned char *dst,
+                               int depth)
+    {
+        char sub[512];
+        for (unsigned i = 0; i < nt->nfields; i++)
+        {
+            const ZcMfField *nf = &nt->fields[i];
+            const ZcMfField *of = zr_field_find(ot, zr_s(nf->name));
+            snprintf(sub, sizeof sub, "%s%s%s", path, *path ? "." : "", zr_s(nf->name));
+            if (!of)
+            {
+                zr_move_note(mv, sub, "added");
+                continue;
+            }
+            if (of->bits || nf->bits)
+            {
+                // A bit-field has no address of its own: it is kept only if nothing about it
+                // changed, and the whole struct is copied then (zr_move_value).
+                zr_move_note(mv, sub, "(a bit-field) not carried");
+                continue;
+            }
+            zr_move_value(mv, sub, zr_s(of->type), of->size, src + of->offset, zr_s(nf->type),
+                          nf->size, dst + nf->offset, depth + 1);
+        }
+        for (unsigned j = 0; j < ot->nfields; j++)
+        {
+            if (zr_field_find(nt, zr_s(ot->fields[j].name))) continue;
+            snprintf(sub, sizeof sub, "%s%s%s", path, *path ? "." : "", zr_s(ot->fields[j].name));
+            zr_move_note(mv, sub, "dropped");
+        }
+    }
+
+    // One value of type `otype` (osize bytes at src) into `ntype` (nsize bytes at dst).
+    static void zr_move_value(ZrMove *mv, const char *path, const char *otype, unsigned osize,
+                              const unsigned char *src, const char *ntype, unsigned nsize,
+                              unsigned char *dst, int depth)
+    {
+        if (depth > 64) return;
+        const ZcMfType *ot = zr_mf_find(mv->old, otype), *nt = zr_mf_find(mv->now, ntype);
+        char obuf[256], nbuf[256];
+
+        // A type the manifests describe.
+        if (ot || nt)
+        {
+            if (!ot || !nt || strcmp(otype, ntype) != 0)
+            {
+                zr_move_note(mv, path, "retyped from %s to %s, not carried", otype, ntype);
+                return;
+            }
+            if (!zr_mf_changed(mv->old, mv->now, ntype, 0, NULL))
+            {
+                if (!mv->dry) memcpy(dst, src, osize < nsize ? osize : nsize);
+                return;
+            }
+            if (ot->kind != nt->kind)
+            {
+                zr_move_note(mv, path, "is now a different kind of type, not carried");
+                return;
+            }
+            if (nt->kind == 1) // struct
+            {
+                zr_move_fields(mv, path, ot, src, nt, dst, depth);
+                return;
+            }
+            if (nt->kind == 3) // enum: by variant name
+            {
+                const ZcMfVariant *ov = zr_variant_by_value(ot, zr_int_read(src, ot->size));
+                const ZcMfVariant *nv = ov ? zr_variant_by_name(nt, zr_s(ov->name)) : NULL;
+                if (!nv)
+                {
+                    zr_move_note(mv, path, "was %s, which is gone; not carried",
+                                 ov ? zr_s(ov->name) : "an unknown value");
+                    return;
+                }
+                if (!mv->dry) zr_int_write(dst, nt->size, nv->value);
+                return;
+            }
+            if (nt->kind == 4) // enum with payloads: the tag by name, then the payload
+            {
+                const ZcMfField *otag = zr_field_find(ot, "tag"), *ntag = zr_field_find(nt, "tag");
+                const ZcMfField *odat = zr_field_find(ot, "data"), *ndat = zr_field_find(nt, "data");
+                if (!otag || !ntag || !odat || !ndat) return;
+                const ZcMfVariant *ov = zr_variant_by_value(ot, zr_int_read(src + otag->offset, otag->size));
+                const ZcMfVariant *nv = ov ? zr_variant_by_name(nt, zr_s(ov->name)) : NULL;
+                if (!nv)
+                {
+                    zr_move_note(mv, path, "was %s, which is gone; not carried",
+                                 ov ? zr_s(ov->name) : "an unknown variant");
+                    return;
+                }
+                if (!mv->dry) zr_int_write(dst + ntag->offset, ntag->size, nv->value);
+                if (!ov->payload && !nv->payload) return;
+                char sub[512];
+                snprintf(sub, sizeof sub, "%s(%s)", path, zr_s(nv->name));
+                if (!ov->payload || !nv->payload)
+                {
+                    zr_move_note(mv, sub, "payload changed, not carried");
+                    return;
+                }
+                unsigned ops = zr_type_size(mv->old, ov->payload), nps = zr_type_size(mv->now, nv->payload);
+                if (!ops || !nps || ops > odat->size || nps > ndat->size)
+                {
+                    zr_move_note(mv, sub, "payload not carried");
+                    return;
+                }
+                zr_move_value(mv, sub, ov->payload, ops, src + odat->offset, nv->payload, nps,
+                              dst + ndat->offset, depth + 1);
+                return;
+            }
+            zr_move_note(mv, path, "(a %s) changed, not carried", nt->kind == 2 ? "union" : "vector");
+            return;
+        }
+
+        // Arrays: element by element.
+        unsigned on = 0, nn = 0;
+        char oelem[256], nelem[256];
+        int oarr = zr_array_of(otype, oelem, sizeof oelem, &on);
+        int narr = zr_array_of(ntype, nelem, sizeof nelem, &nn);
+        if (oarr || narr)
+        {
+            if (!oarr || !narr)
+            {
+                zr_move_note(mv, path, "retyped from %s to %s, not carried", otype, ntype);
+                return;
+            }
+            unsigned oes = osize / on, nes = nsize / nn;
+            unsigned n = on < nn ? on : nn;
+            char sub[512];
+            // The notes are the first element's, once, as "rocks[]": the others' are the same
+            // apart from enum values.
+            snprintf(sub, sizeof sub, "%s[]", path);
+            for (unsigned i = 0; i < n; i++)
+            {
+                ZrMove each = *mv;
+                if (i > 0) each.notes = NULL;
+                zr_move_value(&each, sub, oelem, oes, src + i * oes, nelem, nes, dst + i * nes,
+                              depth + 1);
+                mv->problems = each.problems;
+                mv->nnotes = i == 0 ? each.nnotes : mv->nnotes;
+            }
+            if (on != nn) zr_move_note(mv, path, "now has %u elements (was %u)", nn, on);
+            if (strcmp(oelem, nelem) != 0)
+                zr_move_note(mv, path, "elements retyped from %s to %s", oelem, nelem);
+            return;
+        }
+
+        // Pointers: kept, unless what they point to changed.
+        const char *op = zr_pointee(otype, obuf, sizeof obuf);
+        const char *np = zr_pointee(ntype, nbuf, sizeof nbuf);
+        if (op || np || strchr(otype, '(') || strchr(ntype, '('))
+        {
+            if (strcmp(otype, ntype) != 0 || osize != nsize)
+            {
+                zr_move_note(mv, path, "retyped from %s to %s, not carried", otype, ntype);
+                return;
+            }
+            if (np && zr_mf_find(mv->now, np) && zr_mf_changed(mv->old, mv->now, np, 0, NULL))
+            {
+                zr_move_problem(mv, path, "points to a %s, whose layout changed", np);
+                return;
+            }
+            if (!mv->dry) memcpy(dst, src, nsize);
+            return;
+        }
+
+        // Numbers, and C types the manifests don't describe.
+        if (strcmp(otype, ntype) == 0 && osize == nsize)
+        {
+            if (!mv->dry) memcpy(dst, src, nsize);
+            return;
+        }
+        const ZrNum *on_ = zr_num(otype), *nn_ = zr_num(ntype);
+        if (on_ && nn_ && on_->size == osize && nn_->size == nsize)
+        {
+            int is_int = 0;
+            long long i = 0;
+            unsigned long long u = 0;
+            long double f = zr_num_read(on_, src, &is_int, &i, &u);
+            if (!mv->dry) zr_num_write(nn_, dst, f, is_int, i, u);
+            zr_move_note(mv, path, "converted from %s to %s", otype, ntype);
+            return;
+        }
+        zr_move_note(mv, path, "retyped from %s to %s, not carried", otype, ntype);
+    }
+
+    // Every pointer reachable by value from a value of C type `type` (in fields, array
+    // elements and enum payloads), checked: one to a type whose layout changed is a problem,
+    // whether or not `type` itself changed.
+    static void zr_check_pointers(ZrMove *mv, const char *path, const char *type, int depth)
+    {
+        if (depth > 64 || !type) return;
+        char buf[256], elem[256];
+        unsigned n = 0;
+        if (zr_array_of(type, elem, sizeof elem, &n))
+        {
+            char sub[512];
+            snprintf(sub, sizeof sub, "%s[]", path);
+            zr_check_pointers(mv, sub, elem, depth + 1);
+            return;
+        }
+        const char *p = zr_pointee(type, buf, sizeof buf);
+        if (p)
+        {
+            if (zr_mf_find(mv->now, p) && zr_mf_changed(mv->old, mv->now, p, 0, NULL))
+                zr_move_problem(mv, path, "points to a %s, whose layout changed", p);
+            return;
+        }
+        const ZcMfType *t = zr_mf_find(mv->now, type);
+        if (!t) return;
+        char sub[512];
+        for (unsigned i = 0; i < t->nfields; i++)
+        {
+            if (t->kind == 4) break; // tag and data: the payloads are below
+            snprintf(sub, sizeof sub, "%s%s%s", path, *path ? "." : "", zr_s(t->fields[i].name));
+            zr_check_pointers(mv, sub, t->fields[i].type, depth + 1);
+        }
+        for (unsigned i = 0; t->kind == 4 && i < t->nvariants; i++)
+        {
+            if (!t->variants[i].payload) continue;
+            snprintf(sub, sizeof sub, "%s(%s)", path, zr_s(t->variants[i].name));
+            zr_check_pointers(mv, sub, t->variants[i].payload, depth + 1);
+        }
+    }
+
+    // ---- What the host's state is -------------------------------------------------------
+    //
+    // The state block the host keeps (keep_state) is what the functions it looked up take a
+    // pointer to: the one struct, union or enum the manifest describes among their pointer
+    // parameters. NULL if there is none; `ambiguous` if there are several.
+    static const char *zr_state_type(ZrReloader *r, const ZcManifest *m, int *ambiguous)
+    {
+        static char found[256];
+        char buf[256];
+        found[0] = 0;
+        *ambiguous = 0;
+        if (!m) return NULL;
+        for (int i = 0; i < r->fetched_count; i++)
+        {
+            const ZcMfFunc *f = zr_func_find(m, r->fetched[i]);
+            for (unsigned j = 0; f && j < f->nparams; j++)
+            {
+                const char *t = zr_pointee(zr_s(f->params[j]), buf, sizeof buf);
+                if (!t || !zr_mf_find(m, t)) continue;
+                if (!found[0]) snprintf(found, sizeof found, "%s", t);
+                else if (strcmp(found, t) != 0) *ambiguous = 1;
+            }
+        }
+        return found[0] ? found : NULL;
     }
 
     // ---- Globals that outlive the code ---------------------------------------------------
@@ -832,19 +1341,121 @@ raw {
         return shared;
     }
 
-    // Into the globals `v` defines, the values of the store's with the same name and type.
-    static void zr_carry_globals(ZrReloader *r, ZrVersion *v)
+    // What reloading to the version `next` (its manifest `nm`, sorted) would do to the state:
+    // the globals (when `next` owns new storage) and the host's block, moved to the new
+    // layout. With `dry`, only the problems are found, into `why`; otherwise the state is
+    // moved and what was not simply kept is written to `log`, a line per part.
+    static int zr_move_state(ZrReloader *r, ZrVersion *next, const ZcManifest *om,
+                             const ZcManifest *nm, int dry, FILE *why, FILE *log)
     {
-        const ZcManifest *m = zr_version_manifest(v);
-        if (!m) return;
-        for (unsigned i = 0; i < m->nglobals; i++)
+        ZrMove mv;
+        memset(&mv, 0, sizeof mv);
+        mv.dry = dry;
+        mv.why = why;
+        mv.old = om;
+        mv.now = nm;
+
+        // The functions the host looked up must still take what it passes them.
+        for (int i = 0; i < r->fetched_count; i++)
         {
-            const ZcMfGlobal *g = &m->globals[i];
-            const ZcMfGlobal *s = zr_global_find(r->store, r->nstore, g->name);
-            if (s && !strcmp(zr_s(s->type), zr_s(g->type)) && s->size == g->size &&
-                !zr_global_type_changed(r->types_prev, r->types_now, g, NULL))
-                memcpy(g->addr, s->addr, g->size);
+            const ZcMfFunc *a = zr_func_find(om, r->fetched[i]), *b = zr_func_find(nm, r->fetched[i]);
+            if (!a || !b) continue;
+            int same = !strcmp(zr_s(a->ret), zr_s(b->ret)) && a->nparams == b->nparams;
+            for (unsigned j = 0; same && j < a->nparams; j++)
+                same = !strcmp(zr_s(a->params[j]), zr_s(b->params[j]));
+            if (!same)
+                zr_move_problem(&mv, r->fetched[i], "now takes or returns other types, and the "
+                                "host calls it the old way");
         }
+
+        // No pointer in the state may lead to a type whose layout changed.
+        if (dry)
+        {
+            for (unsigned i = 0; i < nm->nglobals; i++)
+                zr_check_pointers(&mv, zr_s(nm->globals[i].name), nm->globals[i].type, 0);
+            int amb = 0;
+            const char *st = r->state ? zr_state_type(r, nm, &amb) : NULL;
+            char root[256];
+            if (st)
+            {
+                snprintf(root, sizeof root, "%s", st);
+                zr_check_pointers(&mv, "state", root, 0);
+            }
+        }
+
+        // The globals, into the new storage the version defines.
+        char *text = NULL;
+        size_t len = 0;
+        if (next->owns_globals && r->store)
+        {
+            const ZcManifest *live = zr_version_manifest(next);
+            mv.notes = dry ? NULL : open_memstream(&text, &len);
+            mv.nnotes = 0;
+            for (unsigned i = 0; live && i < live->nglobals; i++)
+            {
+                const ZcMfGlobal *g = &live->globals[i];
+                const ZcMfGlobal *s = zr_global_find(r->store, r->nstore, g->name);
+                if (!s) continue;
+                zr_move_value(&mv, zr_s(g->name), zr_s(s->type), s->size,
+                              (const unsigned char *)s->addr, zr_s(g->type), g->size,
+                              (unsigned char *)g->addr, 0);
+            }
+            if (mv.notes)
+            {
+                fclose(mv.notes);
+                if (mv.nnotes && log) fprintf(log, "reload: moved the globals: %s\n", text);
+                free(text);
+                text = NULL;
+                mv.notes = NULL;
+            }
+        }
+
+        // The host's block, in place.
+        if (r->state)
+        {
+            int amb_old = 0, amb_new = 0;
+            char was[256] = "", is[256] = "";
+            const char *t = zr_state_type(r, om, &amb_old);
+            if (t) snprintf(was, sizeof was, "%s", t);
+            t = zr_state_type(r, nm, &amb_new);
+            if (t) snprintf(is, sizeof is, "%s", t);
+            const ZcMfType *nt = is[0] ? zr_mf_find(nm, is) : NULL;
+            const ZcMfType *ot = was[0] ? zr_mf_find(om, was) : NULL;
+            int changed = was[0] && is[0] &&
+                          (strcmp(was, is) != 0 || zr_mf_changed(om, nm, is, 0, NULL));
+            if (changed && (amb_old || amb_new))
+                zr_move_problem(&mv, "", "can't be moved: the functions the host looked up take "
+                                "pointers to more than one type, so which is the state isn't known");
+            else if (changed && strcmp(was, is) != 0)
+                zr_move_problem(&mv, "", "is now a %s (it was a %s)", is, was);
+            else if (changed && nt && nt->size > r->state_size)
+                zr_move_problem(&mv, "", "(%s) no longer fits: %u bytes, and the host's block is %zu",
+                                is, nt->size, r->state_size);
+            else if (changed && nt && ot)
+            {
+                unsigned char *old = dry ? r->state : (unsigned char *)malloc(ot->size);
+                if (!old) return 1;
+                if (!dry)
+                {
+                    memcpy(old, r->state, ot->size);
+                    memset(r->state, 0, r->state_size);
+                    mv.notes = open_memstream(&text, &len);
+                    mv.nnotes = 0;
+                }
+                zr_move_value(&mv, "", is, ot->size, old, is, nt->size, r->state, 0);
+                if (!dry)
+                {
+                    free(old);
+                    fclose(mv.notes);
+                    if (log)
+                        fprintf(log, "reload: moved the state (%s) to the new layout%s%s\n", is,
+                                mv.nnotes ? ": " : "", mv.nnotes ? text : "");
+                    free(text);
+                    mv.notes = NULL;
+                }
+            }
+        }
+        return mv.problems;
     }
 
     static int zr_build(void *h)
@@ -915,6 +1526,32 @@ raw {
             }
         }
 
+        // State the new version would have to move: everything must be movable, or it isn't
+        // loaded.
+        ZcManifest *nm = zr_mf_copy(zr_version_manifest(&next));
+        if (r->current.tcc && nm && r->types_now)
+        {
+            char *why = NULL;
+            size_t why_len = 0;
+            FILE *wf = open_memstream(&why, &why_len);
+            int problems = zr_move_state(r, &next, r->types_now, nm, 1, wf, NULL);
+            if (wf) fclose(wf);
+            if (problems)
+            {
+                zr_mf_report(stderr, r->types_now, nm, r->version + 1);
+                fprintf(stderr,
+                        "reload: this version is not loaded: %s. Restart the program to use it; "
+                        "still running version %d\n",
+                        why ? why : "the state can't be moved", r->version);
+                free(why);
+                zr_mf_free(nm);
+                zr_version_delete(&next);
+                r->refused++;
+                return 0;
+            }
+            free(why);
+        }
+
         int keep_current = r->current.tcc && (r->keep_old || r->current.owns_globals);
         if (keep_current && r->old_count == r->old_cap)
         {
@@ -948,18 +1585,20 @@ raw {
         r->version++;
 
         // The new version's types, to compare with the one it replaces.
-        const ZcManifest *(*manifest)(void) =
-            (const ZcManifest *(*)(void))tcc_get_symbol(r->current.tcc, "_zc_manifest");
         zr_mf_free(r->types_prev);
         r->types_prev = r->types_now;
-        r->types_now = manifest ? zr_mf_copy(manifest()) : NULL;
+        r->types_now = nm;
 
-        // New storage for the globals: the values the old ones had, where they still fit.
-        if (r->current.owns_globals)
-        {
-            zr_carry_globals(r, &r->current);
-            zr_store_set(r, zr_version_manifest(&r->current));
-        }
+        // The state, moved to the new layout: the globals into the storage the new version
+        // defines (if it does), and the host's block in place.
+        free(r->moved);
+        r->moved = NULL;
+        size_t moved_len = 0;
+        FILE *log = open_memstream(&r->moved, &moved_len);
+        if (r->types_prev && r->types_now)
+            zr_move_state(r, &r->current, r->types_prev, r->types_now, 0, NULL, log);
+        if (log) fclose(log);
+        if (r->current.owns_globals) zr_store_set(r, zr_version_manifest(&r->current));
 
         zr_version_call(&r->current, "_zc_module_init");
         if (r->verbose)
@@ -968,6 +1607,7 @@ raw {
                     r->version, r->source, t1 - t0, zr_now_ms() - t1);
             zr_report_kept(r);
             zr_mf_report(stderr, r->types_prev, r->types_now, r->version);
+            if (r->moved) fputs(r->moved, stderr);
         }
         return 1;
     }
@@ -981,23 +1621,43 @@ raw {
         return zr_build(h);
     }
 
+    // A name the host looks up is a function it will call, with the state it keeps.
     static void *zr_symbol(void *h, const char *name)
     {
         ZrReloader *r = (ZrReloader *)h;
+        int known = 0;
+        for (int i = 0; i < r->fetched_count && !known; i++) known = !strcmp(r->fetched[i], name);
+        if (!known && r->fetched_count == r->fetched_cap)
+        {
+            int cap = r->fetched_cap ? r->fetched_cap * 2 : 8;
+            char **grown = (char **)realloc(r->fetched, (size_t)cap * sizeof(char *));
+            if (grown) { r->fetched = grown; r->fetched_cap = cap; }
+        }
+        if (!known && r->fetched_count < r->fetched_cap) r->fetched[r->fetched_count++] = zr_strdup(name);
         if (!r->current.tcc) return NULL;
         return tcc_get_symbol(r->current.tcc, name);
     }
 
     static const void *zr_manifest(void *h)
     {
-        const ZcManifest *(*get)(void) = (const ZcManifest *(*)(void))zr_symbol(h, "_zc_manifest");
+        ZrReloader *r = (ZrReloader *)h;
+        const ZcManifest *(*get)(void) =
+            r->current.tcc ? (const ZcManifest *(*)(void))tcc_get_symbol(r->current.tcc, "_zc_manifest") : NULL;
         return get ? get() : NULL;
+    }
+
+    static void zr_keep_state(void *h, void *state, size_t size)
+    {
+        ZrReloader *r = (ZrReloader *)h;
+        r->state = (unsigned char *)state;
+        r->state_size = size;
     }
 
     static void zr_print_changes(void *h)
     {
         ZrReloader *r = (ZrReloader *)h;
         zr_mf_report(stdout, r->types_prev, r->types_now, r->version);
+        if (r->moved) fputs(r->moved, stdout);
     }
 
     static int zr_type_changed(void *h, const char *name)
@@ -1026,6 +1686,9 @@ raw {
         zr_store_free(r);
         for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
         for (int i = 0; i < r->required_count; i++) free(r->required[i]);
+        for (int i = 0; i < r->fetched_count; i++) free(r->fetched[i]);
+        free(r->fetched);
+        free(r->moved);
         free(r->zc);
         free(r->zc_flags);
         free(r->source);
@@ -1045,6 +1708,7 @@ extern fn zr_set_verbose(h: void*, verbose: c_int);
 extern fn zr_add_include(h: void*, dir: const char*) -> c_int;
 extern fn zr_require_same(h: void*, type_name: const char*) -> c_int;
 extern fn zr_refused(h: void*) -> c_int;
+extern fn zr_keep_state(h: void*, state: void*, size: usize);
 extern fn zr_build(h: void*) -> c_int;
 extern fn zr_poll(h: void*) -> c_int;
 extern fn zr_symbol(h: void*, name: const char*) -> void*;
@@ -1090,6 +1754,14 @@ impl Reloader {
 
     /// A directory for the C compiler to search for the module's #includes.
     fn add_include(self, dir: const char*) -> bool { return zr_add_include(self.handle, dir) != 0; }
+
+    /// The block of `size` bytes the host passes to the module's functions, the same one
+    /// every time. Its type is what the functions the host looked up (symbol()) take a
+    /// pointer to. When a reload changes that type, the block's contents are moved to the
+    /// new layout in place: fields by name, enums by variant name, numbers converted, a new
+    /// field zero. A version whose state can't be moved (a pointer to a type that changed,
+    /// a type that no longer fits in `size`) is not loaded, and the reload says why.
+    fn keep_state(self, state: void*, size: usize) { zr_keep_state(self.handle, state, size); }
 
     /// Don't load a version in which the type `type_name` (its C name) changed, itself or
     /// through a type it holds by value: for state the host keeps across reloads and can't

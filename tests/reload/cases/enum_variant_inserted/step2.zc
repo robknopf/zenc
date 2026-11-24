@@ -1,6 +1,5 @@
-// A variant added before the one stored renumbers it: the host is told (type_changed),
-// through the struct that holds the enum, and clears the state rather than read Run (1)
-// as Walk.
+// A variant added before the one stored renumbers it: the Reloader moves the state by
+// variant name, so Run is still Run (read as it was, its old value 1 would be Walk).
 enum Mode { Stand, Walk, Run }
 struct State { mode: Mode; set: bool; }
 @link_name("reload_step")

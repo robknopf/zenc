@@ -1,5 +1,5 @@
-// Globals added, retyped and removed: the others keep their values, a retyped one starts
-// from its initial value again, and the reload says so.
+// Globals added, retyped and removed: the others keep their values, a retyped number is
+// converted, and the reload says so.
 let a: int = 1;
 let b: int = 10;
 @link_name("reload_step")

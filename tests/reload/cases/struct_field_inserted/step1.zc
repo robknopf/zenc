@@ -1,5 +1,5 @@
-// A field added before another changes the state's layout: the host is told
-// (type_changed), and clears the state rather than read the old bytes as the new layout.
+// A field added before another changes the state's layout: the Reloader moves the
+// state to the new layout, so lives keeps its value and the new field starts at zero.
 struct State { lives: int; }
 @link_name("reload_step")
 fn reload_step(state: State*) {

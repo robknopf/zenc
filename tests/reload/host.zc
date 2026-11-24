@@ -17,11 +17,10 @@
 // types (Reloader.print_changes()), then, for each type named in the file, whether
 // type_changed() says it changed.
 //
-// What the host does when the state's layout changes: with a `state-type` file naming the
-// state's type, it clears the state (and says so) when type_changed() says that type
-// changed, as a host that can rebuild its state would. With a `require-same` file, it
-// passes the type named there to require_same(), so a version that changes it is not
-// loaded.
+// The host gives its state block to the Reloader (keep_state), which moves its contents
+// when a reload changes its layout; the host never names the state's type. With a
+// `require-same` file, it passes the type named there to require_same(), so a version
+// that changes it is not loaded.
 
 import "std/reload.zc"
 
@@ -117,12 +116,11 @@ fn main(argc: int, argv: char**) -> int {
         fclose(cf);
     }
 
-    let state_type: char[256];
-    let reset_state = read_word(case_dir, "state-type", state_type);
     let required: char[256];
     if read_word(case_dir, "require-same", required) { code.require_same(required); }
 
     let state = calloc(1, STATE_BYTES);
+    code.keep_state(state, STATE_BYTES);
     let step: fn*(void*) = NULL;
     let source: char[4096];
     let n = 1;
@@ -134,10 +132,6 @@ fn main(argc: int, argv: char**) -> int {
         if code.build() {
             step = code.symbol("reload_step"); // a void* converts to a function pointer
             if step == NULL { fprintf(stderr, "host: step%d.zc has no reload_step\n", n); }
-            if reset_state && code.type_changed(state_type) {
-                memset(state, 0, STATE_BYTES);
-                println "(state reset: {state_type} changed)";
-            }
             if print_name[0] != 0 { print_type(code.manifest(), print_name); }
             if print_changes && n > 1 {
                 code.print_changes();

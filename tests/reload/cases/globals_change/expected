@@ -6,9 +6,10 @@ reload:   globals: c added
 a 3 b 12 c 101
 --- step 3
 reload: changes in version 3:
-reload:   globals: b retyped from int32_t to int64_t (back to its initial value)
-a 4 b 11 c 102
+reload:   globals: b retyped from int32_t to int64_t
+reload: moved the globals: b converted from int32_t to int64_t
+a 4 b 13 c 102
 --- step 4
 reload: changes in version 4:
 reload:   globals: c removed
-a 5 b 12
+a 5 b 14

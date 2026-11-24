@@ -3,5 +3,5 @@ a 1 b 2
 --- step 2
 reload: changes in version 2:
 reload:   Pair: b moved from byte 4 to 0, a moved from byte 0 to 4
-reload:   globals: p back to its initial value (Pair changed)
-a 0 b 0
+reload:   globals: p's type Pair changed
+a 1 b 2
