@@ -480,28 +480,69 @@ raw {
         if (a->kind != b->kind)
             zr_mf_item(out, &first, "now a %s (was a %s)", zr_mf_kind_name(b->kind),
                        zr_mf_kind_name(a->kind));
-        if (a->size != b->size) zr_mf_item(out, &first, "size %u -> %u", a->size, b->size);
-        if (a->align != b->align) zr_mf_item(out, &first, "align %u -> %u", a->align, b->align);
-        for (unsigned i = 0; i < b->nfields; i++)
+        if (a->size != b->size)
+            zr_mf_item(out, &first, "size %u -> %u bytes", a->size, b->size);
+        if (a->align != b->align)
+            zr_mf_item(out, &first, "alignment %u -> %u", a->align, b->align);
+
+        // Each field of the new version, in order. A run of fields that only moved, all by
+        // the same number of bytes (everything after an added field, say), is one item.
+        unsigned run = 0;          // fields in the run so far
+        long long run_delta = 0;   // bytes each moved by
+        const ZcMfField *run_first = NULL, *run_last = NULL, *run_was = NULL;
+        for (unsigned i = 0; i <= b->nfields; i++)
         {
-            const ZcMfField *y = &b->fields[i], *x = NULL;
-            for (unsigned j = 0; j < a->nfields && !x; j++)
+            const ZcMfField *y = i < b->nfields ? &b->fields[i] : NULL, *x = NULL;
+            for (unsigned j = 0; y && j < a->nfields && !x; j++)
                 if (strcmp(zr_s(a->fields[j].name), zr_s(y->name)) == 0) x = &a->fields[j];
+            int only_moved = x && x->offset != y->offset && !strcmp(zr_s(x->type), zr_s(y->type)) &&
+                             x->size == y->size && x->bits == y->bits;
+            long long delta = only_moved ? (long long)y->offset - (long long)x->offset : 0;
+            if (run && !(only_moved && delta == run_delta))
+            {
+                if (run == 1)
+                    zr_mf_item(out, &first, "%s moved from byte %u to %u", zr_s(run_first->name),
+                               run_was->offset, run_first->offset);
+                else
+                    zr_mf_item(out, &first, "%u fields moved %lld bytes %s (%s to %s)", run,
+                               run_delta < 0 ? -run_delta : run_delta,
+                               run_delta < 0 ? "earlier" : "later", zr_s(run_first->name),
+                               zr_s(run_last->name));
+                run = 0;
+            }
+            if (!y) break;
+            if (only_moved)
+            {
+                if (!run)
+                {
+                    run_first = y;
+                    run_was = x;
+                    run_delta = delta;
+                }
+                run_last = y;
+                run++;
+                continue;
+            }
             if (!x)
             {
-                if (y->bits) zr_mf_item(out, &first, "%s added (%u bits)", zr_s(y->name), y->bits);
-                else zr_mf_item(out, &first, "%s added at %u", zr_s(y->name), y->offset);
+                if (y->bits)
+                    zr_mf_item(out, &first, "%s added (%u bits)", zr_s(y->name), y->bits);
+                else
+                    zr_mf_item(out, &first, "%s added at byte %u", zr_s(y->name), y->offset);
                 continue;
             }
             if (strcmp(zr_s(x->type), zr_s(y->type)))
-                zr_mf_item(out, &first, "%s retyped %s -> %s", zr_s(y->name), zr_s(x->type),
+                zr_mf_item(out, &first, "%s retyped from %s to %s", zr_s(y->name), zr_s(x->type),
                            zr_s(y->type));
             else if (x->size != y->size)
-                zr_mf_item(out, &first, "%s resized %u -> %u", zr_s(y->name), x->size, y->size);
+                zr_mf_item(out, &first, "%s resized from %u to %u bytes", zr_s(y->name), x->size,
+                           y->size);
             if (x->offset != y->offset)
-                zr_mf_item(out, &first, "%s moved %u -> %u", zr_s(y->name), x->offset, y->offset);
+                zr_mf_item(out, &first, "%s moved from byte %u to %u", zr_s(y->name), x->offset,
+                           y->offset);
             if (x->bits != y->bits)
-                zr_mf_item(out, &first, "%s bits %u -> %u", zr_s(y->name), x->bits, y->bits);
+                zr_mf_item(out, &first, "%s resized from %u to %u bits", zr_s(y->name), x->bits,
+                           y->bits);
         }
         for (unsigned j = 0; j < a->nfields; j++)
         {
@@ -521,7 +562,7 @@ raw {
                 continue;
             }
             if (x->value != y->value)
-                zr_mf_item(out, &first, "%s renumbered %lld -> %lld", zr_s(y->name), x->value,
+                zr_mf_item(out, &first, "%s renumbered from %lld to %lld", zr_s(y->name), x->value,
                            y->value);
             if (strcmp(zr_s(x->payload), zr_s(y->payload)))
                 zr_mf_item(out, &first, "%s carries %s (was %s)", zr_s(y->name),

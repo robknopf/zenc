@@ -2,9 +2,9 @@
 one
 --- step 2
 reload: version 2 changes types:
-reload:   Mode: Walk added (= 1), Run renumbered 1 -> 2
-reload:   State: size 8 -> 20, flag added at 4, speed moved 4 -> 8, name added at 12
-reload:   Wrap: size 8 -> 20, s resized 8 -> 20
+reload:   Mode: Walk added (= 1), Run renumbered from 1 to 2
+reload:   State: size 8 -> 20 bytes, flag added at byte 4, speed moved from byte 4 to 8, name added at byte 12
+reload:   Wrap: size 8 -> 20 bytes, s resized from 8 to 20 bytes
 reload:   added: Fresh
 reload:   removed: Gone
 reload:   also changed: Pet (holds Mode)
@@ -18,7 +18,7 @@ Fresh changed: yes
 two
 --- step 3
 reload: version 3 changes types:
-reload:   State: total added at 0, count removed
+reload:   State: total added at byte 0, count removed
 reload:   also changed: Wrap (holds State)
 State changed: yes
 Wrap changed: yes
@@ -37,3 +37,27 @@ Mode changed: no
 Gone changed: no
 Fresh changed: no
 four
+--- step 5
+reload: version 5 changes types:
+reload:   State: size 20 -> 24 bytes, pad added at byte 0, 4 fields moved 4 bytes later (total to name)
+reload:   Wrap: size 20 -> 24 bytes, s resized from 20 to 24 bytes
+State changed: yes
+Wrap changed: yes
+Pet changed: no
+Node changed: no
+Mode changed: no
+Gone changed: no
+Fresh changed: no
+five
+--- step 6
+reload: version 6 changes types:
+reload:   State: size 24 -> 20 bytes, 4 fields moved 4 bytes earlier (total to name), pad removed
+reload:   Wrap: size 24 -> 20 bytes, s resized from 24 to 20 bytes
+State changed: yes
+Wrap changed: yes
+Pet changed: no
+Node changed: no
+Mode changed: no
+Gone changed: no
+Fresh changed: no
+six
