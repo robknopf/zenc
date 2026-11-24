@@ -12,7 +12,10 @@
 //
 // The host prints "--- step N" before each step, so the expected output shows which
 // version printed what. If CASE_DIR has a `print-type` file, it names a type whose layout
-// the host prints from each version's manifest when it loads (Reloader.manifest()).
+// the host prints from each version's manifest when it loads (Reloader.manifest()). If it
+// has a `print-changes` file, the host prints what each reload changed in the module's
+// types (Reloader.print_changes()), then, for each type named in the file, whether
+// type_changed() says it changed.
 
 import "std/reload.zc"
 
@@ -83,6 +86,19 @@ fn main(argc: int, argv: char**) -> int {
         fclose(tf);
     }
 
+    // The types to ask type_changed() about, if the case prints changes.
+    let changes_names: char[1024];
+    changes_names[0] = 0;
+    let changes_path: char[4096];
+    snprintf(changes_path, 4096, "%s/print-changes", case_dir);
+    let print_changes = exists(changes_path);
+    if print_changes {
+        let cf = fopen(changes_path, "r");
+        let got = fread(changes_names, 1, 1023, cf);
+        changes_names[got] = 0;
+        fclose(cf);
+    }
+
     let state = calloc(1, STATE_BYTES);
     let step: fn*(void*) = NULL;
     let source: char[4096];
@@ -96,6 +112,17 @@ fn main(argc: int, argv: char**) -> int {
             step = code.symbol("reload_step"); // a void* converts to a function pointer
             if step == NULL { fprintf(stderr, "host: step%d.zc has no reload_step\n", n); }
             if print_name[0] != 0 { print_type(code.manifest(), print_name); }
+            if print_changes && n > 1 {
+                code.print_changes();
+                let names: char[1024];
+                strcpy(names, changes_names);
+                let name = strtok(names, " \t\r\n");
+                while name != NULL {
+                    if code.type_changed(name) { println "{name} changed: yes"; }
+                    else { println "{name} changed: no"; }
+                    name = strtok(NULL, " \t\r\n");
+                }
+            }
         } else {
             println "(build failed, running the previous module)";
         }

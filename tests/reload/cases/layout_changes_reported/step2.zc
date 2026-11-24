@@ -1,0 +1,11 @@
+// A reload reports what changed in the module's types, and type_changed() answers for one.
+// State grows (Wrap with it); Mode gets a variant in the middle, so Run is renumbered and
+// Pet, which holds a Mode, changes too; Node holds only a pointer; Gone goes, Fresh comes.
+struct State { count: int; flag: u8; speed: f32; name: char[8]; }
+struct Wrap { s: State; }
+enum Mode { Idle, Walk, Run }
+struct Pet { mode: Mode; id: int; }
+struct Node { next: State*; }
+struct Fresh { z: int; }
+@link_name("reload_step")
+fn reload_step(state: void*) { println "two"; }

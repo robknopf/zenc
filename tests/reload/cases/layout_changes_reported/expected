@@ -1,0 +1,39 @@
+--- step 1
+one
+--- step 2
+reload: version 2 changes types:
+reload:   Mode: Walk added (= 1), Run renumbered 1 -> 2
+reload:   State: size 8 -> 20, flag added at 4, speed moved 4 -> 8, name added at 12
+reload:   Wrap: size 8 -> 20, s resized 8 -> 20
+reload:   added: Fresh
+reload:   removed: Gone
+reload:   also changed: Pet (holds Mode)
+State changed: yes
+Wrap changed: yes
+Pet changed: yes
+Node changed: no
+Mode changed: yes
+Gone changed: yes
+Fresh changed: yes
+two
+--- step 3
+reload: version 3 changes types:
+reload:   State: total added at 0, count removed
+reload:   also changed: Wrap (holds State)
+State changed: yes
+Wrap changed: yes
+Pet changed: no
+Node changed: no
+Mode changed: no
+Gone changed: no
+Fresh changed: no
+three
+--- step 4
+State changed: no
+Wrap changed: no
+Pet changed: no
+Node changed: no
+Mode changed: no
+Gone changed: no
+Fresh changed: no
+four

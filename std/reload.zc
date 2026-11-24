@@ -35,6 +35,7 @@ include <libtcc.h>
 
 raw {
     #include <dirent.h>
+    #include <stdarg.h>
     #include <stdint.h>
     #include <stdio.h>
     #include <stdlib.h>
@@ -81,6 +82,8 @@ raw {
         int old_cap;
         int version;
         int64_t seen; // newest .zc modification time at the last build, or -1
+        ZcManifest *types_now;  // a copy of the current version's manifest, or NULL
+        ZcManifest *types_prev; // the same for the version before it
     } ZrReloader;
 
     static char *zr_strdup(const char *s)
@@ -270,6 +273,326 @@ raw {
         }
     }
 
+    // ---- Comparing versions' manifests ------------------------------------------------
+    //
+    // The Reloader keeps a copy of each version's manifest, its types sorted by name, so the
+    // next version can be compared with it after the old code is gone.
+
+    static const char *zr_s(const char *s) { return s ? s : ""; }
+
+    static int zr_mf_by_name(const void *a, const void *b)
+    {
+        return strcmp(zr_s(((const ZcMfType *)a)->c_name), zr_s(((const ZcMfType *)b)->c_name));
+    }
+
+    static void zr_mf_free(ZcManifest *m)
+    {
+        if (!m) return;
+        for (unsigned i = 0; i < m->ntypes; i++)
+        {
+            const ZcMfType *t = &m->types[i];
+            free((void *)t->c_name);
+            free((void *)t->zc_name);
+            for (unsigned j = 0; j < t->nfields; j++)
+            {
+                free((void *)t->fields[j].name);
+                free((void *)t->fields[j].type);
+            }
+            for (unsigned j = 0; j < t->nvariants; j++)
+            {
+                free((void *)t->variants[j].name);
+                free((void *)t->variants[j].payload);
+            }
+            free((void *)t->fields);
+            free((void *)t->variants);
+        }
+        free((void *)m->types);
+        free((void *)m->zc_version);
+        free(m);
+    }
+
+    // A copy of `m` that owns all its memory, or NULL (no manifest, a format this file
+    // doesn't know, or out of memory).
+    static ZcManifest *zr_mf_copy(const ZcManifest *m)
+    {
+        if (!m || m->format != 1) return NULL;
+        ZcManifest *c = (ZcManifest *)calloc(1, sizeof(ZcManifest));
+        ZcMfType *types = (ZcMfType *)calloc(m->ntypes ? m->ntypes : 1, sizeof(ZcMfType));
+        if (!c || !types)
+        {
+            free(c);
+            free(types);
+            return NULL;
+        }
+        c->format = m->format;
+        c->zc_version = zr_strdup(m->zc_version);
+        c->types = types;
+        int ok = 1;
+        for (unsigned i = 0; i < m->ntypes; i++)
+        {
+            const ZcMfType *t = &m->types[i];
+            ZcMfType *d = &types[i];
+            *d = *t;
+            d->c_name = zr_strdup(t->c_name);
+            d->zc_name = zr_strdup(t->zc_name);
+            d->fields = NULL;
+            d->variants = NULL;
+            d->nfields = 0;
+            d->nvariants = 0;
+            c->ntypes = i + 1;
+            if (!d->c_name) ok = 0;
+            if (t->nfields)
+            {
+                ZcMfField *f = (ZcMfField *)calloc(t->nfields, sizeof(ZcMfField));
+                if (!f) { ok = 0; break; }
+                d->fields = f;
+                d->nfields = t->nfields;
+                for (unsigned j = 0; j < t->nfields; j++)
+                {
+                    f[j] = t->fields[j];
+                    f[j].name = zr_strdup(t->fields[j].name);
+                    f[j].type = zr_strdup(t->fields[j].type);
+                }
+            }
+            if (t->nvariants)
+            {
+                ZcMfVariant *v = (ZcMfVariant *)calloc(t->nvariants, sizeof(ZcMfVariant));
+                if (!v) { ok = 0; break; }
+                d->variants = v;
+                d->nvariants = t->nvariants;
+                for (unsigned j = 0; j < t->nvariants; j++)
+                {
+                    v[j] = t->variants[j];
+                    v[j].name = zr_strdup(t->variants[j].name);
+                    v[j].payload = zr_strdup(t->variants[j].payload);
+                }
+            }
+        }
+        if (!ok)
+        {
+            zr_mf_free(c);
+            return NULL;
+        }
+        qsort(types, c->ntypes, sizeof(ZcMfType), zr_mf_by_name);
+        return c;
+    }
+
+    static const ZcMfType *zr_mf_find(const ZcManifest *m, const char *name)
+    {
+        if (!m || !name) return NULL;
+        ZcMfType key;
+        memset(&key, 0, sizeof(key));
+        key.c_name = name;
+        return (const ZcMfType *)bsearch(&key, m->types, m->ntypes, sizeof(ZcMfType), zr_mf_by_name);
+    }
+
+    // The two descriptions of a type are the same: kind, size, alignment, and every field
+    // and variant, in order.
+    static int zr_mf_same(const ZcMfType *a, const ZcMfType *b)
+    {
+        if (a->kind != b->kind || a->size != b->size || a->align != b->align ||
+            a->nfields != b->nfields || a->nvariants != b->nvariants)
+            return 0;
+        for (unsigned i = 0; i < a->nfields; i++)
+        {
+            const ZcMfField *x = &a->fields[i], *y = &b->fields[i];
+            if (strcmp(zr_s(x->name), zr_s(y->name)) || strcmp(zr_s(x->type), zr_s(y->type)) ||
+                x->offset != y->offset || x->size != y->size || x->bits != y->bits)
+                return 0;
+        }
+        for (unsigned i = 0; i < a->nvariants; i++)
+        {
+            const ZcMfVariant *x = &a->variants[i], *y = &b->variants[i];
+            if (strcmp(zr_s(x->name), zr_s(y->name)) || x->value != y->value ||
+                strcmp(zr_s(x->payload), zr_s(y->payload)))
+                return 0;
+        }
+        return 1;
+    }
+
+    // The type a field or payload holds by value ("Vec2" for "Vec2" or "Vec2[4]"), in
+    // `buf`, or NULL for a pointer or function pointer, which holds nothing by value.
+    static const char *zr_mf_held(const char *type, char *buf, size_t size)
+    {
+        if (!type || strchr(type, '*') || strchr(type, '(')) return NULL;
+        if (strncmp(type, "struct ", 7) == 0) type += 7;
+        size_t n = strcspn(type, "[");
+        while (n > 0 && type[n - 1] == ' ') n--;
+        if (n == 0 || n >= size) return NULL;
+        memcpy(buf, type, n);
+        buf[n] = 0;
+        return buf;
+    }
+
+    // `name` changed between the manifests: it is in only one, its description differs,
+    // or a type it holds by value changed. The one it holds is named in `via`, if given.
+    static int zr_mf_changed(const ZcManifest *old, const ZcManifest *now, const char *name,
+                             int depth, const char **via)
+    {
+        const ZcMfType *a = zr_mf_find(old, name), *b = zr_mf_find(now, name);
+        if (!a && !b) return 0;
+        if (!a || !b || !zr_mf_same(a, b)) return 1;
+        if (depth > 64) return 0;
+        char buf[256];
+        for (unsigned i = 0; i < b->nfields + b->nvariants; i++)
+        {
+            const char *t = i < b->nfields ? b->fields[i].type : b->variants[i - b->nfields].payload;
+            const char *held = zr_mf_held(t, buf, sizeof(buf));
+            const ZcMfType *h = held ? zr_mf_find(now, held) : NULL;
+            if (h && zr_mf_changed(old, now, held, depth + 1, NULL))
+            {
+                if (via) *via = h->zc_name ? h->zc_name : h->c_name;
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    static const char *zr_mf_kind_name(unsigned kind)
+    {
+        switch (kind)
+        {
+        case 1: return "struct";
+        case 2: return "union";
+        case 3: return "enum";
+        case 4: return "enum with payloads";
+        case 5: return "vector type";
+        default: return "type";
+        }
+    }
+
+    // One ", "-separated item of a type's line in the report.
+    static void zr_mf_item(FILE *out, int *first, const char *fmt, ...)
+    {
+        fputs(*first ? ": " : ", ", out);
+        *first = 0;
+        va_list ap;
+        va_start(ap, fmt);
+        vfprintf(out, fmt, ap);
+        va_end(ap);
+    }
+
+    // What differs between two descriptions of a type, on one line.
+    static void zr_mf_report_type(FILE *out, const ZcMfType *a, const ZcMfType *b)
+    {
+        int first = 1;
+        fprintf(out, "reload:   %s", zr_s(b->zc_name ? b->zc_name : b->c_name));
+        if (a->kind != b->kind)
+            zr_mf_item(out, &first, "now a %s (was a %s)", zr_mf_kind_name(b->kind),
+                       zr_mf_kind_name(a->kind));
+        if (a->size != b->size) zr_mf_item(out, &first, "size %u -> %u", a->size, b->size);
+        if (a->align != b->align) zr_mf_item(out, &first, "align %u -> %u", a->align, b->align);
+        for (unsigned i = 0; i < b->nfields; i++)
+        {
+            const ZcMfField *y = &b->fields[i], *x = NULL;
+            for (unsigned j = 0; j < a->nfields && !x; j++)
+                if (strcmp(zr_s(a->fields[j].name), zr_s(y->name)) == 0) x = &a->fields[j];
+            if (!x)
+            {
+                if (y->bits) zr_mf_item(out, &first, "%s added (%u bits)", zr_s(y->name), y->bits);
+                else zr_mf_item(out, &first, "%s added at %u", zr_s(y->name), y->offset);
+                continue;
+            }
+            if (strcmp(zr_s(x->type), zr_s(y->type)))
+                zr_mf_item(out, &first, "%s retyped %s -> %s", zr_s(y->name), zr_s(x->type),
+                           zr_s(y->type));
+            else if (x->size != y->size)
+                zr_mf_item(out, &first, "%s resized %u -> %u", zr_s(y->name), x->size, y->size);
+            if (x->offset != y->offset)
+                zr_mf_item(out, &first, "%s moved %u -> %u", zr_s(y->name), x->offset, y->offset);
+            if (x->bits != y->bits)
+                zr_mf_item(out, &first, "%s bits %u -> %u", zr_s(y->name), x->bits, y->bits);
+        }
+        for (unsigned j = 0; j < a->nfields; j++)
+        {
+            int kept = 0;
+            for (unsigned i = 0; i < b->nfields && !kept; i++)
+                kept = strcmp(zr_s(a->fields[j].name), zr_s(b->fields[i].name)) == 0;
+            if (!kept) zr_mf_item(out, &first, "%s removed", zr_s(a->fields[j].name));
+        }
+        for (unsigned i = 0; i < b->nvariants; i++)
+        {
+            const ZcMfVariant *y = &b->variants[i], *x = NULL;
+            for (unsigned j = 0; j < a->nvariants && !x; j++)
+                if (strcmp(zr_s(a->variants[j].name), zr_s(y->name)) == 0) x = &a->variants[j];
+            if (!x)
+            {
+                zr_mf_item(out, &first, "%s added (= %lld)", zr_s(y->name), y->value);
+                continue;
+            }
+            if (x->value != y->value)
+                zr_mf_item(out, &first, "%s renumbered %lld -> %lld", zr_s(y->name), x->value,
+                           y->value);
+            if (strcmp(zr_s(x->payload), zr_s(y->payload)))
+                zr_mf_item(out, &first, "%s carries %s (was %s)", zr_s(y->name),
+                           y->payload ? y->payload : "nothing", x->payload ? x->payload : "nothing");
+        }
+        for (unsigned j = 0; j < a->nvariants; j++)
+        {
+            int kept = 0;
+            for (unsigned i = 0; i < b->nvariants && !kept; i++)
+                kept = strcmp(zr_s(a->variants[j].name), zr_s(b->variants[i].name)) == 0;
+            if (!kept) zr_mf_item(out, &first, "%s removed", zr_s(a->variants[j].name));
+        }
+        if (first) fputs(": fields or variants reordered", out);
+        fputc('\n', out);
+    }
+
+    // What changed between two versions' types, or nothing if no type changed.
+    static void zr_mf_report(FILE *out, const ZcManifest *old, const ZcManifest *now, int version)
+    {
+        if (!old || !now) return;
+        int header = 0;
+#define ZR_MF_HEADER() \
+        do { if (!header) { fprintf(out, "reload: version %d changes types:\n", version); header = 1; } } while (0)
+
+        // Types whose own description changed.
+        for (unsigned i = 0; i < now->ntypes; i++)
+        {
+            const ZcMfType *b = &now->types[i], *a = zr_mf_find(old, b->c_name);
+            if (a && !zr_mf_same(a, b))
+            {
+                ZR_MF_HEADER();
+                zr_mf_report_type(out, a, b);
+            }
+        }
+        // Types added and removed.
+        int any = 0;
+        for (unsigned i = 0; i < now->ntypes; i++)
+        {
+            const ZcMfType *b = &now->types[i];
+            if (zr_mf_find(old, b->c_name)) continue;
+            ZR_MF_HEADER();
+            fprintf(out, any ? ", %s" : "reload:   added: %s", zr_s(b->zc_name ? b->zc_name : b->c_name));
+            any = 1;
+        }
+        if (any) fputc('\n', out);
+        any = 0;
+        for (unsigned i = 0; i < old->ntypes; i++)
+        {
+            const ZcMfType *a = &old->types[i];
+            if (zr_mf_find(now, a->c_name)) continue;
+            ZR_MF_HEADER();
+            fprintf(out, any ? ", %s" : "reload:   removed: %s", zr_s(a->zc_name ? a->zc_name : a->c_name));
+            any = 1;
+        }
+        if (any) fputc('\n', out);
+        // Types the same themselves, holding by value one that changed.
+        any = 0;
+        for (unsigned i = 0; i < now->ntypes; i++)
+        {
+            const ZcMfType *b = &now->types[i], *a = zr_mf_find(old, b->c_name);
+            const char *via = NULL;
+            if (!a || !zr_mf_same(a, b) || !zr_mf_changed(old, now, b->c_name, 0, &via)) continue;
+            ZR_MF_HEADER();
+            fprintf(out, any ? ", %s (holds %s)" : "reload:   also changed: %s (holds %s)",
+                    zr_s(b->zc_name ? b->zc_name : b->c_name), zr_s(via));
+            any = 1;
+        }
+        if (any) fputc('\n', out);
+#undef ZR_MF_HEADER
+    }
+
     static int zr_build(void *h)
     {
         ZrReloader *r = (ZrReloader *)h;
@@ -338,12 +661,21 @@ raw {
         }
         r->current = next;
         r->version++;
+
+        // The new version's types, to compare with the one it replaces.
+        const ZcManifest *(*manifest)(void) =
+            (const ZcManifest *(*)(void))tcc_get_symbol(r->current.tcc, "_zc_manifest");
+        zr_mf_free(r->types_prev);
+        r->types_prev = r->types_now;
+        r->types_now = manifest ? zr_mf_copy(manifest()) : NULL;
+
         zr_version_call(&r->current, "_zc_module_init");
         if (r->verbose)
         {
             fprintf(stderr, "reload: version %d of %s loaded (zc %.0f ms, tcc %.0f ms)\n",
                     r->version, r->source, t1 - t0, zr_now_ms() - t1);
             zr_report_kept(r);
+            zr_mf_report(stderr, r->types_prev, r->types_now, r->version);
         }
         return 1;
     }
@@ -370,6 +702,21 @@ raw {
         return get ? get() : NULL;
     }
 
+    static void zr_print_changes(void *h)
+    {
+        ZrReloader *r = (ZrReloader *)h;
+        zr_mf_report(stdout, r->types_prev, r->types_now, r->version);
+    }
+
+    static int zr_type_changed(void *h, const char *name)
+    {
+        ZrReloader *r = (ZrReloader *)h;
+        if (r->version < 2) return 0;
+        // Without both manifests nothing can be ruled out.
+        if (!r->types_prev || !r->types_now) return 1;
+        return zr_mf_changed(r->types_prev, r->types_now, name, 0, NULL);
+    }
+
     static int zr_version(void *h) { return ((ZrReloader *)h)->version; }
     static int zr_kept(void *h) { return ((ZrReloader *)h)->old_count; }
 
@@ -381,6 +728,8 @@ raw {
         for (int i = 0; i < r->old_count; i++) zr_version_delete(&r->old[i]);
         free(r->old);
         zr_version_delete(&r->current);
+        zr_mf_free(r->types_now);
+        zr_mf_free(r->types_prev);
         for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
         free(r->zc);
         free(r->zc_flags);
@@ -403,6 +752,8 @@ extern fn zr_build(h: void*) -> c_int;
 extern fn zr_poll(h: void*) -> c_int;
 extern fn zr_symbol(h: void*, name: const char*) -> void*;
 extern fn zr_manifest(h: void*) -> const void*;
+extern fn zr_print_changes(h: void*);
+extern fn zr_type_changed(h: void*, name: const char*) -> c_int;
 extern fn zr_version(h: void*) -> c_int;
 extern fn zr_kept(h: void*) -> c_int;
 extern fn zr_free(h: void*);
@@ -458,6 +809,18 @@ impl Reloader {
     /// The version loaded now's description of its types (a `const ZcManifest*`, declared
     /// in this file's C), or NULL.
     fn manifest(self) -> const void* { return zr_manifest(self.handle); }
+
+    /// Print what changed in the types of the version loaded now, compared with the one
+    /// before it: structs and enums whose layout or values changed, types added and
+    /// removed, and types that hold one that changed by value. Nothing if no type changed.
+    /// With verbose() on (the default), each reload prints this to stderr.
+    fn print_changes(self) { zr_print_changes(self.handle); }
+
+    /// True if the type `name` (its C name: "State", "Box__int32_t") is not the same in the
+    /// version loaded now as in the one before: its layout or values changed, it was added
+    /// or removed, or a type it holds by value changed. Memory laid out as the old type
+    /// can't be read as the new one. False after the first build.
+    fn type_changed(self, name: const char*) -> bool { return zr_type_changed(self.handle, name) != 0; }
 
     /// How many versions have been loaded.
     fn version(self) -> int { return (int)zr_version(self.handle); }
