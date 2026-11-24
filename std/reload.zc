@@ -53,7 +53,7 @@ raw {
     #include <time.h>
     #include <unistd.h>
 
-    enum { ZR_MAX_INCLUDES = 32 };
+    enum { ZR_MAX_INCLUDES = 32, ZR_MAX_REQUIRED = 32 };
 
     // What `zc transpile --reload` writes about a module's types, returned by its
     // `_zc_manifest()`. The same definitions are in the module's C (codegen_main.c,
@@ -83,6 +83,8 @@ raw {
         char *c_file;
         char *watch_dir;
         char *includes[ZR_MAX_INCLUDES];
+        char *required[ZR_MAX_REQUIRED]; // types a new version must not change (require_same)
+        int required_count;
         int include_count;
         int keep_old;
         int verbose;
@@ -96,6 +98,7 @@ raw {
         ZcManifest *types_now;  // a copy of the current version's manifest, or NULL
         ZcManifest *types_prev; // the same for the version before it
         ZcMfGlobal *store;      // the module's globals: in the version that owns them
+        int refused;            // builds not loaded because of require_same()
         unsigned nstore;
     } ZrReloader;
 
@@ -247,6 +250,14 @@ raw {
         ZrReloader *r = (ZrReloader *)h;
         if (r->include_count >= ZR_MAX_INCLUDES) return 0;
         r->includes[r->include_count++] = zr_strdup(dir);
+        return 1;
+    }
+
+    static int zr_require_same(void *h, const char *type)
+    {
+        ZrReloader *r = (ZrReloader *)h;
+        if (r->required_count >= ZR_MAX_REQUIRED) return 0;
+        r->required[r->required_count++] = zr_strdup(type);
         return 1;
     }
 
@@ -628,6 +639,17 @@ raw {
         return NULL;
     }
 
+    // The type `g` holds by value is in a manifest and changed between the two.
+    static int zr_global_type_changed(const ZcManifest *old, const ZcManifest *now,
+                                      const ZcMfGlobal *g, const char **type)
+    {
+        static char buf[256];
+        const char *held = zr_mf_held(g->type, buf, sizeof(buf));
+        if (!held || !old || !now) return 0;
+        if (type) *type = held;
+        return zr_mf_changed(old, now, held, 0, NULL);
+    }
+
     // What changed between two versions' types and globals, or nothing if none did.
     static void zr_mf_report(FILE *out, const ZcManifest *old, const ZcManifest *now, int version)
     {
@@ -687,11 +709,16 @@ raw {
         {
             const ZcMfGlobal *b = &now->globals[i];
             const ZcMfGlobal *a = zr_global_find(old->globals, old->nglobals, b->name);
-            if (a && !strcmp(zr_s(a->type), zr_s(b->type)) && a->size == b->size) continue;
+            const char *held = NULL;
+            int same = a && !strcmp(zr_s(a->type), zr_s(b->type)) && a->size == b->size;
+            int held_changed = same && zr_global_type_changed(old, now, b, &held);
+            if (same && !held_changed) continue;
             ZR_MF_HEADER();
             fputs(first ? "reload:   globals: " : ", ", out);
             first = 0;
-            if (a)
+            if (held_changed)
+                fprintf(out, "%s back to its initial value (%s changed)", zr_s(b->name), held);
+            else if (a)
                 fprintf(out, "%s retyped from %s to %s (back to its initial value)", zr_s(b->name),
                         zr_s(a->type), zr_s(b->type));
             else
@@ -785,18 +812,24 @@ raw {
     // `v`, compiled to use the store, really does: each of its globals is one in the store,
     // of the same type, at the store's address (not, say, a variable of the same name that
     // the host exports).
+    //
+    // Nor may a global's type have changed (a struct it holds rearranged, say): its old bytes
+    // can't be read as the new layout.
     static int zr_globals_shared(ZrReloader *r, ZrVersion *v)
     {
-        const ZcManifest *m = zr_version_manifest(v);
+        ZcManifest *m = zr_mf_copy(zr_version_manifest(v));
         if (!m) return 0;
-        for (unsigned i = 0; i < m->nglobals; i++)
+        int shared = 1;
+        for (unsigned i = 0; i < m->nglobals && shared; i++)
         {
             const ZcMfGlobal *g = &m->globals[i];
             const ZcMfGlobal *s = zr_global_find(r->store, r->nstore, g->name);
-            if (!s || strcmp(zr_s(s->type), zr_s(g->type)) || s->size != g->size || s->addr != g->addr)
-                return 0;
+            if (!s || strcmp(zr_s(s->type), zr_s(g->type)) || s->size != g->size ||
+                s->addr != g->addr || zr_global_type_changed(r->types_now, m, g, NULL))
+                shared = 0;
         }
-        return 1;
+        zr_mf_free(m);
+        return shared;
     }
 
     // Into the globals `v` defines, the values of the store's with the same name and type.
@@ -808,7 +841,8 @@ raw {
         {
             const ZcMfGlobal *g = &m->globals[i];
             const ZcMfGlobal *s = zr_global_find(r->store, r->nstore, g->name);
-            if (s && !strcmp(zr_s(s->type), zr_s(g->type)) && s->size == g->size)
+            if (s && !strcmp(zr_s(s->type), zr_s(g->type)) && s->size == g->size &&
+                !zr_global_type_changed(r->types_prev, r->types_now, g, NULL))
                 memcpy(g->addr, s->addr, g->size);
         }
     }
@@ -856,6 +890,31 @@ raw {
         }
 
         // Room to keep the version being replaced, before anything about it changes.
+        // A version that changes a type the host requires the same is not loaded.
+        if (r->current.tcc && r->required_count && r->types_now)
+        {
+            ZcManifest *m = zr_mf_copy(zr_version_manifest(&next));
+            int refused = -1;
+            for (int i = 0; m && i < r->required_count && refused < 0; i++)
+                if (zr_mf_changed(r->types_now, m, r->required[i], 0, NULL)) refused = i;
+            if (refused >= 0)
+            {
+                zr_mf_report(stderr, r->types_now, m, r->version + 1);
+                fprintf(stderr,
+                        "reload: %s changed, so this version is not loaded: the running state "
+                        "can't be read as the new layout. Restart the program to use it; still "
+                        "running version %d\n",
+                        r->required[refused], r->version);
+                r->refused++;
+            }
+            zr_mf_free(m);
+            if (refused >= 0)
+            {
+                zr_version_delete(&next);
+                return 0;
+            }
+        }
+
         int keep_current = r->current.tcc && (r->keep_old || r->current.owns_globals);
         if (keep_current && r->old_count == r->old_cap)
         {
@@ -951,6 +1010,7 @@ raw {
     }
 
     static int zr_version(void *h) { return ((ZrReloader *)h)->version; }
+    static int zr_refused(void *h) { return ((ZrReloader *)h)->refused; }
     static int zr_kept(void *h) { return ((ZrReloader *)h)->old_count; }
 
     static void zr_free(void *h)
@@ -965,6 +1025,7 @@ raw {
         zr_mf_free(r->types_prev);
         zr_store_free(r);
         for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
+        for (int i = 0; i < r->required_count; i++) free(r->required[i]);
         free(r->zc);
         free(r->zc_flags);
         free(r->source);
@@ -982,6 +1043,8 @@ extern fn zr_set_watch(h: void*, dir: const char*);
 extern fn zr_set_keep_old(h: void*, keep: c_int);
 extern fn zr_set_verbose(h: void*, verbose: c_int);
 extern fn zr_add_include(h: void*, dir: const char*) -> c_int;
+extern fn zr_require_same(h: void*, type_name: const char*) -> c_int;
+extern fn zr_refused(h: void*) -> c_int;
 extern fn zr_build(h: void*) -> c_int;
 extern fn zr_poll(h: void*) -> c_int;
 extern fn zr_symbol(h: void*, name: const char*) -> void*;
@@ -1027,6 +1090,18 @@ impl Reloader {
 
     /// A directory for the C compiler to search for the module's #includes.
     fn add_include(self, dir: const char*) -> bool { return zr_add_include(self.handle, dir) != 0; }
+
+    /// Don't load a version in which the type `type_name` (its C name) changed, itself or
+    /// through a type it holds by value: for state the host keeps across reloads and can't
+    /// rebuild. The running version stays in use, and the reload prints what changed and
+    /// that the program must be restarted. A host that can rebuild its state instead asks
+    /// type_changed() after a reload, and resets it.
+    fn require_same(self, type_name: const char*) -> bool {
+        return zr_require_same(self.handle, type_name) != 0;
+    }
+
+    /// How many builds were not loaded because of require_same().
+    fn refused(self) -> int { return (int)zr_refused(self.handle); }
 
     /// Build now. True if a new version was loaded; on failure, the errors are printed and
     /// the version already loaded, if any, stays in use.

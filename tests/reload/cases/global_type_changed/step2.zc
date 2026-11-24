@@ -1,0 +1,9 @@
+// A global whose struct type is rearranged, at the same size, starts again from its
+// initial value rather than have its old bytes read as the new layout.
+// Read as the new layout, the old bytes would give a 2 b 1.
+struct Pair { b: int; a: int; }
+let p: Pair;
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "a {p.a} b {p.b}";
+}

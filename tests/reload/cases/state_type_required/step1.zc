@@ -1,0 +1,9 @@
+// With require_same("State"), a version that changes State is not loaded: the running
+// version stays in use, and the state is untouched.
+struct State { lives: int; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.lives == 0 { state.lives = 3; }
+    state.lives = state.lives - 1;
+    println "lives {state.lives}";
+}

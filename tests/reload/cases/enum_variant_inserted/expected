@@ -1,4 +1,5 @@
 --- step 1
 run
 --- step 2
+(state reset: State changed)
 run
