@@ -1,5 +1,5 @@
 // A reload reports what changed in the module's types, and type_changed() answers for one.
-// And removed again: the four move 4 bytes earlier.
+// And removed again: the four shift up 4 bytes.
 struct State { total: int; flag: u8; speed: f32; name: char[8]; }
 struct Wrap { s: State; }
 enum Mode { Idle, Walk, Run }

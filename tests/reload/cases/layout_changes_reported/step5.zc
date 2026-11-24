@@ -1,5 +1,5 @@
 // A reload reports what changed in the module's types, and type_changed() answers for one.
-// A field inserted first: the four after it move 4 bytes later, as one item.
+// A field inserted first: the four after it shift down 4 bytes, as one item.
 struct State { pad: int; total: int; flag: u8; speed: f32; name: char[8]; }
 struct Wrap { s: State; }
 enum Mode { Idle, Walk, Run }

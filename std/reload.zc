@@ -486,7 +486,8 @@ raw {
             zr_mf_item(out, &first, "alignment %u -> %u", a->align, b->align);
 
         // Each field of the new version, in order. A run of fields that only moved, all by
-        // the same number of bytes (everything after an added field, say), is one item.
+        // the same number of bytes (everything after an added field, say), is one item:
+        // shifted down (to higher offsets) or up.
         unsigned run = 0;          // fields in the run so far
         long long run_delta = 0;   // bytes each moved by
         const ZcMfField *run_first = NULL, *run_last = NULL, *run_was = NULL;
@@ -504,9 +505,9 @@ raw {
                     zr_mf_item(out, &first, "%s moved from byte %u to %u", zr_s(run_first->name),
                                run_was->offset, run_first->offset);
                 else
-                    zr_mf_item(out, &first, "%u fields moved %lld bytes %s (%s to %s)", run,
-                               run_delta < 0 ? -run_delta : run_delta,
-                               run_delta < 0 ? "earlier" : "later", zr_s(run_first->name),
+                    zr_mf_item(out, &first, "%u fields shifted %s %lld bytes (%s to %s)", run,
+                               run_delta < 0 ? "up" : "down",
+                               run_delta < 0 ? -run_delta : run_delta, zr_s(run_first->name),
                                zr_s(run_last->name));
                 run = 0;
             }

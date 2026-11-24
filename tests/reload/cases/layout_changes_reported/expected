@@ -39,7 +39,7 @@ Fresh changed: no
 four
 --- step 5
 reload: version 5 changes types:
-reload:   State: size 20 -> 24 bytes, pad added at byte 0, 4 fields moved 4 bytes later (total to name)
+reload:   State: size 20 -> 24 bytes, pad added at byte 0, 4 fields shifted down 4 bytes (total to name)
 reload:   Wrap: size 20 -> 24 bytes, s resized from 20 to 24 bytes
 State changed: yes
 Wrap changed: yes
@@ -51,7 +51,7 @@ Fresh changed: no
 five
 --- step 6
 reload: version 6 changes types:
-reload:   State: size 24 -> 20 bytes, 4 fields moved 4 bytes earlier (total to name), pad removed
+reload:   State: size 24 -> 20 bytes, 4 fields shifted up 4 bytes (total to name), pad removed
 reload:   Wrap: size 24 -> 20 bytes, s resized from 24 to 20 bytes
 State changed: yes
 Wrap changed: yes
