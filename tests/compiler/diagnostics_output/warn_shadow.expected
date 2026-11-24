@@ -6,7 +6,7 @@ warning: Variable 'counter' shadows a previous declaration
    |         ^ here
    |
    = note: This can lead to confusion
-   = note: Previous declaration at tests/compiler/diagnostics_output/warn_shadow.zc:3:5
+   = note: Previous declaration: tests/compiler/diagnostics_output/warn_shadow.zc:3:5
 warning: Variable 'counter' shadows a previous declaration
   --> tests/compiler/diagnostics_output/warn_shadow.zc:6:9
    |
@@ -14,7 +14,7 @@ warning: Variable 'counter' shadows a previous declaration
    |         ^ here
    |
    = note: This can lead to confusion
-   = note: Previous declaration at tests/compiler/diagnostics_output/warn_shadow.zc:3:5
+   = note: Previous declaration: tests/compiler/diagnostics_output/warn_shadow.zc:3:5
 warning: Variable 'counter' shadows a previous declaration
   --> tests/compiler/diagnostics_output/warn_shadow.zc:6:9
    |
@@ -22,5 +22,5 @@ warning: Variable 'counter' shadows a previous declaration
    |         ^ here
    |
    = note: This can lead to confusion
-   = note: Previous declaration at tests/compiler/diagnostics_output/warn_shadow.zc:3:5
+   = note: Previous declaration: tests/compiler/diagnostics_output/warn_shadow.zc:3:5
 [exit 0]

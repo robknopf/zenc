@@ -104,7 +104,7 @@ void diag_render_text(void *data, const ZenDiagnostic *d)
     }
     if (d->related_message)
     {
-        fprintf(out, COLOR_CYAN "   = note: " COLOR_RESET "%s at %s:%d:%d\n", d->related_message,
+        fprintf(out, COLOR_CYAN "   = note: " COLOR_RESET "%s: %s:%d:%d\n", d->related_message,
                 d->related.file, d->related.line, d->related.col);
     }
 }
