@@ -1,0 +1,6 @@
+--- step 1
+calls 1 c.calls 1 c.total 1 seen 010 other 5 twice 2
+outer calls -1, tally 101
+--- step 2
+calls 2 c.calls 2 c.total 3 seen 011 other 5 twice 4
+outer calls -1, tally 102

@@ -1097,6 +1097,29 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
         }
         zfree(type);
     }
+    for (int i = 0; i < ctx->cg.reload_static_count; i++)
+    {
+        struct ReloadStatic *st = &ctx->cg.reload_statics[i];
+        if (!st->decl->var_decl.init_expr)
+        {
+            continue;
+        }
+        if (st->cfg)
+        {
+            EMIT(ctx, "#if %s\n", st->cfg);
+        }
+        char init_name[512];
+        snprintf(init_name, sizeof(init_name), "_zc_mf_init_%s", st->c_name);
+        EMIT(ctx, "static const ");
+        emit_var_decl_type(ctx, st->type, init_name);
+        EMIT(ctx, " = ");
+        codegen_expression(ctx, st->decl->var_decl.init_expr);
+        EMIT(ctx, ";\n");
+        if (st->cfg)
+        {
+            EMIT(ctx, "#endif\n");
+        }
+    }
     EMIT(ctx, "static const ZcMfGlobal _zc_mf_globals[] = {\n");
     for (ASTNode *g = globals; g; g = g->next)
     {
@@ -1132,6 +1155,37 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
         }
         zfree(type);
     }
+    // The functions' static locals (reload_collect_statics), as globals.
+    for (int i = 0; i < ctx->cg.reload_static_count; i++)
+    {
+        struct ReloadStatic *st = &ctx->cg.reload_statics[i];
+        if (st->cfg)
+        {
+            EMIT(ctx, "#if %s\n", st->cfg);
+        }
+        EMIT(ctx, "    {");
+        emit_manifest_string(ctx, st->c_name);
+        EMIT(ctx, ", ");
+        emit_manifest_string(ctx, st->type);
+        EMIT(ctx, ", sizeof(%s), (void *)&%s, ", st->c_name, st->c_name);
+        if (st->decl->var_decl.init_expr)
+        {
+            char *text = format_expression_as_c(ctx, st->decl->var_decl.init_expr);
+            emit_manifest_string(ctx, text ? text : "?");
+            zfree(text);
+            EMIT(ctx, ", &_zc_mf_init_%s", st->c_name);
+        }
+        else
+        {
+            EMIT(ctx, "0, 0");
+        }
+        EMIT(ctx, ", 0},\n");
+        if (st->cfg)
+        {
+            EMIT(ctx, "#endif\n");
+        }
+    }
+
     // The vtables (emit_impl_vtables), as globals refreshed on every reload (flag 2).
     for (int i = 0; i + 1 < ctx->cg.reload_vtable_count; i += 2)
     {
@@ -1569,6 +1623,8 @@ void codegen_c_program(ParserContext *ctx, ASTNode *node)
 
         visited = NULL;
         emit_globals(ctx, merged_globals, &visited);
+        reload_collect_statics(ctx, merged_funcs);
+        emit_reload_statics(ctx);
 
         emit_impl_vtables(ctx);
         emit_auto_drop_glues(ctx, sorted);

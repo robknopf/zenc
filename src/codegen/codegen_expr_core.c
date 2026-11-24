@@ -194,6 +194,17 @@ static void codegen_var_expr(ParserContext *ctx, ASTNode *node)
         }
     }
 
+    // --reload: a static local whose storage the host keeps.
+    if (ctx->cg.reload_rename_count > 0)
+    {
+        const char *c_name = reload_rename(ctx, node->var_ref.name);
+        if (c_name)
+        {
+            EMIT(ctx, "%s", c_name);
+            return;
+        }
+    }
+
     if (node->resolved_type && strcmp(node->resolved_type, "unknown") == 0)
     {
         if (node->var_ref.suggestion && !ctx->silent_warnings &&
@@ -491,8 +502,9 @@ void handle_expr_literal(ParserContext *ctx, ASTNode *node)
 void emit_raw_with_captures(ParserContext *ctx, const char *content)
 {
     // The emitter writes a pending indentation even for an empty string, which would leave
-    // spaces on an otherwise empty line: emit nothing for nothing.
-    if (!ctx->cg.current_lambda)
+    // spaces on an otherwise empty line: emit nothing for nothing. Identifiers are rewritten
+    // for a lambda's captures, and (--reload) for static locals kept by the host.
+    if (!ctx->cg.current_lambda && ctx->cg.reload_rename_count == 0)
     {
         if (*content)
         {
@@ -505,6 +517,7 @@ void emit_raw_with_captures(ParserContext *ctx, const char *content)
     lexer_init(&l, content, ctx->config, ctx->current_filename);
     Token t;
     int last_pos = 0;
+    int after_member = 0; // the previous token was `.` or `->`: an identifier now is a field
     while ((t = lexer_next(&l)).kind != TOK_EOF)
     {
         int current_tok_start = (int)(t.start - content);
@@ -517,7 +530,8 @@ void emit_raw_with_captures(ParserContext *ctx, const char *content)
         {
             char *name = token_strdup(t);
             int captured = -1;
-            if (ctx->cg.current_lambda->lambda.captured_vars)
+            const char *host_static = after_member ? NULL : reload_rename(ctx, name);
+            if (ctx->cg.current_lambda && ctx->cg.current_lambda->lambda.captured_vars)
             {
                 for (int i = 0; i < ctx->cg.current_lambda->lambda.capture_count; i++)
                 {
@@ -541,6 +555,10 @@ void emit_raw_with_captures(ParserContext *ctx, const char *content)
                     EMIT(ctx, "ctx->%s", name);
                 }
             }
+            else if (host_static)
+            {
+                EMIT(ctx, "%s", host_static);
+            }
             else
             {
                 EMIT(ctx, "%.*s", (int)(t.len), t.start);
@@ -552,6 +570,8 @@ void emit_raw_with_captures(ParserContext *ctx, const char *content)
             EMIT(ctx, "%.*s", (int)(t.len), t.start);
         }
         last_pos = current_tok_start + (int)(t.len);
+        after_member = (t.kind == TOK_ARROW && t.len == 2 && t.start[0] == '-') ||
+                       (t.kind == TOK_OP && t.len == 1 && t.start[0] == '.');
     }
     if (content[last_pos])
     {

@@ -1,0 +1,19 @@
+// The standard library's own state is ordinary globals, so it survives a reload too: a map
+// filled before a reload, with a hash seed set before it, still finds its keys after it.
+import "std/map.zc"
+import "std/hash.zc"
+let names: Map<int>;
+let filled: bool = false;
+@destructor
+fn cleanup() { if filled { names.free(); } }
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    if !filled {
+        hash_set_seed(12345);
+        names = Map<int>::new();
+        names.put("ship", 1);
+        names.put("rock", 2);
+        filled = true;
+    }
+    println "seed {hash_get_seed()} ship {names.get(\"ship\").unwrap()} rock {names.get(\"rock\").unwrap()} size {names.length()}";
+}

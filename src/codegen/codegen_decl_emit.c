@@ -37,6 +37,179 @@ char *reload_global_type(ParserContext *ctx, ASTNode *node)
     return inferred;
 }
 
+// --reload: a function's `static` locals keep their values across reloads too. Each one's
+// storage is a host-kept global (like reload_global_type's), `_zs_<function>_<name>`, and
+// inside the function its name means that global from its declaration to the end of its
+// block. One whose C type isn't written out stays a C static, which a reload starts again.
+
+static char *reload_static_type(ParserContext *ctx, ASTNode *decl)
+{
+    if (decl->type_info)
+    {
+        return type_to_c_string(decl->type_info, 0);
+    }
+    if (decl->var_decl.type_str && strcmp(decl->var_decl.type_str, "__auto_type") != 0)
+    {
+        return xstrdup(decl->var_decl.type_str);
+    }
+    char *inferred = decl->var_decl.init_expr ? infer_type(ctx, decl->var_decl.init_expr) : NULL;
+    if (inferred && strcmp(inferred, "__auto_type") == 0)
+    {
+        zfree(inferred);
+        return NULL;
+    }
+    return inferred;
+}
+
+static void reload_collect_in(ParserContext *ctx, ASTNode *node, const char *fname, const char *cfg,
+                              int depth)
+{
+    if (!node || depth > 4096)
+    {
+        return;
+    }
+    if (node->kind == NODE_VAR_DECL && node->var_decl.is_static &&
+        !node->var_decl.is_thread_local && node->var_decl.name && !reload_static_name(ctx, node))
+    {
+        char *type = reload_static_type(ctx, node);
+        if (type)
+        {
+            // A second static of the same name in the function gets a number.
+            size_t len = strlen(fname) + strlen(node->var_decl.name) + 24;
+            char *c_name = xmalloc(len);
+            snprintf(c_name, len, "_zs_%s_%s", fname, node->var_decl.name);
+            for (int n = 2;; n++)
+            {
+                int taken = 0;
+                for (int i = 0; i < ctx->cg.reload_static_count && !taken; i++)
+                {
+                    taken = strcmp(ctx->cg.reload_statics[i].c_name, c_name) == 0;
+                }
+                if (!taken)
+                {
+                    break;
+                }
+                snprintf(c_name, len, "_zs_%s_%s_%d", fname, node->var_decl.name, n);
+            }
+            ctx->cg.reload_statics =
+                xrealloc(ctx->cg.reload_statics, sizeof(*ctx->cg.reload_statics) *
+                                                     (size_t)(ctx->cg.reload_static_count + 1));
+            struct ReloadStatic *s = &ctx->cg.reload_statics[ctx->cg.reload_static_count++];
+            s->decl = node;
+            s->c_name = c_name;
+            s->type = type;
+            s->cfg = cfg;
+        }
+    }
+    ASTChildren children = ast_children(node);
+    for (int i = 0; i < children.count; i++)
+    {
+        for (ASTNode *c = *children.slots[i]; c; c = c->next)
+        {
+            reload_collect_in(ctx, c, fname, cfg, depth + 1);
+        }
+    }
+}
+
+void reload_collect_statics(ParserContext *ctx, ASTNode *funcs)
+{
+    if (!ctx->config->reload_mode || ctx->config->use_cpp)
+    {
+        return;
+    }
+    for (ASTNode *f = funcs; f; f = f->next)
+    {
+        if (f->kind == NODE_FUNCTION && f->func.body && !f->func.generic_params)
+        {
+            reload_collect_in(ctx, f->func.body, f->link_name ? f->link_name : f->func.name,
+                              f->cfg_condition, 0);
+        }
+    }
+}
+
+void emit_reload_statics(ParserContext *ctx)
+{
+    for (int i = 0; i < ctx->cg.reload_static_count; i++)
+    {
+        struct ReloadStatic *s = &ctx->cg.reload_statics[i];
+        if (s->cfg)
+        {
+            EMIT(ctx, "#if %s\n", s->cfg);
+        }
+        EMIT(ctx, "#ifdef ZC_RELOAD_OWN_GLOBALS\nZC_GLOBAL ");
+        emit_var_decl_type(ctx, s->type, s->c_name);
+        if (s->decl->var_decl.init_expr)
+        {
+            EMIT(ctx, " = ");
+            codegen_expression(ctx, s->decl->var_decl.init_expr);
+        }
+        EMIT(ctx, ";\n#else\nextern ");
+        emit_var_decl_type(ctx, s->type, s->c_name);
+        EMIT(ctx, ";\n#endif\n");
+        if (s->cfg)
+        {
+            EMIT(ctx, "#endif\n");
+        }
+    }
+}
+
+const char *reload_static_name(ParserContext *ctx, ASTNode *decl)
+{
+    for (int i = 0; i < ctx->cg.reload_static_count; i++)
+    {
+        if (ctx->cg.reload_statics[i].decl == decl)
+        {
+            return ctx->cg.reload_statics[i].c_name;
+        }
+    }
+    return NULL;
+}
+
+void reload_block_enter(ParserContext *ctx)
+{
+    ctx->cg.block_depth++;
+}
+
+void reload_block_leave(ParserContext *ctx)
+{
+    while (ctx->cg.reload_rename_count > 0 &&
+           ctx->cg.reload_renames[ctx->cg.reload_rename_count - 1].depth >= ctx->cg.block_depth)
+    {
+        ctx->cg.reload_rename_count--;
+    }
+    ctx->cg.block_depth--;
+}
+
+// A local named `name` from here to the end of the block: a static's storage (`c_name`), or
+// another local, which hides one of the same name.
+void reload_local_declared(ParserContext *ctx, const char *name, const char *c_name)
+{
+    if (!c_name && reload_rename(ctx, name) == NULL)
+    {
+        return; // nothing to hide
+    }
+    if (ctx->cg.reload_rename_count >= 64)
+    {
+        return;
+    }
+    ctx->cg.reload_renames[ctx->cg.reload_rename_count].name = name;
+    ctx->cg.reload_renames[ctx->cg.reload_rename_count].c_name = c_name;
+    ctx->cg.reload_renames[ctx->cg.reload_rename_count].depth = ctx->cg.block_depth;
+    ctx->cg.reload_rename_count++;
+}
+
+const char *reload_rename(ParserContext *ctx, const char *name)
+{
+    for (int i = ctx->cg.reload_rename_count - 1; i >= 0; i--)
+    {
+        if (strcmp(ctx->cg.reload_renames[i].name, name) == 0)
+        {
+            return ctx->cg.reload_renames[i].c_name;
+        }
+    }
+    return NULL;
+}
+
 static void emit_globals_internal(ParserContext *ctx, ASTNode *node, VisitedModules **visited,
                                   int depth)
 {

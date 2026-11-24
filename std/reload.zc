@@ -54,6 +54,10 @@
 // The module's code can call the host's own functions, and any library linked into the
 // host, if the host exports its symbols (link it with -rdynamic).
 //
+// libtcc can't give code compiled into memory thread-local storage, so the module's
+// thread-locals are ordinary globals, shared by its threads (a release build keeps them per
+// thread).
+//
 // Needs libtcc (0.9.27 or 0.9.28), which the program must link itself: an imported file's
 // `//> link:` lines are not read. With zc: `zc build host.zc -l tcc -l dl -l pthread`; with
 // a C compiler: `-ltcc -ldl -lpthread -lm`. Not available on Windows yet. It is for development
@@ -1322,6 +1326,11 @@ raw {
         tcc_set_error_func(v->tcc, NULL, own ? zr_on_tcc_error : zr_on_tcc_quiet);
         tcc_set_output_type(v->tcc, TCC_OUTPUT_MEMORY);
         for (int i = 0; i < r->include_count; i++) tcc_add_include_path(v->tcc, r->includes[i]);
+        // libtcc can't give code compiled into memory thread-local storage (0.9.27 doesn't
+        // know _Thread_local; 0.9.28 refuses it), and std/core.zc and the generated C use it:
+        // a thread-local is an ordinary global of the module, shared by its threads.
+        tcc_define_symbol(v->tcc, "_Thread_local", "");
+        tcc_define_symbol(v->tcc, "__thread", "");
         if (own) tcc_define_symbol(v->tcc, "ZC_RELOAD_OWN_GLOBALS", "1");
         else
             for (unsigned i = 0; i < r->nstore; i++)

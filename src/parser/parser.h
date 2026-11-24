@@ -529,9 +529,29 @@ struct ParserContext
         FILE *hoist_out;         ///< File stream for hoisting code (e.g. from plugins).
         char **reload_vtables;   ///< --reload: the vtables emitted, "Trait" then "Struct".
         int reload_vtable_count; ///< Entries in it (two per vtable).
-        int skip_preamble;       ///< If 1, codegen won't emit standard preamble (includes etc).
-        int is_repl;             ///< 1 if running in REPL mode.
-        int in_defer_block;      ///< 1 if currently parsing inside a defer block.
+        /// --reload: the functions' `static` locals, whose storage the host keeps, as globals
+        /// named `_zs_<function>_<name>`.
+        struct ReloadStatic
+        {
+            ASTNode *decl;
+            char *c_name;
+            char *type;
+            const char *cfg;
+        } *reload_statics;
+        int reload_static_count;
+        /// While a function is emitted: the names that mean a static local's storage, by the
+        /// depth of the block that declared them (a NULL c_name: shadowed by another local).
+        struct
+        {
+            const char *name;
+            const char *c_name;
+            int depth;
+        } reload_renames[64];
+        int reload_rename_count;
+        int block_depth;
+        int skip_preamble;  ///< If 1, codegen won't emit standard preamble (includes etc).
+        int is_repl;        ///< 1 if running in REPL mode.
+        int in_defer_block; ///< 1 if currently parsing inside a defer block.
 
         ASTNode *global_user_structs; ///< List of user defined structs.
         // The names of the structs and enums in that list, to answer "not there" without

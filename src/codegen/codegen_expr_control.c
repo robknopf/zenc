@@ -18,8 +18,10 @@ void handle_block(ParserContext *ctx, ASTNode *node)
 {
     int saved = ctx->cg.defer_count;
     EMIT(ctx, "({ ");
+    reload_block_enter(ctx);
     codegen_walker(ctx, node->block.statements);
     emit_defers_down_to(ctx, saved);
+    reload_block_leave(ctx);
     ctx->cg.defer_count = saved;
     EMIT(ctx, " })");
 }

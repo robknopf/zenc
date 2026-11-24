@@ -94,8 +94,10 @@ void handle_node_block(ParserContext *ctx, ASTNode *node)
     int saved = ctx->cg.defer_count;
     EMIT(ctx, "{\n");
     emitter_indent(&ctx->cg.emitter);
+    reload_block_enter(ctx);
     codegen_walker(ctx, node->block.statements);
     emit_defers_down_to(ctx, saved);
+    reload_block_leave(ctx);
     ctx->cg.defer_count = saved;
     emitter_dedent(&ctx->cg.emitter);
     EMIT(ctx, "}\n");
@@ -542,6 +544,19 @@ void handle_node_var_decl(ParserContext *ctx, ASTNode *node)
             EMIT(ctx, ";\n");
             return;
         }
+    }
+    // --reload: a static local whose storage the host keeps is not declared here; from here
+    // on its name means that storage (reload_collect_statics). Any other local hides it.
+    const char *host_static = ctx->config->reload_mode ? reload_static_name(ctx, node) : NULL;
+    if (ctx->config->reload_mode && node->var_decl.name)
+    {
+        reload_local_declared(ctx, node->var_decl.name, host_static);
+    }
+    if (host_static)
+    {
+        EMIT(ctx, "/* static %s: kept by the reload host as %s */\n", node->var_decl.name,
+             host_static);
+        return;
     }
     if (node->var_decl.is_thread_local)
     {

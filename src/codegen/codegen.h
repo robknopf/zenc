@@ -92,6 +92,13 @@ void emit_trait_wrappers(ParserContext *ctx, ASTNode *node, VisitedModules **vis
 void emit_enum_protos(ParserContext *ctx, ASTNode *node);
 void emit_globals(ParserContext *ctx, ASTNode *node, VisitedModules **visited);
 char *reload_global_type(ParserContext *ctx, ASTNode *node);
+void reload_collect_statics(ParserContext *ctx, ASTNode *funcs);
+void emit_reload_statics(ParserContext *ctx);
+const char *reload_static_name(ParserContext *ctx, ASTNode *decl);
+void reload_block_enter(ParserContext *ctx);
+void reload_block_leave(ParserContext *ctx);
+void reload_local_declared(ParserContext *ctx, const char *name, const char *c_name);
+const char *reload_rename(ParserContext *ctx, const char *name);
 void emit_lambda_defs(ParserContext *ctx);
 void emit_protos(ParserContext *ctx, ASTNode *node, VisitedModules **visited);
 void emit_impl_vtables(ParserContext *ctx);

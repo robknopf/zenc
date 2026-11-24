@@ -1,0 +1,30 @@
+// A function's static locals keep their values across a reload, like globals: their storage
+// is the host's. Two functions' statics of the same name are separate; a field or another
+// local with that name is left alone.
+struct Counter { calls: int; total: int; }
+impl Counter {
+    fn bump(self, by: int) { self.calls = self.calls + 1; self.total = self.total + by; }
+}
+fn tally() -> int {
+    static let calls: int = 100;
+    calls += 1;
+    return calls;
+}
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    let calls = -1; // a local the static below hides only inside its block
+    {
+        static let calls: int = 0;
+        static let c: Counter;
+        static let seen: int[3];
+        calls = calls + 1;
+        c.bump(calls);
+        let p: int* = &calls;
+        *p = *p + 0;
+        seen[calls % 3] = seen[calls % 3] + 1;
+        let other = Counter { calls: 5, total: 0 }; // a field named like the static
+        let twice = fn(x: int) -> int { return x * 2; };
+        println "calls {calls} c.calls {c.calls} c.total {c.total} seen {seen[0]}{seen[1]}{seen[2]} other {other.calls} twice {twice(calls)}";
+    }
+    println "outer calls {calls}, tally {tally()}";
+}
