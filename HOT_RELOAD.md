@@ -39,9 +39,9 @@ fn main() -> int {
   changed (searched recursively; `watch(dir)` sets another directory).
 - `symbol(name)` gives the address of a function (or anything else) in the version loaded
   now. Look it up again after a `build()` or `poll()` that returned true.
-- The host links libtcc (0.9.27 or 0.9.28) itself: `zc build host.zc -l tcc -l dl -l
-  pthread`, or `-ltcc -ldl -lpthread -lm` with a C compiler. An imported file's `//> link:`
-  lines are not read, so `std/reload.zc` can't ask for it.
+- The host needs libtcc (0.9.27 or 0.9.28). `std/reload.zc` asks for it (`//> link:`), so
+  `zc build host.zc` links it; a C compiler given the generated C needs `-ltcc -ldl
+  -lpthread -lm`. Either needs `-L` for a libtcc outside the system's library path.
 - The module's code can call the host's functions and any library linked into the host
   if the host exports its symbols (link it with `-rdynamic`).
 - Call `poll()` only when none of the module's code is running: between frames, between

@@ -58,10 +58,12 @@
 // thread-locals are ordinary globals, shared by its threads (a release build keeps them per
 // thread).
 //
-// Needs libtcc (0.9.27 or 0.9.28), which the program must link itself: an imported file's
-// `//> link:` lines are not read. With zc: `zc build host.zc -l tcc -l dl -l pthread`; with
-// a C compiler: `-ltcc -ldl -lpthread -lm`. Not available on Windows yet. It is for development
-// hosts, and not written for --misra builds.
+// Needs libtcc (0.9.27 or 0.9.28). `zc build` and `zc run` link it, from the line below; a
+// C compiler given the generated C needs `-ltcc -ldl -lpthread -lm`, and either needs `-L`
+// for a libtcc outside the system's library path. Not available on Windows yet. It is for
+// development hosts, and not written for --misra builds.
+
+//> link: -ltcc -ldl -lpthread -lm
 
 include <libtcc.h>
 
