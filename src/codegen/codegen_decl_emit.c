@@ -12,6 +12,20 @@
 #include "../platform/misra.h"
 #include "codegen_internal.h"
 
+// Whether `t` is a function type or holds one (a pointer to, or an array of, function
+// pointers).
+static int has_function_type(Type *t)
+{
+    for (; t; t = t->inner)
+    {
+        if (t->kind == TYPE_FUNCTION)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // --reload: the C type of a global whose storage a reload host keeps, or NULL for one the
 // module keeps itself (a constant, a thread-local, or one whose type only the C compiler
 // infers). Such a global is defined when the host compiles the module with
@@ -23,6 +37,10 @@ char *reload_global_type(ParserContext *ctx, ASTNode *node)
         node->var_decl.is_thread_local || !node->var_decl.name)
     {
         return NULL;
+    }
+    if (node->var_decl.type_str && has_function_type(node->type_info))
+    {
+        return type_to_c_string(node->type_info, ctx->config->misra_mode); // as emit_globals
     }
     if (node->var_decl.type_str)
     {
@@ -245,7 +263,15 @@ static void emit_globals_internal(ParserContext *ctx, ASTNode *node, VisitedModu
             {
                 EMIT(ctx, "__attribute__((unused)) const ");
             }
-            if (node->var_decl.type_str)
+            if (node->var_decl.type_str && has_function_type(node->type_info))
+            {
+                // type_str is Zen C's spelling (`fn*() -> void`), which isn't C for a
+                // function pointer: write the C one, as a local or a field does.
+                char *ctype = type_to_c_string(node->type_info, ctx->config->misra_mode);
+                emit_var_decl_type(ctx, ctype, node->var_decl.name);
+                zfree(ctype);
+            }
+            else if (node->var_decl.type_str)
             {
                 emit_var_decl_type(ctx, node->var_decl.type_str, node->var_decl.name);
             }

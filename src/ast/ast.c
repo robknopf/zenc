@@ -947,6 +947,18 @@ static char *type_to_string_impl(Type *t)
 // Does NOT mangle pointers to 'Ptr'.
 static char *type_to_c_string_impl(Type *t, int misra_mode);
 
+int type_has_function(Type *t)
+{
+    for (; t; t = t->inner)
+    {
+        if (t->kind == TYPE_FUNCTION)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 char *type_to_c_string(Type *t, int misra_mode)
 {
     if (!t)
@@ -1154,16 +1166,29 @@ static char *type_to_c_string_impl(Type *t, int misra_mode)
             total_len += 20;
         }
 
-        char *res = xmalloc((size_t)(total_len));
-        strcpy(res, inner);
-        zfree(inner);
+        // The dimensions go at the end, except for an array of function pointers, where
+        // C puts them inside the declarator, where the name would go: `int (*[2])(int)`,
+        // not `int (*)(int)[2]`.
+        size_t at = strlen(inner);
+        char *fn_ptr = base->kind == TYPE_FUNCTION ? strstr(inner, "(*") : NULL;
+        char *end_paren = fn_ptr ? strchr(fn_ptr, ')') : NULL;
+        if (end_paren)
+        {
+            at = (size_t)(end_paren - inner);
+        }
 
-        char *p = res + strlen(res);
+        char *res = xmalloc((size_t)(total_len));
+        memcpy(res, inner, at);
+        res[at] = '\0';
+
+        char *p = res + at;
         for (int i = 0; i < dims_count; i++)
         {
             snprintf(p, 20, "[%d]", dims[i]);
             p += strlen(p);
         }
+        strcpy(p, inner + at);
+        zfree(inner);
 
         if (dims)
         {
@@ -1176,8 +1201,9 @@ static char *type_to_c_string_impl(Type *t, int misra_mode)
         if (t->is_raw)
         {
             char *ret = type_to_c_string(t->inner, misra_mode);
-            char *res = xmalloc(strlen(ret) + 64); // heuristic start buffer
-            snprintf(res, strlen(ret) + 64, "%s (*)(", ret);
+            // The parameter list, `(*)(int32_t, char*)`; it is put together with the
+            // return type at the end.
+            char *res = xstrdup("(*)(");
 
             for (int i = 0; i < t->count; i++)
             {
@@ -1216,8 +1242,26 @@ static char *type_to_c_string_impl(Type *t, int misra_mode)
             sprintf(tmp, "%s)", res); /* safe */
             zfree(res);
             res = tmp;
+
+            // After the return type, `int32_t (*)(char*)`; but when that is itself a
+            // function pointer, in its declarator, where a name would go:
+            // `int32_t (*(*)(char*))(int)` returns an `int32_t (*)(int)`.
+            size_t ret_len = strlen(ret);
+            size_t at = ret_len;
+            const char *sep = " ";
+            char *ret_fn = strstr(ret, "(*");
+            char *ret_end = ret_fn ? strchr(ret_fn, ')') : NULL;
+            if (ret_end)
+            {
+                at = (size_t)(ret_end - ret);
+                sep = "";
+            }
+            size_t full_len = ret_len + strlen(sep) + strlen(res) + 1;
+            char *full = xmalloc(full_len);
+            snprintf(full, full_len, "%.*s%s%s%s", (int)at, ret, sep, res, ret + at);
+            zfree(res);
             zfree(ret);
-            return res;
+            return full;
         }
         if (t->inner)
         {
