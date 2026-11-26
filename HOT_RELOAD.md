@@ -35,8 +35,8 @@ fn main() -> int {
 }
 ```
 
-- `build()` runs `zc transpile --reload` on the source, then compiles the C into memory
-  with libtcc. `poll()` does the same if any `.zc` file under the source's directory
+- `build()` runs `zc transpile --reload` on the source, then compiles the C with libtcc
+  and loads it itself (see "How it works"). `poll()` does the same if any `.zc` file under the source's directory
   changed (searched recursively; `watch(dir)` sets another directory). On Linux it
   learns of changes through inotify, so a poll with nothing changed costs microseconds;
   elsewhere it checks every file's modification time, at most every 200 ms (so a save is
@@ -148,22 +148,33 @@ host's pointer to it stays valid.
 
 ### Code kept from an old version
 
-- **A trait object calls the newest code**, even with old versions deleted. Its vtable's
-  storage is kept like a global's and filled with the new version's functions on every
-  reload [`trait_object_kept`].
-- **A function pointer in the state** (a field of a function pointer type, in the host's
-  block or a global, reached by value) **is pointed at the new version's function of the
-  same name**. If that function's signature changed, it keeps calling the old one
-  [`function_pointer_kept`].
-- **Any other call into old code runs the new code**: a function pointer in a heap object,
-  one handed to a library as a callback, a method kept the same way [`function_forwarded`],
-  [`method_forwarded`]. Each old function jumps to the newest version's function of the
-  same name. It follows its name from version to version only while the call means the
-  same: the same signature, and no type it takes or returns changed (a pointer to the
-  host's block is fine: the block is moved). Once that isn't so, it stays with the last
-  version that matched, and the reload says so: `old code still runs for: take_pt (it
-  takes or returns a Pt, which changed)` [`function_forward_type_changed`]. Needs old
-  versions kept (the default); x86-64 only for now.
+A function's address, wherever the module takes it, is the function's *stub*: a jump the
+Reloader keeps, which no version owns. Each reload points every stub at the new version's
+function of the same name. So:
+
+- **A function pointer kept anywhere calls the newest code**: in the host's block or a
+  global [`function_pointer_kept`], in a heap object, handed to a library as a callback, a
+  method kept the same way [`function_forwarded`], [`method_forwarded`], even with every
+  old version deleted [`function_forwarded_old_deleted`]. What `symbol()` gives the host is
+  a stub too.
+- **A trait object calls the newest code**: its vtable's storage is kept like a global's,
+  and its entries are stubs [`trait_object_kept`].
+- **Only while the call means the same**: the same signature, and no type it takes or
+  returns changed (a pointer to the host's block is fine: the block is moved). Once that
+  isn't so, the stub stays on the function it had, and the reload says so: `old code still
+  runs for: take_pt (it takes or returns a Pt, which changed)`
+  [`function_forward_type_changed`]. That old function keeps running, and what it calls by
+  name runs the newest version's code where the call still means the same
+  [`old_function_calls_new`].
+- **A closure kept from before runs the same lambda of the new version**: the one with the
+  same body (found wherever it moved in the file), or else, if its body was edited, the only
+  lambda in its function that takes and captures the same. An edited callback runs its new
+  body. One that can't be told apart (its function has another lambda like it), or whose
+  captures or parameters changed, keeps its old body, and the reload names it: `a lambda in
+  setup (its body changed, and its function has other lambdas like it)` [`lambda_follows`].
+- **A string literal** kept from an old version (or any constant) still reads the same: the
+  module's literals are in a pool the Reloader keeps, one copy of each
+  [`string_literal_kept`], [`string_literal_old_deleted`].
 
 ### A crash in the new code
 
@@ -247,32 +258,25 @@ the state doesn't hold. A std container's buffer isn't such a pointer: it is mov
 
 These don't stop a reload. They are what to keep in mind.
 
-**Code that keeps running the old version.** Old versions stay loaded, by default until
-`free()`, so all of these keep working, but run the code they were made with:
+**What an old version costs: nothing, after the next reload.** Only two versions stay
+loaded: the one running and the one a crash goes back to. Every older one is released
+whole, its memory and its registration with debuggers [`old_versions_released`]. Nothing
+can still reach it: function pointers are stubs, literals are the pool's, globals the
+store's. The one exception is a function a stub stays on (above): it is copied out of its
+version when the stub stops following, a few hundred bytes, and kept. So a long session's
+memory grows only with those copies, the pool's new literals and the stubs (16 bytes for
+each function whose address was taken), not with the size of the module: at 1000 generated
+modules, over 40 reloads, the host stays between 92 and 132 MB (with shared libraries it
+grew 28 MB a reload; shrunk, 2.3 MB). Nothing is written to disk but the C file.
+`keep_old(false)` releases the version replaced too, so a crash in the new code has nothing
+to go back to.
 
-- a lambda: it keeps the body it was made with, as in hotreload-hx; what it calls by
-  name runs the new code;
-- a function whose signature changed, or that takes or returns a type that changed,
-  called through a pointer kept from before (reported, see above);
-- a string literal: it points into the old version's memory [`string_literal_kept`].
-
-`keep_old(false)` deletes each old version when the next one loads, and old functions
-then don't run the new code. Use it only when nothing like that is kept: a call through
-one of them then crashes.
-
-**What an old version costs.** Every version but the two newest (the one running, and the
-one a crash goes back to) is shrunk to what a pointer kept from before can still reach: its
-code and its data (string literals, the first version's globals, vtables) stay where they
-were, and the rest goes: its library's file is emptied (its disk space, with the debug
-information, is freed), and the relocations, the dynamic symbol and hash tables and the
-manifest are released from memory [`old_versions_shrunk`]. libtcc's own copy of each version
-is freed as soon as its library is loaded. At 1000 generated modules a reload used to cost
-about 28 MB of memory and 12.5 MB of disk; it now costs about 2.3 MB of memory (that
-version's code and data) and no disk beyond the two newest versions. The reload prints how
-many: "N old versions kept loaded (M of them shrunk)". Shrinking is Linux-only for now
-(elsewhere old versions are kept whole); the code itself can't go yet, because most
-functions (std's, generics') aren't forwarded, so a pointer to one runs that version's
-code.
+Not caught this way, and so stale once the version that made them is released: a pointer
+kept into an old version's own data other than the above (a C `static` in a `raw` block, a
+const table that holds pointers), and the address of something by section and offset
+rather than by name (C the Reloader didn't see, assembly). A released version's addresses
+stay reserved for a long while (the space goes round once before reusing them), so using
+one faults, and in code called through `call()` that is a crash rolled back like any other.
 
 **Values that are not carried** when a type's layout changes, and are left at zero (or a
 global's initial value); each is in the "moved" line [`state_converted`]. Zero is a real
@@ -294,9 +298,8 @@ for that.
 
 - a global or `static` local whose type only the C compiler works out (`let x = f();`
   with `f`'s type unknown to Zen C): write its type;
-- a thread-local: libtcc can't give code compiled into memory thread-local storage, so in
-  a reload build a thread-local is an ordinary global, shared by the module's threads (a
-  release build keeps them per thread).
+- a thread-local: a reload build makes it an ordinary global, shared by the module's
+  threads (a release build keeps them per thread).
 
 **Other limits.**
 
@@ -309,41 +312,39 @@ for that.
 
 ## Debugging
 
-Each version is a shared library with debug information, so a debugger (gdb, and VS Code's
-C/C++ debugger, which drives gdb) sees the module's code as it sees any library's:
+Each version is registered with debuggers as it loads, through the JIT interface gdb reads
+(the one JIT compilers use: the version's object file, its sections at the addresses they
+were loaded at), so gdb, and VS Code's C/C++ debugger, which drives gdb, sees the module's
+code as it sees a library's, with no file of it on disk:
 
 - **Breakpoints by `.zc` file and line** bind when a version loads, in every version that
   has that line: set one in `src/game/rock.zc` before the program starts, or while it runs,
   and it stops there in the version running now and in the next one after a save.
-- **Backtraces** go from the module's functions, at their `.zc` lines, into the host's.
-- **Variables, stepping** by `.zc` line, and `list` (the C's `#line` directives give the
-  `.zc` files by their absolute path).
+- **Backtraces** go from the module's functions, at their `.zc` lines, into the host's,
+  with their arguments.
+- **Variables** (arguments, locals, globals), **stepping** by `.zc` line, and `list` (the
+  C's `#line` directives give the `.zc` files by their absolute path).
 
-It needs libtcc 0.9.28, which writes DWARF (`-gdwarf`). With 0.9.27 the libraries are written
-with stabs, which gdb no longer binds breakpoints in; everything else works the same.
+It needs libtcc 0.9.28, which writes DWARF (`-gdwarf`). With 0.9.27 the versions are
+compiled with stabs, which gdb no longer binds breakpoints in; everything else works the
+same.
 
-The libraries are written beside the module's C file (`build/game.c.<pid>.<n>.so`), and
-removed by `free()`; those of a process that ended without it are removed at the next start.
-An old version that is shrunk (above) has its file emptied: the debugger keeps what it read
-from it when it loaded (breakpoints, backtraces through it), but a debugger attached later
-sees no symbols for it.
-`ZC_RELOAD_MEMORY=1` compiles into memory instead, as it was before, where a debugger sees no
-symbols; it is also what happens if a library can't be written or loaded (the reload says
-so). Writing the debug information costs a little per reload: about 50 ms at 1000 generated
-modules, 230 ms at 3000.
+A released version (see "What an old version costs") is unregistered: a breakpoint in it
+goes with it, and stays set for the versions that have that line. A function copied out of
+an old version (a stub that stays on it) has no debug information: a backtrace through it
+shows its address. `ZC_RELOAD_MEMORY=1` has libtcc load each version instead, as it was
+before the Reloader loaded them itself, where a debugger sees no symbols; it is also what
+happens if the Reloader can't load one (the reload says why). Compiling with debug
+information costs a little per reload: about 50 ms at 1000 generated modules, 230 ms at
+3000.
 
-Each library is linked so that its names bind to its own definitions (`-Bsymbolic`): a
-module's global or function of the same name as one in the host or libc stays the module's
-[`global_name_taken`].
+A module's global or function of the same name as one in the host or libc is the module's
+own: its names bind to its own definitions first [`global_name_taken`].
 
 In VS Code, a `cppdbg` launch configuration for the host is enough; breakpoints in `.zc`
 files show as unbound until the module loads. For gdb on the command line, `set breakpoint
-pending on` lets a breakpoint wait for the library.
-
-One thing to keep apart: forwarding (above) writes a jump over the first 5 bytes of an old
-function. A breakpoint set on a function's name or a line is past its prologue (11 bytes
-from tcc), so the two don't meet; one set on the exact address of an old function's entry
-(`break *0x...`) would.
+pending on` lets a breakpoint wait for the module. lldb reads the same interface once
+`settings set plugin.jit-loader.gdb.enable on` is set; that hasn't been tried yet.
 
 ## Writing code that reloads well
 
@@ -368,11 +369,22 @@ from tcc), so the two don't meet; one set on the exact address of an old functio
   and enum the module defines (sizes, alignment and offsets as the C compiler laid them
   out: they are `sizeof`, `__alignof__` and `offsetof` expressions)
   [`manifest_describes_types`], every global with its type, address and initial value,
-  every function with its address and C signature.
-- **Loading.** Each version is compiled by libtcc into a shared library (`-gdwarf`,
-  `-Bsymbolic`) beside the C file and loaded with `dlopen`; its globals that the store
-  holds are given to it with `tcc_add_symbol`, which writes them into the library as
-  absolute symbols at the store's addresses. Symbols are looked up with `dlsym`.
+  every function with its address and C signature, and every lambda (`_zc_manifest_lambdas`:
+  where it is, what it takes and captures, a hash of its C).
+- **Loading.** Each version is compiled by libtcc to an object file (`-gdwarf`), which the
+  `Reloader` reads, removes and loads itself, as a linker would: its sections into memory
+  of its own, its names resolved (the store's globals first, then the host's and its
+  libraries', then libtcc's runtime helpers, such as `__va_arg`), its relocations applied.
+  tcc's object files are ELF on every system tcc runs on, so this part is the same
+  everywhere; the relocations are the processor's (x86-64 for now). The object file, its
+  sections given their addresses and its debug sections' relocations applied (tcc writes
+  them the way gdb doesn't read), is what gets registered with debuggers.
+- **One address space.** Every version, and everything that outlives one, is in one
+  reservation of 1.5 GB of address space, so a 32-bit PC-relative reference between any
+  two reaches. Its first 256 MB are kept memory, never released: the stubs, the pool, the
+  functions copied out of old versions. The versions go in the rest, each where the last
+  one ended, around and around, so a released version's addresses aren't reused until the
+  space has gone round once.
 - **Storage.** Each mutable global, `static` local and vtable is emitted twice, behind
   `ZC_RELOAD_OWN_GLOBALS`: defined, and `extern`. The `Reloader` compiles the first
   version to define them, and every later version with them `extern`, pointed at the
@@ -380,32 +392,41 @@ from tcc), so the two don't meet; one set on the exact address of an old functio
   globals change, the new version is first compiled to define them, which shows what they
   are now; each one that changed gets storage of its own (allocated by the `Reloader`,
   holding its initial value), and the version is compiled against the kept storage again,
-  so a reload that changes the globals compiles three times. The first version, which
-  holds the original storage, is never deleted before `free()`.
+  so a reload that changes the globals compiles three times. A version that defines
+  globals has its writable data apart from the rest; when it is released, that data stays
+  (it is the store's storage) until `free()`.
 - **Moving.** The `Reloader` keeps a copy of each version's manifest. On a reload it
   compares the two, checks everything that would have to move (a dry run), and only then
   moves it: globals into their new storage, the host's block in place through a copy.
-- **Code pointers.** Vtables are refilled from a constant copy of the new version's.
-  Function pointers in the state are matched by address against every loaded version's
-  functions and pointed at the new version's of the same name and signature.
-- **Forwarding.** The manifest lists every function and method with its C signature. On
-  a reload, each function of the version replaced, and each older one still following its
-  name, gets a 5-byte jump to the new version's function at its entry (tcc starts every
-  function with an 11-byte prologue). Each version's code is mapped with mmap, so the
-  versions are near each other and a 32-bit jump reaches; one that doesn't goes through a
-  stub. Whether a name follows is decided once a reload, so a call through old code is one
-  jump however old it is. At 3000 generated modules (about 12,000 functions) this adds
-  about 15 ms to a reload.
+- **Stubs.** Loading notes every place a version takes the address of one of its own
+  functions rather than calling it: a pointer in its data (the manifest's aside), a GOT
+  entry, a `lea`. Once the version is in use, each of them is pointed at the function's
+  stub, 16 bytes of kept memory: `jmp *8(%rip)` and the address it jumps to. A reload
+  decides, for each stub, whether its name follows (the manifest's signatures and types;
+  for a lambda, the manifest's lambdas), and writes the new address there, or pins it.
+  Direct calls stay direct. What `symbol()` returns is a stub as well.
+- **The pool.** A read-only object with no relocation in it (a string literal, a number, a
+  table of them) is loaded from a pool in kept memory: one copy of each, by its bytes and,
+  if it has one, its name. (libtcc 0.9.27 puts literals with the writable data: there an
+  anonymous object ending in a zero byte is taken to be one.)
+- **Releasing.** After a reload, every old version but the one a crash goes back to is
+  released: unregistered, its memory given back and left reserved. A function a stub was
+  pinned to was copied out of it first, when the stub was pinned: its bytes into kept
+  memory, its relocations applied again there, a call to a function of the same version
+  going through that function's stub if the call still means the same (the same
+  signature, no type changed since), the rest copied with it.
+- **Vtables** are refilled from a constant copy of the new version's (stubs too).
 - **Crashes.** `call()` sets a `sigsetjmp` point and runs the function; handlers for
   SIGSEGV, SIGBUS, SIGFPE and SIGILL (on an alternate stack, so a stack overflow is caught
   too) jump back to it while module code runs, and otherwise do what the handler there
   before would have. Each reload keeps what undoing it needs: the version replaced (kept
-  loaded), a copy of the host's block before the move, and where its forwarding jumps
-  start.
+  loaded), a copy of the host's block before the move, and where each stub it moved or
+  pinned pointed before.
 - **Order of a reload:** build and compile the new version; check its state can move (or
   refuse); the old version's `@before_reload`; switch; move the state; reset what is
-  `@reset_on_reload` or has an edited initial value; refill vtables, re-point function
-  pointers; forward old functions; the new version's `@after_reload`.
+  `@reset_on_reload` or has an edited initial value; refill vtables; move the stubs, and
+  point the new version's references at them; copy out what a stub was pinned to; the new
+  version's `@after_reload`; release the versions older than the one replaced.
 
 ## Reference
 
@@ -418,15 +439,15 @@ from tcc), so the two don't meet; one set on the exact address of an old functio
 |---|---|
 | `Reloader::new(source, c_file)` | a reloader for the module whose root file is `source`; its C goes to `c_file` |
 | `set_zc(path)`, `set_zc_flags(flags)`, `set_source(source)`, `watch(dir)`, `add_include(dir)` | where things are |
-| `keep_old(bool)` | keep old versions loaded until `free()` (the default), or delete each |
+| `keep_old(bool)` | keep the version replaced loaded, for a crash to go back to (the default); or release it too |
 | `verbose(bool)` | print a line for each reload and what it changed (the default) |
 | `keep_state(ptr, size)` | the block the host passes to the module's functions |
 | `require_same(type)` | refuse a version that changes `type` |
 | `build()`, `poll()` | build now; build if a watched file changed. True if a new version loaded |
-| `symbol(name)` | an address in the version loaded now |
+| `symbol(name)` | an address in the version loaded now (for a function, its stub, which follows its name) |
 | `print_changes()`, `type_changed(type)` | what the last reload changed |
 | `manifest()` | the current version's `const ZcManifest*` |
-| `version()`, `kept()`, `refused()` | versions loaded, old ones kept, builds not loaded |
+| `version()`, `kept()`, `refused()` | versions loaded, old ones still loaded (at most one), builds not loaded |
 | `call(f)`, `call_with(f, arg)` | call a function of the module, catching a crash in it (see "A crash in the new code"); false if it crashed or was skipped |
 | `crashes()` | crashes caught |
-| `free()` | the destructors, then every version deleted |
+| `free()` | the destructors, then every version released |

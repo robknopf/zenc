@@ -11,8 +11,9 @@
 //     ...
 //     code.free();
 //
-// A build runs `zc transpile --reload` on the source, then compiles the C in memory. If
-// either fails, the errors are printed and the version already loaded stays in use.
+// A build runs `zc transpile --reload` on the source, then compiles the C with libtcc and
+// loads it (zl_load: the Reloader's own loading, registered with debuggers). If either
+// fails, the errors are printed and the version already loaded stays in use.
 //
 // The module's @constructor functions run when the first version loads, and the current
 // version's @destructor functions at free(), as at the start and end of a program: a reload
@@ -31,7 +32,7 @@
 // that is new is zero (a global, its initial value), and one that is gone is dropped. When
 // the globals themselves change (one added, or retyped), the new version gets new storage
 // with the old values moved into it; a pointer to an old global then points at the old
-// storage, which stays loaded.
+// storage, which stays.
 //
 // What can't be moved is data behind a pointer to a type whose layout changed: it is in the
 // old layout, and how much of it there is isn't known. A version that would need that, or
@@ -40,28 +41,29 @@
 // changed in the module's types and globals, and what was done to the state (see
 // print_changes()).
 //
-// Code kept from an old version follows the new code where the Reloader can find it. A trait
-// object calls the newest code: its vtable's storage is kept like a global's, and refilled
-// with the new version's functions on every reload. A function pointer in the state (a
-// field of a function pointer type, in the host's block or a global, reached by value) is
-// pointed at the new version's function of the same name, unless its signature changed;
-// the reload says which. What it can't find keeps running the old code: a function pointer
-// behind another pointer, or handed to a library; a lambda (it keeps the body it was made
-// with, as in hotreload-hx); a string literal still points into the old version. So old
-// versions stay loaded, by default until free(); keep_old(false) deletes each old version
-// when the next one loads instead, for programs that keep nothing like that.
+// Code kept from an old version runs the new code. A function's address, wherever the module
+// takes it (a function pointer, a vtable's entry, a callback handed to a library, what
+// symbol() returns), is its stub, which each reload points at the new version's function
+// of the same name while the call means the same (the same signature, no type it takes or
+// returns changed); a closure's lambda follows the same lambda of the new version (by body,
+// else by its place in its function). One that can't follow keeps running the old code, and
+// the reload says so; that function is copied out of its version, and what it calls by
+// name runs the new code. String literals and other constants are in a pool no version
+// owns. So only two versions stay loaded, the current one and the one a crash goes back to;
+// each older one is released whole. keep_old(false) releases the one replaced too.
 //
 // The module's code can call the host's own functions, and any library linked into the
 // host, if the host exports its symbols (link it with -rdynamic).
 //
-// libtcc can't give code compiled into memory thread-local storage, so the module's
-// thread-locals are ordinary globals, shared by its threads (a release build keeps them per
-// thread).
+// The module's thread-locals are ordinary globals, shared by its threads (a release build
+// keeps them per thread).
 //
 // Needs libtcc (0.9.27 or 0.9.28). `zc build` and `zc run` link it, from the line below; a
 // C compiler given the generated C needs `-ltcc -ldl -lpthread -lm`, and either needs `-L`
-// for a libtcc outside the system's library path. Not available on Windows yet. It is for
-// development hosts, and not written for --misra builds.
+// for a libtcc outside the system's library path. The Reloader loads versions itself on
+// Linux x86-64; elsewhere libtcc loads them, old versions stay loaded and a debugger sees
+// none of them. Not available on Windows yet. It is for development hosts, and not written
+// for --misra builds.
 
 //> link: -ltcc -ldl -lpthread -lm
 
@@ -3367,7 +3369,9 @@ raw {
     // moves everything still following to the newest version, so a call is one jump.
     //
     // Only while old versions are kept (the default): keep_old(false) deletes them, so the
-    // jumps are undone. x86-64 only; elsewhere old code runs as it did.
+    // jumps are undone. x86-64 only; elsewhere old code runs as it did. This is for versions
+    // libtcc loads (ZC_RELOAD_MEMORY, or where the Reloader can't load them itself): those it
+    // loads have stubs instead (zr_stubs_follow), and their old code is left as it is.
 
     // A name -> function table of a manifest's functions, for one reload.
     typedef struct { const ZcMfFunc **slot; unsigned cap; } ZrFnTable;
