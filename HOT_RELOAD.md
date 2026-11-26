@@ -36,7 +36,9 @@ fn main() -> int {
 
 - `build()` runs `zc transpile --reload` on the source, then compiles the C into memory
   with libtcc. `poll()` does the same if any `.zc` file under the source's directory
-  changed (searched recursively; `watch(dir)` sets another directory).
+  changed (searched recursively; `watch(dir)` sets another directory). On Linux it
+  learns of changes through inotify, so a poll with nothing changed costs microseconds;
+  elsewhere it checks every file's modification time.
 - `symbol(name)` gives the address of a function (or anything else) in the version loaded
   now. Look it up again after a `build()` or `poll()` that returned true.
 - The host needs libtcc (0.9.27 or 0.9.28). `std/reload.zc` asks for it (`//> link:`), so
