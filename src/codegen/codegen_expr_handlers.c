@@ -773,6 +773,44 @@ static int zen_name_declared(ParserContext *ctx, const char *name)
     return 0;
 }
 
+// With the names the program's C declares known: whether a call to `callee` (a name) is to
+// something the Zen C or its C declares.
+int c_names_call_known(ParserContext *ctx, ASTNode *callee)
+{
+    const char *name = callee->var_ref.name;
+    if (find_func(ctx, name) || find_struct_def(ctx, name) || c_name_known(ctx, name) ||
+        find_symbol_entry(ctx, name) || find_symbol_in_all(ctx, name) ||
+        zen_name_declared(ctx, name) || is_extern_symbol(ctx, name) ||
+        strncmp(name, "_z_", 3) == 0 || strncmp(name, "_Z", 2) == 0)
+    {
+        return 1;
+    }
+    for (char **w = ctx->config->c_function_whitelist; w && *w; w++)
+    {
+        if (strcmp(*w, name) == 0)
+        {
+            return 1;
+        }
+    }
+    return callee->type_info && get_inner_type(callee->type_info)->kind == TYPE_FUNCTION;
+}
+
+void c_names_report_call(ParserContext *ctx, ASTNode *callee)
+{
+    char msg[MAX_SHORT_MSG_LEN], mean[MAX_SHORT_MSG_LEN];
+    snprintf(msg, sizeof(msg), "Undefined function '%s'", callee->var_ref.name);
+    const char *close = c_name_closest(ctx, callee->var_ref.name);
+    if (close)
+    {
+        snprintf(mean, sizeof(mean), "Did you mean '%s'?", close);
+    }
+    const char *hints[] = {close ? mean
+                                 : "Not declared here, nor by an included C header "
+                                   "(ZC_NO_C_NAMES=1 skips this check)",
+                           NULL};
+    zerror_with_hints(callee->token, msg, hints);
+}
+
 void handle_expr_call(ParserContext *ctx, ASTNode *node)
 {
     if (emit_call_dropping_temporaries(ctx, node))

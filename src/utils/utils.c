@@ -627,6 +627,39 @@ static void append_prefixed_words(char *dst, size_t dst_size, const char *value,
     }
 }
 
+// The next word of a directive's value, into `out`: up to a space, or quoted ("inc dir" or
+// 'inc dir') to hold spaces. 0 at the end.
+static int next_directive_word(const char **pp, char *out, size_t size)
+{
+    const char *p = *pp;
+    while (*p && isspace((unsigned char)*p))
+    {
+        p++;
+    }
+    if (!*p)
+    {
+        *pp = p;
+        return 0;
+    }
+    size_t len = 0;
+    char quote = (*p == '"' || *p == '\'') ? *p++ : 0;
+    while (*p && (quote ? *p != quote : !isspace((unsigned char)*p)))
+    {
+        if (len + 1 < size)
+        {
+            out[len++] = *p;
+        }
+        p++;
+    }
+    if (quote && *p == quote)
+    {
+        p++;
+    }
+    out[len] = '\0';
+    *pp = p;
+    return 1;
+}
+
 void scan_build_directives(ParserContext *ctx, const char *src)
 {
     ZenCompiler *compiler = ctx->compiler;
@@ -695,8 +728,14 @@ void scan_build_directives(ParserContext *ctx, const char *src)
             }
             else if (0 == strncmp(directive, "include:", 8))
             {
-                append_prefixed_words(compiler->cflags, sizeof(compiler->cflags), directive + 8,
-                                      "-I");
+                // Each directory to the C compiler as an argument of its own (not into cflags,
+                // a string split at spaces), so "inc dir", quoted, is one directory.
+                const char *words = directive + 8;
+                char dir[MAX_PATH_LEN];
+                while (next_directive_word(&words, dir, sizeof(dir)))
+                {
+                    zvec_push_Str(&compiler->config.c_include_paths, xstrdup(dir));
+                }
             }
             else if (strncmp(directive, "lib:", 4) == 0)
             {

@@ -77,6 +77,9 @@ typedef struct CompilerConfig
 
     zvec_Str cfg_defines;
     zvec_Str include_paths;
+    /// Directories for the C compiler only (//> include:), each given to it as an argument
+    /// of its own, so a space in one is kept.
+    zvec_Str c_include_paths;
 
     char *root_path;
     char *input_dir;

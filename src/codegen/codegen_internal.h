@@ -14,6 +14,13 @@ struct VisitedModules
     ListIndex *index; ///< The list's index by path, shared by its nodes (list_index.h).
 };
 int is_module_visited(struct VisitedModules *visited, const char *path);
+
+// The names the program's C declares (utils_c_names.c), as code generation checks them.
+int c_names_call_known(ParserContext *ctx, ASTNode *callee);
+void c_names_report_call(ParserContext *ctx, ASTNode *callee);
+int c_names_name_unknown(ParserContext *ctx, const char *name);
+void c_names_report_name(ParserContext *ctx, ASTNode *node);
+void c_names_check_raw(ParserContext *ctx, ASTNode *node);
 void mark_module_visited(struct VisitedModules **visited, const char *path);
 void free_visited_modules(struct VisitedModules *visited);
 
