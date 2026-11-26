@@ -361,6 +361,14 @@ static int compile_program(ZenCompiler *compiler)
     codegen_node(&ctx, root);
     fclose(out_f);
 
+    // An error found while generating the C (an undefined C name, say) stops here: no C
+    // file is written, and nothing is compiled.
+    if (compiler->error_count > 0)
+    {
+        remove(temp_source_buf);
+        return 1;
+    }
+
     if (compiler->config.mode_transpile)
     {
         if (z_rename_replace(temp_source_buf, compiler->config.output_file) != 0)
