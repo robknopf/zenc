@@ -343,22 +343,31 @@ fi
 
 # A header found only through -I, given either way (`-I dir` used to leave a bare -I in the
 # C compiler's flags, and the check went off).
-mkdir -p "$workdir/cnames/inc" "$workdir/cnames/src"
-cp "$workdir/cnames/lib.h" "$workdir/cnames/inc/onlyinc.h"
+mkdir -p "$workdir/cnames/inc dir" "$workdir/cnames/src"
+cp "$workdir/cnames/lib.h" "$workdir/cnames/inc dir/onlyinc.h"
 printf 'include <onlyinc.h>\nfn main() {\n    lib_ad(1, 2);\n}\n' > "$workdir/cnames/src/viainc.zc"
 for form in joined spaced; do
     if [ "$form" = joined ]; then
-        out=$("$ZC" transpile "-I$workdir/cnames/inc" "$workdir/cnames/src/viainc.zc" -o "$workdir/cnames/viainc.c" 2>&1)
+        out=$("$ZC" transpile "-I$workdir/cnames/inc dir" "$workdir/cnames/src/viainc.zc" -o "$workdir/cnames/viainc.c" 2>&1)
     else
-        out=$("$ZC" transpile -I "$workdir/cnames/inc" "$workdir/cnames/src/viainc.zc" -o "$workdir/cnames/viainc.c" 2>&1)
+        out=$("$ZC" transpile -I "$workdir/cnames/inc dir" "$workdir/cnames/src/viainc.zc" -o "$workdir/cnames/viainc.c" 2>&1)
     fi
     if echo "$out" | grep -q "Undefined function 'lib_ad'" && echo "$out" | grep -q "Did you mean 'lib_add'"; then
-        check "a header found through -I ($form) is read for its names" 1
+        check "a header found through -I ($form, a directory with a space) is read for its names" 1
     else
-        check "a header found through -I ($form) is read for its names" 0
+        check "a header found through -I ($form, a directory with a space) is read for its names" 0
         echo "$out" | head -8 | sed 's/^/      /'
     fi
 done
+printf 'include <onlyinc.h>\nfn main() {\n    println "{lib_add(1, 2)}";\n}\n' > "$workdir/cnames/src/viainc_ok.zc"
+printf 'int lib_add(int a, int b) { return a + b; }\n' > "$workdir/cnames/inc dir/onlyinc.c"
+out=$("$ZC" run -I "$workdir/cnames/inc dir" "$workdir/cnames/src/viainc_ok.zc" "$workdir/cnames/inc dir/onlyinc.c" -o "$workdir/cnames/viainc_ok" 2>&1)
+if echo "$out" | grep -q "^3$"; then
+    check "a program builds with -I and a directory with a space" 1
+else
+    check "a program builds with -I and a directory with a space" 0
+    echo "$out" | head -8 | sed 's/^/      /'
+fi
 
 out=$(ZC_NO_C_NAMES=1 "$ZC" transpile "$workdir/cnames/bad.zc" -o "$workdir/cnames/bad.c" 2>&1)
 if ! echo "$out" | grep -q "Undefined"; then
