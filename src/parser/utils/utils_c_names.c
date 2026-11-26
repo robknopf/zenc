@@ -8,7 +8,8 @@
 // With them, a name the Zen C code uses that neither it nor its C declares is an error at
 // the .zc line ("Undefined function 'pritnf'; did you mean 'printf'?"), and a C type isn't
 // "assumed". Without them (no C compiler, a header that doesn't preprocess, MISRA mode,
-// the LSP), every name C might declare is taken on trust, as before.
+// the LSP, C++ or Objective-C output), every name C might declare is taken on trust, as
+// before.
 //
 // The scan is tolerant: what it doesn't understand it skips, so a name can at worst be
 // missed, and a missed name would be reported as undefined. It reads declarations, not
@@ -935,7 +936,10 @@ void c_names_scan(ParserContext *ctx, ASTNode *root)
     ctx->c_names_ready = 0;
     CompilerConfig *cfg = ctx->config;
     const char *off = getenv("ZC_NO_C_NAMES"); // to compare, or to work round the scan
+    // C only: C++, Objective-C and CUDA headers (namespaces, classes, overloads) aren't
+    // read; those programs are as before.
     if (!ctx->compiler || cfg->misra_mode || cfg->mode_lsp || cfg->mode_doc || !cfg->cc[0] ||
+        cfg->use_cpp || cfg->use_objc || cfg->use_cuda ||
         (off && *off && strcmp(off, "0") != 0))
     {
         return;
