@@ -939,8 +939,7 @@ void c_names_scan(ParserContext *ctx, ASTNode *root)
     // C only: C++, Objective-C and CUDA headers (namespaces, classes, overloads) aren't
     // read; those programs are as before.
     if (!ctx->compiler || cfg->misra_mode || cfg->mode_lsp || cfg->mode_doc || !cfg->cc[0] ||
-        cfg->use_cpp || cfg->use_objc || cfg->use_cuda ||
-        (off && *off && strcmp(off, "0") != 0))
+        cfg->use_cpp || cfg->use_objc || cfg->use_cuda || (off && *off && strcmp(off, "0") != 0))
     {
         return;
     }
