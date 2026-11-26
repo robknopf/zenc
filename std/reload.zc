@@ -150,7 +150,9 @@ raw {
         unsigned nfns, fns_cap;
         unsigned nstore;
         int ino_fd;     // inotify on the watched directory and those under it (Linux), or -1
-        int ino_failed; // it couldn't be set up for ino_root: poll() scans every time
+        int ino_failed; // it couldn't be set up for ino_root: poll() scans instead
+        int force_scan; // ZC_RELOAD_SCAN set: scan, never inotify (to test the scanning)
+        double last_scan; // when poll() last scanned the files (without inotify), or 0
         char *ino_root; // the directory ino_fd watches
         // Old functions made to jump to the new code (zr_forward): where, the bytes the jump
         // replaced, the name, and whether it still follows the newest version of that name.
@@ -301,6 +303,8 @@ raw {
         r->verbose = 1;
         r->seen = -1;
         r->ino_fd = -1;
+        const char *scan = getenv("ZC_RELOAD_SCAN");
+        r->force_scan = scan && *scan && strcmp(scan, "0") != 0;
         return r;
     }
 
@@ -353,10 +357,21 @@ raw {
     }
 
     // Whether poll() can skip scanning the files: nothing under the watched directory has
-    // changed since the last call. On Linux, inotify says so; it watches every directory
-    // under it (to the depth zr_newest_zc searches) and is set up again when one is added or
-    // removed. Elsewhere, or if it can't be set up, the answer is always no, and poll()
-    // scans: a stat of every file, which at 3000 files takes about 1.7 ms a call.
+    // changed since the last call, as far as it can tell. On Linux, inotify says so; it
+    // watches every directory under it (to the depth zr_newest_zc searches) and is set up
+    // again when one is added or removed. Elsewhere, or if it can't be set up, poll() scans
+    // (a stat of every file: about 1.7 ms at 3000 files), but at most every ZR_SCAN_MS, so
+    // a save is seen up to that much later.
+    enum { ZR_SCAN_MS = 200 };
+
+    static int zr_scan_due(ZrReloader *r)
+    {
+        double now = zr_now_ms();
+        if (r->last_scan > 0 && now - r->last_scan < ZR_SCAN_MS) return 0;
+        r->last_scan = now;
+        return 1;
+    }
+
     #ifdef __linux__
     static int zr_ino_add(int fd, const char *dir_path, int depth)
     {
@@ -408,6 +423,7 @@ raw {
     static int zr_unchanged(ZrReloader *r)
     {
     #ifdef __linux__
+        if (r->force_scan) return !zr_scan_due(r);
         char *root = zr_watch_dir(r);
         if (!r->ino_root || strcmp(root, r->ino_root) != 0)
         {
@@ -415,7 +431,7 @@ raw {
             return 0;
         }
         free(root);
-        if (r->ino_failed) return 0;
+        if (r->ino_failed) return !zr_scan_due(r);
         int changed = 0, again = 0;
         char buf[8192] __attribute__((aligned(__alignof__(struct inotify_event))));
         ssize_t n;
@@ -435,8 +451,7 @@ raw {
         if (again) zr_ino_setup(r, zr_strdup(r->ino_root));
         return !changed;
     #else
-        (void)r;
-        return 0;
+        return !zr_scan_due(r);
     #endif
     }
 

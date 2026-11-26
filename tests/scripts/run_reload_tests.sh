@@ -93,8 +93,10 @@ if "$ZC" transpile -q "$ROOT/tests/reload/poll_host.zc" -o "$WORK/poll_host.c" \
         > "$WORK/poll/build.log" 2>&1 &&
     $CC "$WORK/poll_host.c" $TCC_DIRS -ltcc -ldl -lpthread -lm -o "$WORK/poll_host" \
         >> "$WORK/poll/build.log" 2>&1 &&
-    timeout 60 "$WORK/poll_host" "$ZC" "$WORK/poll" > "$WORK/poll/out" 2>&1; then
-    echo "  [PASS] poll"
+    timeout 60 "$WORK/poll_host" "$ZC" "$WORK/poll" > "$WORK/poll/out" 2>&1 &&
+    rm -rf "$WORK/poll/mod" &&
+    ZC_RELOAD_SCAN=1 timeout 60 "$WORK/poll_host" "$ZC" "$WORK/poll" >> "$WORK/poll/out" 2>&1; then
+    echo "  [PASS] poll (inotify, and scanning)"
     passed=$((passed + 1))
 else
     echo "  [FAIL] poll"

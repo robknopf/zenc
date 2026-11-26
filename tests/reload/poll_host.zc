@@ -36,6 +36,13 @@ raw {
 extern fn put(path: const char*, text: const char*);
 extern fn module_src(out: char*, n: usize, value: int);
 
+// poll(), after waiting out the 200 ms between scans when scanning (ZC_RELOAD_SCAN set).
+fn poll_now(code: Reloader*) -> bool {
+    let scan = getenv("ZC_RELOAD_SCAN");
+    if scan != NULL && scan[0] != 0 { usleep(250000); }
+    return code.poll();
+}
+
 fn check(what: const char*, got: bool, want: bool) {
     if got != want {
         println "FAIL {what}: poll() said {got}, expected {want}";
@@ -69,38 +76,38 @@ fn main(argc: int, argv: char**) -> int {
     if !code.build() { println "FAIL the module does not build"; return 1; }
     let value: fn*() -> int = code.symbol("poll_value");
 
-    check("nothing changed (first poll)", code.poll(), false);
-    check("nothing changed", code.poll(), false);
+    check("nothing changed (first poll)", poll_now(&code), false);
+    check("nothing changed", poll_now(&code), false);
 
     module_src(src, 512, 2);
     put(main_zc, src);
-    check("written in place", code.poll(), true);
+    check("written in place", poll_now(&code), true);
     value = code.symbol("poll_value");
     check("and the new code runs", value() == 2, true);
-    check("nothing changed since", code.poll(), false);
+    check("nothing changed since", poll_now(&code), false);
 
     // An editor's save: a temporary file, renamed over the source.
     module_src(src, 512, 3);
     snprintf(tmp, 4096, "%s/main.zc.swp", dir);
     put(tmp, src);
     rename(tmp, main_zc);
-    check("saved through a rename", code.poll(), true);
+    check("saved through a rename", poll_now(&code), true);
     value = code.symbol("poll_value");
     check("and the new code runs", value() == 3, true);
 
     snprintf(path, 4096, "%s/notes.txt", dir);
     put(path, "not a .zc file\n");
-    check("another file written", code.poll(), false);
+    check("another file written", poll_now(&code), false);
 
     // A directory made after the first poll: a .zc in it counts, and so do later edits.
     snprintf(path, 4096, "%s/sub", dir);
     mkdir(path, 0o755);
     snprintf(path, 4096, "%s/sub/extra.zc", dir);
     put(path, r"fn extra() -> int { return 1; }");
-    check("a .zc added in a new directory", code.poll(), true);
+    check("a .zc added in a new directory", poll_now(&code), true);
     put(path, r"fn extra() -> int { return 2; }");
-    check("that file edited", code.poll(), true);
-    check("nothing changed since", code.poll(), false);
+    check("that file edited", poll_now(&code), true);
+    check("nothing changed since", poll_now(&code), false);
 
     code.free();
     return 0;
