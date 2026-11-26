@@ -77,6 +77,8 @@ raw {
     #include <sys/stat.h>
     #include <time.h>
     #include <unistd.h>
+    #include <setjmp.h>
+    #include <signal.h>
     #include <sys/mman.h>
     #ifdef __linux__
     #include <sys/inotify.h>
@@ -158,6 +160,13 @@ raw {
         // The names followed: each with its followers (fwd entries, linked by `next`).
         struct ZrFwdName { char *name; int head; } *fwd_names;
         unsigned fwd_names_cap, fwd_names_used;
+        // Crash recovery (zr_call): what going back to the version before the last reload
+        // needs, and what happened.
+        int can_roll_back;           // the last reload can be undone: its version is kept
+        unsigned char *state_before; // the host's block before the last reload moved it
+        unsigned nfwd_before;        // r->nfwd then: later entries are the replaced version's
+        int broken;                  // crashed with nothing to go back to: calls are skipped
+        int crashes;
         struct ZrStubs { unsigned char *page; size_t used, size; } *stubs; // far jumps
         unsigned nstubs;
     } ZrReloader;
@@ -2249,6 +2258,21 @@ raw {
         if (n) fputc('\n', log);
     }
 
+    // A vtable (global `g` of a version's manifest): that version's functions, in its storage
+    // and in any old storage of it, so a trait object made by any version calls them.
+    static void zr_refill_vtable(ZrReloader *r, const ZcMfGlobal *g)
+    {
+        if (!g->init_value) return;
+        memcpy(g->addr, g->init_value, g->size);
+        for (unsigned j = 0; j < r->nold_vtables; j++)
+        {
+            const ZcMfGlobal *o = &r->old_vtables[j];
+            if (!strcmp(zr_s(o->name), zr_s(g->name)) && !strcmp(zr_s(o->type), zr_s(g->type)) &&
+                o->size == g->size)
+                memcpy(o->addr, g->init_value, g->size);
+        }
+    }
+
     // Globals back to their initial value: those marked @reset_on_reload, on every reload,
     // and those whose initial value was edited (as hotreload-hx does: an edited initial value
     // is taken to be what was meant). Each is listed in `log`.
@@ -2261,16 +2285,7 @@ raw {
             const ZcMfGlobal *g = &live->globals[i];
             if (g->flags & 2)
             {
-                // A vtable: this version's functions, here and in any old storage of it, so
-                // a trait object made by any version calls the newest code.
-                if (g->init_value) memcpy(g->addr, g->init_value, g->size);
-                for (unsigned j = 0; g->init_value && j < r->nold_vtables; j++)
-                {
-                    const ZcMfGlobal *o = &r->old_vtables[j];
-                    if (!strcmp(zr_s(o->name), zr_s(g->name)) && !strcmp(zr_s(o->type), zr_s(g->type)) &&
-                        o->size == g->size)
-                        memcpy(o->addr, g->init_value, g->size);
-                }
+                zr_refill_vtable(r, g);
                 continue;
             }
             const ZcMfGlobal *was = zr_global_find(r->types_prev->globals, r->types_prev->nglobals, g->name);
@@ -2287,6 +2302,219 @@ raw {
         }
         if (n) fputc('\n', log);
     }
+
+    // ---- A crash in the new code ------------------------------------------------------
+    //
+    // The host calls the module through zr_call (Reloader.call, call_with). A crash in it
+    // (SIGSEGV, SIGBUS, SIGFPE, SIGILL) comes back there instead of ending the program. If
+    // the version running came from a reload, it is undone: the version before comes back,
+    // with the host's block as it was before the reload moved it, its functions, vtables and
+    // the function pointers in the state; old functions that had followed into the crashed
+    // version follow the one before again, and the crashed version's own functions run that
+    // one's. What the crashed code did to the heap, to globals and to libraries isn't undone.
+    // With nothing to go back to (the first version, or one already undone), calls are
+    // skipped until a version that loads replaces it. Best effort, for development.
+
+    static __thread sigjmp_buf *zr_guard;   // where a crash goes: set while zr_call runs code
+    static __thread volatile int zr_guard_sig;
+    static struct sigaction zr_prev_act[32]; // the handlers there were, for other crashes
+    static int zr_guard_ready;
+
+    static void zr_on_fault(int sig, siginfo_t *info, void *uc)
+    {
+        if (zr_guard)
+        {
+            sigjmp_buf *to = zr_guard;
+            zr_guard = NULL;
+            zr_guard_sig = sig;
+            siglongjmp(*to, 1);
+        }
+        // Not in the module's code: as if the Reloader weren't there.
+        struct sigaction *was = sig < 32 ? &zr_prev_act[sig] : NULL;
+        if (was && (was->sa_flags & SA_SIGINFO) && was->sa_sigaction)
+        {
+            was->sa_sigaction(sig, info, uc);
+            return;
+        }
+        if (was && was->sa_handler != SIG_DFL && was->sa_handler != SIG_IGN && was->sa_handler)
+        {
+            was->sa_handler(sig);
+            return;
+        }
+        signal(sig, SIG_DFL); // returning runs the faulting instruction again, unhandled
+    }
+
+    static void zr_guard_install(void)
+    {
+        if (zr_guard_ready) return;
+        zr_guard_ready = 1;
+        static char *alt;
+        size_t alt_size = 1 << 16; // a stack overflow is a SIGSEGV with no stack left
+        alt = (char *)malloc(alt_size);
+        if (alt)
+        {
+            stack_t ss;
+            memset(&ss, 0, sizeof ss);
+            ss.ss_sp = alt;
+            ss.ss_size = alt_size;
+            sigaltstack(&ss, NULL);
+        }
+        static const int sigs[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL};
+        for (unsigned i = 0; i < sizeof sigs / sizeof sigs[0]; i++)
+        {
+            struct sigaction sa;
+            memset(&sa, 0, sizeof sa);
+            sa.sa_sigaction = zr_on_fault;
+            sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+            sigemptyset(&sa.sa_mask);
+            sigaction(sigs[i], &sa, &zr_prev_act[sigs[i]]);
+        }
+    }
+
+    static const char *zr_sig_name(int sig)
+    {
+        switch (sig)
+        {
+        case SIGSEGV: return "SIGSEGV, a bad memory access";
+        case SIGBUS: return "SIGBUS, a bad memory access";
+        case SIGFPE: return "SIGFPE, an arithmetic error such as a division by zero";
+        case SIGILL: return "SIGILL, an illegal instruction";
+        default: return "a signal";
+        }
+    }
+
+    static void zr_roll_back(ZrReloader *r)
+    {
+        ZrVersion crashed = r->current;
+        ZrVersion prev = r->old[--r->old_count];
+    #ifdef ZR_FORWARD
+        // The replaced version's own functions run themselves again; those that followed
+        // into the crashed version follow the replaced one's.
+        for (unsigned i = r->nfwd_before; i < r->nfwd; i++)
+            zr_code_write(r->fwd[i].at, r->fwd[i].orig, 5, 1);
+        r->nfwd = r->nfwd_before;
+        ZrFnTable back;
+        zr_fntab_init(&back, r->types_prev);
+        for (unsigned k = 0; k < r->fwd_names_cap; k++)
+        {
+            struct ZrFwdName *fn = &r->fwd_names[k];
+            if (!fn->name) continue;
+            const ZcMfFunc *t = zr_fntab_get(&back, fn->name);
+            int kept = -1;
+            for (int e = fn->head; e >= 0;)
+            {
+                int next = r->fwd[e].next;
+                if (e < (int)r->nfwd_before && t && zr_jump(r, r->fwd[e].at, (unsigned char *)t->addr, 1, &r->fwd[e].stub))
+                {
+                    r->fwd[e].next = kept;
+                    kept = e;
+                }
+                e = next;
+            }
+            fn->head = kept;
+        }
+        free(back.slot);
+    #endif
+        // The host's block: as it is, if the reload didn't change its type (what the frames
+        // that did run did to it is kept); else as it was before the reload moved it.
+        if (r->state && r->state_before)
+        {
+            int amb = 0;
+            const char *st = zr_state_type(r, r->types_now, &amb);
+            if (!st || amb || zr_mf_changed(r->types_prev, r->types_now, st, 0, NULL))
+                memcpy(r->state, r->state_before, r->state_size);
+        }
+        // The crashed version stays loaded (something may point into it), and goes back to
+        // being an old one; the replaced one is current again.
+        r->old[r->old_count++] = crashed;
+        r->current = prev;
+        ZcManifest *crashed_types = r->types_now;
+        r->types_now = r->types_prev;
+        r->types_prev = crashed_types; // for the checks below: from the crashed to the one before
+    #ifdef ZR_FORWARD
+        // The crashed version's functions run the replaced version's, where the call means
+        // the same (outside any name's followers: they are never moved again).
+        ZrFnTable to;
+        zr_fntab_init(&to, r->types_now);
+        char why[320];
+        for (unsigned i = 0; r->types_prev && i < r->types_prev->nfuncs; i++)
+        {
+            const ZcMfFunc *a = &r->types_prev->funcs[i];
+            const ZcMfFunc *b = zr_fntab_get(&to, zr_s(a->name));
+            if (!a->addr || !b || b->addr == a->addr || zr_fwd_why(r, a, b, why, sizeof why)) continue;
+            if (r->nfwd == r->fwd_cap)
+            {
+                unsigned cap = r->fwd_cap ? r->fwd_cap * 2 : 256;
+                struct ZrFwd *grown = (struct ZrFwd *)realloc(r->fwd, cap * sizeof(*grown));
+                if (!grown) break;
+                r->fwd = grown;
+                r->fwd_cap = cap;
+            }
+            struct ZrFwd *f = &r->fwd[r->nfwd];
+            f->at = (unsigned char *)a->addr;
+            memcpy(f->orig, f->at, 5);
+            f->stub = NULL;
+            f->next = -1;
+            if (zr_jump(r, f->at, (unsigned char *)b->addr, 0, &f->stub)) r->nfwd++;
+        }
+        free(to.slot);
+    #endif
+        const ZcManifest *live = zr_version_manifest(&r->current);
+        for (unsigned i = 0; live && i < live->nglobals; i++)
+            if (live->globals[i].flags & 2) zr_refill_vtable(r, &live->globals[i]);
+        zr_repoint_state(r, stderr);
+        zr_mf_free(r->types_prev);
+        r->types_prev = NULL;
+        r->version--;
+        r->can_roll_back = 0;
+    }
+
+    static void zr_crashed(ZrReloader *r, int sig)
+    {
+        r->crashes++;
+        if (r->can_roll_back && r->old_count > 0)
+        {
+            int was = r->version;
+            zr_roll_back(r);
+            fprintf(stderr,
+                    "reload: version %d crashed (%s); back to version %d. What the crashed code "
+                    "did to the heap, globals and libraries isn't undone. Fix and save to try "
+                    "again\n",
+                    was, zr_sig_name(sig), r->version);
+        }
+        else
+        {
+            r->broken = 1;
+            fprintf(stderr,
+                    "reload: version %d crashed (%s), with no version to go back to: calls to it "
+                    "are skipped until a new version loads. Fix and save\n",
+                    r->version, zr_sig_name(sig));
+        }
+    }
+
+    // Calls `fn` (with `arg`, if `with_arg`) so that a crash in it doesn't end the program.
+    // 1 if it ran to the end; 0 if it crashed or was skipped (look up symbols again).
+    static int zr_call(void *h, void *fn, void *arg, int with_arg)
+    {
+        ZrReloader *volatile r = (ZrReloader *)h;
+        if (!r || !fn || r->broken) return 0;
+        zr_guard_install();
+        sigjmp_buf here;
+        sigjmp_buf *volatile outer = zr_guard;
+        if (sigsetjmp(here, 1) == 0)
+        {
+            zr_guard = &here;
+            if (with_arg) ((void (*)(void *))fn)(arg);
+            else ((void (*)(void))fn)();
+            zr_guard = outer;
+            return 1;
+        }
+        zr_guard = outer;
+        zr_crashed(r, zr_guard_sig);
+        return 0;
+    }
+
+    static int zr_crashes(void *h) { return ((ZrReloader *)h)->crashes; }
 
     static int zr_build(void *h)
     {
@@ -2425,6 +2653,21 @@ raw {
         // either (they ran when the first version loaded): a reload doesn't start the program
         // again. The new version's @after_reload functions run once the state has moved.
         int first = !r->current.tcc;
+        // What undoing this reload would need (zr_call, after a crash in the new code).
+        r->broken = 0;
+        r->can_roll_back = !first && keep_current;
+        r->nfwd_before = r->nfwd;
+        if (r->can_roll_back && r->state)
+        {
+            unsigned char *snap = (unsigned char *)realloc(r->state_before, r->state_size);
+            if (snap)
+            {
+                memcpy(snap, r->state, r->state_size);
+                r->state_before = snap;
+            }
+            else
+                r->can_roll_back = 0;
+        }
         if (r->current.tcc)
         {
             zr_version_call(&r->current, "_zc_module_before_reload");
@@ -2560,6 +2803,7 @@ raw {
         for (unsigned i = 0; i < r->nstubs; i++) munmap(r->stubs[i].page, r->stubs[i].size);
     #endif
         free(r->stubs);
+        free(r->state_before);
         for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
         for (int i = 0; i < r->required_count; i++) free(r->required[i]);
         for (int i = 0; i < r->fetched_count; i++) free(r->fetched[i]);
@@ -2606,6 +2850,8 @@ extern fn zr_type_changed(h: void*, name: const char*) -> c_int;
 extern fn zr_version(h: void*) -> c_int;
 extern fn zr_kept(h: void*) -> c_int;
 extern fn zr_free(h: void*);
+extern fn zr_call(h: void*, f: void*, arg: void*, with_arg: c_int) -> c_int;
+extern fn zr_crashes(h: void*) -> c_int;
 
 /// A module rebuilt from Zen C source and reloaded into this process. See the top of
 /// std/reload.zc.
@@ -2699,6 +2945,22 @@ impl Reloader {
     fn kept(self) -> int { return (int)zr_kept(self.handle); }
 
     /// Delete every version and the reloader.
+    /// Calls `f`, a function of the module, so that a crash in it (SIGSEGV, SIGBUS, SIGFPE,
+    /// SIGILL) doesn't end the program. If the version running came from a reload, the
+    /// reload is undone: the version before runs again, with the state as it was. What the
+    /// crashed code did to the heap, globals and libraries isn't undone. True if `f` ran
+    /// to the end; false if it crashed, or was skipped (a version crashed with none to go
+    /// back to; calls are skipped until a new one loads): look up symbols again.
+    fn call(self, f: fn*()) -> bool { return zr_call(self.handle, (void*)f, NULL, 0) != 0; }
+
+    /// call() for a function taking a pointer (the host's block, say).
+    fn call_with(self, f: fn*(void*), arg: void*) -> bool {
+        return zr_call(self.handle, (void*)f, arg, 1) != 0;
+    }
+
+    /// Crashes caught by call() and call_with().
+    fn crashes(self) -> int { return (int)zr_crashes(self.handle); }
+
     fn free(self) {
         zr_free(self.handle);
         self.handle = NULL;

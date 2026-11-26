@@ -27,7 +27,8 @@ fn main() -> int {
     while running {
         // between frames, when none of the module's code is running:
         if code.poll() { frame = code.symbol("game_frame"); }
-        frame();
+        // call(): a crash in the module goes back to the version before (see below)
+        if !code.call(frame) { frame = code.symbol("game_frame"); }
     }
     code.free();
     return 0;
@@ -48,6 +49,8 @@ fn main() -> int {
   if the host exports its symbols (link it with `-rdynamic`).
 - Call `poll()` only when none of the module's code is running: between frames, between
   requests.
+- Call the module through `call(f)` or `call_with(f, arg)`, so a crash in it doesn't end
+  the program. False means it crashed (or was skipped): look its functions up again.
 
 `zc transpile --reload` is what the `Reloader` runs. It writes C for tcc (unless `--cc`
 says otherwise), and adds what the `Reloader` needs: a description of the module's types,
@@ -151,6 +154,33 @@ host's pointer to it stays valid.
   takes or returns a Pt, which changed)` [`function_forward_type_changed`]. Needs old
   versions kept (the default); x86-64 only for now.
 
+### A crash in the new code
+
+A crash in code called through `call()` or `call_with()` (SIGSEGV, SIGBUS, SIGFPE,
+SIGILL: a bad pointer, a division by zero) comes back there instead of ending the
+program, and the reload that brought that version is undone [`crash_rolled_back`]:
+
+```
+reload: version 2 crashed (SIGSEGV, a bad memory access); back to version 1. What the crashed code did to the heap, globals and libraries isn't undone. Fix and save to try again
+```
+
+- The version before runs again: its functions, its vtables, the function pointers in
+  the state pointed back at it, and old functions that had followed into the crashed
+  version follow the one before again [`crash_forward_undone`].
+- The host's block is kept as it is if the reload didn't change its type (what the
+  frames that did run did to it stays); if it did, it goes back to what it was before
+  that reload [`crash_state_changed`].
+- The crashed version stays loaded (something may point into it); its functions run the
+  version before's, where the call means the same.
+- The next save that loads replaces it, as usual.
+- With nothing to go back to (the first version, or one already gone back from), calls
+  are skipped until a version that loads replaces it [`crash_first_version`].
+
+This is best effort: what the crashed code did to the heap, to globals and to libraries
+(libwgf's state, a half-drawn frame) isn't undone, and a crash inside a library called by
+the module leaves that library as the crash left it. A crash outside `call()` (in the
+host, or in module code it calls directly) is a crash, as without the Reloader.
+
 ### What it tells you
 
 Each reload prints what changed, unless `verbose(false)`; `print_changes()` prints it on
@@ -245,7 +275,8 @@ for that.
 
 **Other limits.**
 
-- A crash in the new code is a crash of the program: nothing catches it.
+- A crash is caught only in code called through `call()` or `call_with()`, and only what
+  is listed above is undone.
 - Data reached only through pointers (heap objects) is never moved, only the pointers
   checked.
 - Types are matched by their C name. Two structs of the same name under different `@cfg`
@@ -297,6 +328,12 @@ for that.
   stub. Whether a name follows is decided once a reload, so a call through old code is one
   jump however old it is. At 3000 generated modules (about 12,000 functions) this adds
   about 15 ms to a reload.
+- **Crashes.** `call()` sets a `sigsetjmp` point and runs the function; handlers for
+  SIGSEGV, SIGBUS, SIGFPE and SIGILL (on an alternate stack, so a stack overflow is caught
+  too) jump back to it while module code runs, and otherwise do what the handler there
+  before would have. Each reload keeps what undoing it needs: the version replaced (kept
+  loaded), a copy of the host's block before the move, and where its forwarding jumps
+  start.
 - **Order of a reload:** build and compile the new version; check its state can move (or
   refuse); the old version's `@before_reload`; switch; move the state; reset what is
   `@reset_on_reload` or has an edited initial value; refill vtables, re-point function
@@ -322,4 +359,6 @@ for that.
 | `print_changes()`, `type_changed(type)` | what the last reload changed |
 | `manifest()` | the current version's `const ZcManifest*` |
 | `version()`, `kept()`, `refused()` | versions loaded, old ones kept, builds not loaded |
+| `call(f)`, `call_with(f, arg)` | call a function of the module, catching a crash in it (see "A crash in the new code"); false if it crashed or was skipped |
+| `crashes()` | crashes caught |
 | `free()` | the destructors, then every version deleted |

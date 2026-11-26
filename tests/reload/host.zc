@@ -10,6 +10,10 @@
 // Old versions stay loaded (the Reloader's default); --delete-old deletes each when the
 // next one loads, to show what that breaks.
 //
+// The host calls each step through the Reloader's call_with(), so a crash in it is caught:
+// it prints "(crashed)", looks the step up again and calls it once more ("(skipped)" if no
+// version can run).
+//
 // The host prints "--- step N" before each step, so the expected output shows which
 // version printed what. If CASE_DIR has a `print-type` file, it names a type whose layout
 // the host prints from each version's manifest when it loads (Reloader.manifest()). If it
@@ -147,7 +151,13 @@ fn main(argc: int, argv: char**) -> int {
         } else {
             println "(build failed, running the previous module)";
         }
-        if step != NULL { step(state); }
+        // Through call_with, so a crash in the step comes back here: the host then looks the
+        // step up again (in the version it went back to, if any) and calls it once more.
+        if step != NULL && !code.call_with(step, state) {
+            println "(crashed)";
+            step = code.symbol("reload_step");
+            if step != NULL && !code.call_with(step, state) { println "(skipped)"; }
+        }
         n = n + 1;
     }
 

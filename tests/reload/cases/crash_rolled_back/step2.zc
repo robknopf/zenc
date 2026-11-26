@@ -1,0 +1,15 @@
+// A crash in a reloaded version, called through Reloader.call_with, goes back to the
+// version before: it runs again, with the state as it is (its type didn't change), and the
+// next save that loads replaces it.
+fn crash(at: int) -> int {
+    let p = (int*)(usize)at; // 0: a write to address 0
+    *p = 1;
+    return 0;
+}
+struct State { count: int; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    state.count = state.count + 1;
+    println "version 2: count {state.count}";
+    crash(0);
+}
