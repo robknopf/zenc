@@ -1,0 +1,26 @@
+--- step 1
+rock 0: x 1
+rock 1: x 2
+rock 2: x 3
+--- step 2
+reload: changes in version 2:
+reload:   Option<Rock>: size 8 -> 16 bytes, val resized from 4 to 12 bytes
+reload:   Rock: size 4 -> 12 bytes, tag added at byte 0, x moved from byte 0 to 4, y added at byte 8
+reload:   also changed: State (holds Vec<Rock>), Vec<Rock> (holds Rock)
+reload: moved the state (State) to the new layout: rocks.data[].tag added, rocks.data[].y added, rocks (a Vec<Rock>) 3 elements moved to the new layout
+reload: old code still runs for: Vec__Rock__new (it takes or returns a Vec__Rock, which changed), Vec__Rock__with_capacity (it takes or returns a Vec__Rock, which changed), Vec__Rock__grow (it takes or returns a Vec__Rock, which changed), Vec__Rock__grow_to_fit (it takes or returns a Vec__Rock, which changed), and 54 more
+rock 0: tag 0 x 1 y 0.000000
+rock 1: tag 0 x 2 y 0.000000
+rock 2: tag 0 x 3 y 0.000000
+rock 3: tag 7 x 4 y 0.500000
+--- step 3
+reload: changes in version 3:
+reload:   Option<Rock>: size 16 -> 32 bytes, alignment 4 -> 8, val resized from 12 to 24 bytes, val moved from byte 4 to 8
+reload:   Rock: size 12 -> 24 bytes, alignment 4 -> 8, x retyped from int32_t to int64_t, x moved from byte 4 to 8, y moved from byte 8 to 16
+reload:   also changed: State (holds Vec<Rock>), Vec<Rock> (holds Rock)
+reload: moved the state (State) to the new layout: rocks.data[].x converted from int32_t to int64_t, rocks (a Vec<Rock>) 4 elements moved to the new layout
+reload: old code still runs for: Vec__Rock__new (it takes or returns a Vec__Rock, which changed), Vec__Rock__with_capacity (it takes or returns a Vec__Rock, which changed), Vec__Rock__grow (it takes or returns a Vec__Rock, which changed), Vec__Rock__grow_to_fit (it takes or returns a Vec__Rock, which changed), and 54 more
+rock 0: tag 0 x 1 y 0.000000
+rock 1: tag 0 x 2 y 0.000000
+rock 2: tag 0 x 3 y 0.000000
+rock 3: tag 7 x 4 y 0.500000

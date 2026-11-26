@@ -118,7 +118,7 @@ fn main(argc: int, argv: char**) -> int {
     // and leaves no file beside the C file either way.
     let mem = getenv("ZC_RELOAD_MEMORY");
     let in_memory = mem != NULL && mem[0] != 0;
-    check("registered with debuggers", registered((void*)value) != 0, !in_memory);
+    check("registered with debuggers", registered((void*)code.manifest()) != 0, !in_memory);
     check("no file left beside the C file", files_left(argv[2]) == 0, true);
 
     check("nothing changed (first poll)", poll_now(&code), false);
@@ -129,7 +129,7 @@ fn main(argc: int, argv: char**) -> int {
     check("written in place", poll_now(&code), true);
     value = code.symbol("poll_value");
     check("and the new code runs", value() == 2, true);
-    check("the new version registered too", registered((void*)value) != 0, !in_memory);
+    check("the new version registered too", registered((void*)code.manifest()) != 0, !in_memory);
     check("nothing changed since", poll_now(&code), false);
 
     // An editor's save: a temporary file, renamed over the source.

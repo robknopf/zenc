@@ -1,0 +1,20 @@
+// A function pointer kept in the heap (as a library keeps a callback) calls the newest
+// version's function of the same name even with each old version deleted as the next loads:
+// the pointer is the function's stub, which no version owns.
+struct Box { cb: fn*(int) -> int; }
+struct State { kept: void*; }
+fn greet(x: int) -> int {
+    println "greet version 3: {x}";
+    return x + 3;
+}
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.kept == NULL {
+        let b = (Box*)malloc(sizeof(Box));
+        b.cb = greet;
+        state.kept = (void*)b;
+    }
+    let b = (Box*)state.kept;
+    let r = b.cb(10);
+    println "returned {r}";
+}

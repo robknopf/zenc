@@ -1,0 +1,1 @@
+Needs stubs: libtcc's loading (ZC_RELOAD_MEMORY) has none, so the old function is called, deleted.

@@ -188,6 +188,22 @@ raw {
         int crashes;
         struct ZrStubs { unsigned char *page; size_t used, size; } *stubs; // far jumps
         unsigned nstubs;
+        // What a function's address is (zr_stub_new): each stub, found by its name (the
+        // newest of that name) and by its address.
+        struct ZrStub
+        {
+            const char *name;   // interned
+            const char *sig;    // its C signature (interned), or NULL: not in a manifest
+            unsigned char *code; // in kept memory: jmp *8(%rip), then the target
+            const char *why;    // pinned: why it stays where it is (interned)
+            int pinned;         // stays on the function it holds (no longer follows its name)
+            int changed_in;     // the version whose reload last moved or pinned it
+            int made_in;        // the version it was made for
+            void *before;       // its target before that reload (to undo it)
+        } *fs;
+        unsigned nfs, fs_cap;
+        unsigned *fs_by_name, *fs_by_addr; // index + 1, or 0
+        unsigned fs_name_cap, fs_addr_cap;
     } ZrReloader;
 
     static char *zr_strdup(const char *s)
@@ -335,8 +351,8 @@ raw {
     //
     // Every version, and everything that outlives one, is in one reservation of address
     // space (zl_space), so a 32-bit PC-relative reference between any two of them reaches.
-    // Its first part is kept memory, never released: the globals' storage, and (later) what
-    // old pointers need. The rest holds the versions, each where the last one ended, around
+    // Its first part is kept memory, never released: the stubs, and what old pointers need
+    // (zr_stub_new, zr_pool). The rest holds the versions, each where the last one ended, around
     // and around: a released version's addresses aren't given to another until the space has
     // gone round once, so a pointer nothing caught still faults there for a long while
     // instead of running someone else's code.
@@ -539,6 +555,15 @@ raw {
         return h->addr;
     }
 
+    static unsigned zl_name_hash(const char *s)
+    {
+        unsigned h = 2166136261u;
+        for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+        return h;
+    }
+
+    static int zl_fits32(int64_t d) { return d == (int64_t)(int32_t)d; }
+
     // Where an undefined name of a version is: given by the caller, else the host's.
     typedef void *(*ZlResolve)(void *ctx, const char *name);
 
@@ -559,16 +584,64 @@ raw {
         unsigned by_name_cap;
         unsigned char *mem; // in the ring
         size_t mem_size;
-        size_t kept_size;   // its writable sections' bytes in kept memory (keep_data), or 0
+        unsigned char *data; // its writable sections, apart (keep_data): they can outlive it
+        size_t data_size;
+        // Each place it takes the address of one of its own functions (not a call): a pointer
+        // in its data (but the manifest's), a GOT entry, a `lea`. They hold the function's
+        // address once loaded; the Reloader points them at the function's stub (zl_bind).
+        struct ZlFnRef { uint64_t at; unsigned sym; int pc; int64_t addend; } *refs;
+        unsigned nrefs, refs_cap;
         zr_jit_entry jit;
         int registered;
     } ZlImage;
 
-    static unsigned zl_name_hash(const char *s)
+    static int zl_note_ref(ZlImage *im, uint64_t at, unsigned sym, int pc, int64_t addend)
     {
-        unsigned h = 2166136261u;
-        for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
-        return h;
+        if (im->nrefs == im->refs_cap)
+        {
+            unsigned cap = im->refs_cap ? im->refs_cap * 2 : 256;
+            struct ZlFnRef *grown = (struct ZlFnRef *)realloc(im->refs, cap * sizeof(*grown));
+            if (!grown) return 0;
+            im->refs = grown;
+            im->refs_cap = cap;
+        }
+        im->refs[im->nrefs++] = (struct ZlFnRef){at, sym, pc, addend};
+        return 1;
+    }
+
+    // Reference `i` of `im` made to hold `to` (a stub) instead.
+    static void zl_bind(ZlImage *im, unsigned i, uint64_t to)
+    {
+        const struct ZlFnRef *f = &im->refs[i];
+        if (f->pc)
+        {
+            int64_t d = (int64_t)(to + (uint64_t)f->addend - f->at);
+            if (zl_fits32(d)) memcpy((void *)(uintptr_t)f->at, &(int32_t){(int32_t)d}, 4);
+        }
+        else
+            memcpy((void *)(uintptr_t)f->at, &(uint64_t){to + (uint64_t)f->addend}, 8);
+    }
+
+    // The name of symbol `sym` of `im`.
+    static const char *zl_name(const ZlImage *im, unsigned sym) { return im->strtab + im->syms[sym].st_name; }
+
+    // Whether `name` is a function `im` defines.
+    static int zl_is_func(ZlImage *im, const char *name)
+    {
+        if (!im || !im->by_name_cap) return 0;
+        unsigned k = zl_name_hash(name) & (im->by_name_cap - 1);
+        for (; im->by_name[k]; k = (k + 1) & (im->by_name_cap - 1))
+        {
+            unsigned s = im->by_name[k] - 1;
+            if (!strcmp(im->strtab + im->syms[s].st_name, name)) return ZL_TYPE(im->syms[s].st_info) == ZL_STT_FUNC;
+        }
+        return 0;
+    }
+
+    static int zl_range_cmp(const void *a, const void *b)
+    {
+        uint64_t x = ((const uint64_t *)a)[0], y = ((const uint64_t *)b)[0];
+        return x < y ? -1 : x > y;
     }
 
     static int zl_err(char *err, size_t n, const char *fmt, ...)
@@ -580,17 +653,17 @@ raw {
         return 0;
     }
 
-    static int zl_fits32(int64_t d) { return d == (int64_t)(int32_t)d; }
-
     static void zl_free(ZlImage *im)
     {
         if (!im) return;
         if (im->registered) zl_jit_remove(&im->jit);
         if (im->mem) zl_ring_give(im->mem);
+        if (im->data) zl_ring_give(im->data);
         free(im->img);
         free(im->sec);
         free(im->addr);
         free(im->by_name);
+        free(im->refs);
         free(im);
     }
 
@@ -609,14 +682,16 @@ raw {
     }
 
     // Loads the object file `img` (taken: freed with the image, or on failure). Its writable
-    // sections go to kept memory if `keep_data` (a version whose globals are the store's),
-    // else with the rest. NULL, with why in `err`, if it can't be.
+    // sections are apart from the rest if `keep_data` (a version that defines the globals:
+    // the store may keep them when the rest goes). NULL, with why in `err`, if it can't be;
+    // `module_fault` set if that is the module's C's doing (a name nothing defines).
     static ZlImage *zl_load(unsigned char *img, size_t img_size, ZlResolve resolve, void *ctx,
                             int keep_data, int *module_fault, char *err, size_t errn)
     {
         ZlImage *im = (ZlImage *)calloc(1, sizeof(ZlImage));
         unsigned char *need_got = NULL, *need_plt = NULL;
         uint64_t *gslot = NULL, *pslot = NULL; // each symbol's GOT entry and jump, once made
+        uint64_t *mf = NULL;
         if (!im)
         {
             free(img);
@@ -737,14 +812,14 @@ raw {
         size_t plt_at = size;
         size += (size_t)nplt * 16;
         im->mem = zl_ring_take(size ? size : 16);
-        unsigned char *kmem = kept ? (unsigned char *)zl_keep(kept, 64) : NULL;
+        unsigned char *kmem = kept ? (im->data = zl_ring_take(kept)) : NULL;
         if (!im->mem || (kept && !kmem))
         {
             zl_err(err, errn, "no room left for it in the Reloader's address space");
             goto fail;
         }
         im->mem_size = size;
-        im->kept_size = kept;
+        im->data_size = kept;
         for (unsigned i = 0; i < im->nsh; i++)
         {
             ZlShdr *s = &im->sh[i];
@@ -791,6 +866,25 @@ raw {
                 im->by_name[k] = s + 1;
             }
 
+        // The manifest's objects (its functions' addresses there are the functions' own).
+        unsigned nmf = 0;
+        for (unsigned s = 1; s < im->nsyms; s++)
+            if (ZL_TYPE(im->syms[s].st_info) == ZL_STT_OBJECT && im->addr[s] && !strncmp(zl_name(im, s), "_zc_mf", 6)) nmf++;
+        if (nmf && !(mf = (uint64_t *)malloc(nmf * 2 * sizeof(uint64_t))))
+        {
+            zl_err(err, errn, "out of memory");
+            goto fail;
+        }
+        nmf = 0;
+        for (unsigned s = 1; s < im->nsyms; s++)
+            if (ZL_TYPE(im->syms[s].st_info) == ZL_STT_OBJECT && im->addr[s] && !strncmp(zl_name(im, s), "_zc_mf", 6))
+            {
+                mf[2 * nmf] = im->addr[s];
+                mf[2 * nmf + 1] = im->addr[s] + im->syms[s].st_size;
+                nmf++;
+            }
+        if (nmf) qsort(mf, nmf, 2 * sizeof(uint64_t), zl_range_cmp);
+
         // The relocations of what is loaded (the debug sections' are the debugger's to apply).
         unsigned ngot_used = 0, nplt_used = 0;
         for (unsigned i = 0; i < im->nsh; i++)
@@ -808,6 +902,25 @@ raw {
                 int64_t A = ra[k].r_addend;
                 uint64_t Pa = (uint64_t)(uintptr_t)P;
                 int64_t d;
+                const ZlSym *ty = &im->syms[s];
+                int own_fn = ZL_TYPE(ty->st_info) == ZL_STT_FUNC && ty->st_shndx != ZL_SHN_UNDEF &&
+                             ty->st_shndx < im->nsh && im->sec[ty->st_shndx];
+                if (own_fn && t == ZL_R_64)
+                {
+                    // In the manifest? (the last object starting at or before it)
+                    unsigned lo = 0, hi = nmf;
+                    while (lo < hi)
+                    {
+                        unsigned mid = (lo + hi) / 2;
+                        if (mf[2 * mid] <= Pa) lo = mid + 1;
+                        else hi = mid;
+                    }
+                    if ((!lo || Pa >= mf[2 * (lo - 1) + 1]) && !zl_note_ref(im, Pa, s, 0, A)) goto oom;
+                }
+                // A PC-relative reference that isn't a call or jump takes the address (a lea).
+                if (own_fn && t == ZL_R_PC32 && !(ra[k].r_offset >= 1 && (P[-1] == 0xE8 || P[-1] == 0xE9)) &&
+                    !zl_note_ref(im, Pa, s, 1, A))
+                    goto oom;
                 switch (t)
                 {
                 case ZL_R_64:
@@ -848,6 +961,7 @@ raw {
                         uint64_t *g = (uint64_t *)(im->mem + got_at) + ngot_used++;
                         *g = S;
                         gslot[s] = (uint64_t)(uintptr_t)g;
+                        if (own_fn && !zl_note_ref(im, gslot[s], s, 0, 0)) goto oom;
                     }
                     d = (int64_t)(gslot[s] + (uint64_t)A - Pa);
                     memcpy(P, &(int32_t){(int32_t)d}, 4);
@@ -864,6 +978,9 @@ raw {
                 default:
                     zl_err(err, errn, "a relocation of type %u, which the Reloader doesn't know", t);
                     goto fail;
+                oom:
+                    zl_err(err, errn, "out of memory");
+                    goto fail;
                 out_of_reach:
                     zl_err(err, errn, "an absolute 32-bit reference to '%s'", im->strtab + im->syms[s].st_name);
                     goto fail;
@@ -874,8 +991,10 @@ raw {
         free(need_plt);
         free(gslot);
         free(pslot);
+        free(mf);
         need_got = need_plt = NULL;
         gslot = pslot = NULL;
+        mf = NULL;
 
         // The debugger's view: the object file with each loaded section at its address, and
         // each name it took from elsewhere (the store's globals, the host's) at that address.
@@ -935,6 +1054,7 @@ raw {
         free(need_plt);
         free(gslot);
         free(pslot);
+        free(mf);
         zl_free(im);
         return NULL;
     }
@@ -959,7 +1079,7 @@ raw {
 
     static size_t zr_version_bytes(const ZrVersion *v)
     {
-        return v->im ? v->im->mem_size + v->im->img_size : v->mem_size;
+        return v->im ? v->im->mem_size + v->im->data_size + v->im->img_size : v->mem_size;
     }
     #else
     static size_t zr_version_bytes(const ZrVersion *v) { return v->mem_size; }
@@ -2866,6 +2986,8 @@ raw {
 
     // Through the value of C type `type` at `p`, every function pointer to an old function,
     // pointed at the new version's (manifest `m`). Each one moved, or kept, is noted in `log`.
+    static int zr_stub_at(ZrReloader *r, void *addr);
+
     static void zr_repoint(ZrReloader *r, const ZcManifest *m, const char *path, const char *type,
                            unsigned char *p, unsigned size, FILE *log, int *n, int depth)
     {
@@ -2886,6 +3008,17 @@ raw {
         {
             void *fn;
             memcpy(&fn, p, sizeof fn);
+            // A stub: it followed its name, or stayed (zr_stubs_follow).
+            int si = fn ? zr_stub_at(r, fn) : -1;
+            if (si >= 0)
+            {
+                const struct ZrStub *st = &r->fs[si];
+                if (st->changed_in != r->version || !st->sig) return;
+                fputs((*n)++ ? ", " : "reload: function pointers in the state: ", log);
+                if (!st->pinned) fprintf(log, "%s now calls the new %s", path, st->name);
+                else fprintf(log, "%s still calls the old %s (%s)", path, st->name, zr_s(st->why));
+                return;
+            }
             const struct ZrFn *was = fn ? zr_fn_at(r, fn) : NULL;
             const ZcMfFunc *now = was ? zr_func_find(m, was->name) : NULL;
             if (!was || (now && now->addr == fn)) return;
@@ -2991,6 +3124,8 @@ raw {
 
     // Why `was` (of the previous version) can't be followed by `now` (the new one), or NULL if
     // it can. `why` holds the reason when there is one.
+    static const char *zr_fwd_types_why(ZrReloader *r, const ZcMfFunc *now, char *why, size_t n);
+
     static const char *zr_fwd_why(ZrReloader *r, const ZcMfFunc *was, const ZcMfFunc *now,
                                   char *why, size_t n)
     {
@@ -3000,6 +3135,14 @@ raw {
         free(a);
         free(b);
         if (!same) return "its signature changed";
+        return zr_fwd_types_why(r, now, why, n);
+    }
+
+    // Why a call to `now` (the new version's function) can't mean what a call to the old
+    // one of the same signature meant: a type it takes or returns changed. NULL if none did.
+    static const char *zr_fwd_types_why(ZrReloader *r, const ZcMfFunc *now, char *why, size_t n)
+    {
+        if (!r->types_prev || !r->types_now) return NULL;
         // The host's block is moved to the new layout in place: a pointer to it is right for
         // the new code. Any other changed type, or one passed by value, isn't.
         int amb = 0;
@@ -3018,6 +3161,275 @@ raw {
             }
         }
         return NULL;
+    }
+
+    // ---- Stubs: what a function's address is ---------------------------------------------
+    //
+    // Every place a version takes the address of one of its own functions (a function
+    // pointer, a vtable's entry, a callback handed to a library, what symbol() gives the host)
+    // holds the function's stub instead: an indirect jump in kept memory, which no version
+    // owns. Each reload points the stubs at the new version's functions of the same name,
+    // where the call means the same (the same signature, and no type it takes or returns
+    // changed), so a pointer kept anywhere, made by any version, calls the newest code, and
+    // an old version's code is reached through nothing but its stubs. A stub whose function
+    // can't follow stays on it (pinned), and the reload says so; the new version's pointers
+    // to that name get a stub of their own. Direct calls stay direct. With the Reloader's
+    // loading only (zl_load): a version libtcc loads has none of its own, but its functions
+    // are followed into.
+
+    static unsigned zr_stub_slot(unsigned *tab, unsigned cap, unsigned h)
+    {
+        (void)tab;
+        return h & (cap - 1);
+    }
+
+    static int zr_stub_grow(unsigned **tab, unsigned *cap, unsigned used)
+    {
+        if ((used + 1) * 2 <= *cap) return 1;
+        unsigned ncap = *cap ? *cap * 2 : 1024;
+        unsigned *t = (unsigned *)calloc(ncap, sizeof(unsigned));
+        if (!t) return 0;
+        free(*tab);
+        *tab = t;
+        *cap = ncap;
+        return 2; // emptied: to be filled again
+    }
+
+    static void *zr_stub_target(const struct ZrStub *st)
+    {
+        void *to;
+        memcpy(&to, st->code + 8, sizeof to);
+        return to;
+    }
+
+    static void zr_stub_point(struct ZrStub *st, void *to)
+    {
+        __atomic_store_n((void **)(st->code + 8), to, __ATOMIC_RELEASE);
+    }
+
+    static void zr_stub_index_name(ZrReloader *r, unsigned i)
+    {
+        unsigned k = zr_stub_slot(r->fs_by_name, r->fs_name_cap, zr_hash(r->fs[i].name));
+        for (; r->fs_by_name[k]; k = (k + 1) & (r->fs_name_cap - 1))
+            if (r->fs[r->fs_by_name[k] - 1].name == r->fs[i].name) break; // interned
+        r->fs_by_name[k] = i + 1; // the newest of the name
+    }
+
+    static void zr_stub_index_addr(ZrReloader *r, unsigned i)
+    {
+        unsigned k = zr_stub_slot(r->fs_by_addr, r->fs_addr_cap, zr_addr_hash(r->fs[i].code));
+        while (r->fs_by_addr[k]) k = (k + 1) & (r->fs_addr_cap - 1);
+        r->fs_by_addr[k] = i + 1;
+    }
+
+    // The stub at `addr`, or -1.
+    static int zr_stub_at(ZrReloader *r, void *addr)
+    {
+        if (!r->fs_addr_cap) return -1;
+        unsigned k = zr_stub_slot(r->fs_by_addr, r->fs_addr_cap, zr_addr_hash(addr));
+        for (; r->fs_by_addr[k]; k = (k + 1) & (r->fs_addr_cap - 1))
+            if (r->fs[r->fs_by_addr[k] - 1].code == (unsigned char *)addr) return (int)r->fs_by_addr[k] - 1;
+        return -1;
+    }
+
+    // The stub `name` (interned) calls through now, if it follows its name: -1 if there's
+    // none, or it's pinned.
+    static int zr_stub_live(ZrReloader *r, const char *name)
+    {
+        if (!r->fs_name_cap) return -1;
+        unsigned k = zr_stub_slot(r->fs_by_name, r->fs_name_cap, zr_hash(name));
+        for (; r->fs_by_name[k]; k = (k + 1) & (r->fs_name_cap - 1))
+        {
+            const struct ZrStub *st = &r->fs[r->fs_by_name[k] - 1];
+            if (st->name == name) return st->pinned ? -1 : (int)r->fs_by_name[k] - 1;
+        }
+        return -1;
+    }
+
+    // A new stub for `name` (interned), of signature `sig` (or NULL), calling `to`; -1 if
+    // there's no memory for it.
+    static int zr_stub_new(ZrReloader *r, const char *name, const char *sig, void *to)
+    {
+        if (r->nfs == r->fs_cap)
+        {
+            unsigned cap = r->fs_cap ? r->fs_cap * 2 : 256;
+            struct ZrStub *grown = (struct ZrStub *)realloc(r->fs, cap * sizeof(*grown));
+            if (!grown) return -1;
+            r->fs = grown;
+            r->fs_cap = cap;
+        }
+        int g = zr_stub_grow(&r->fs_by_name, &r->fs_name_cap, r->nfs);
+        if (g == 2)
+            for (unsigned i = 0; i < r->nfs; i++) zr_stub_index_name(r, i);
+        int h = g ? zr_stub_grow(&r->fs_by_addr, &r->fs_addr_cap, r->nfs) : 0;
+        if (h == 2)
+            for (unsigned i = 0; i < r->nfs; i++) zr_stub_index_addr(r, i);
+    #ifdef ZR_LOADER
+        unsigned char *code = h ? (unsigned char *)zl_keep(16, 16) : NULL;
+    #else
+        unsigned char *code = NULL;
+    #endif
+        if (!code) return -1;
+        static const unsigned char jmp[8] = {0xFF, 0x25, 0x02, 0, 0, 0, 0xCC, 0xCC}; // jmp *2(%rip)
+        memcpy(code, jmp, 8);
+        struct ZrStub *st = &r->fs[r->nfs];
+        memset(st, 0, sizeof(*st));
+        st->name = name;
+        st->sig = sig;
+        st->code = code;
+        st->made_in = st->changed_in = r->version;
+        zr_stub_point(st, to);
+        zr_stub_index_name(r, r->nfs);
+        zr_stub_index_addr(r, r->nfs);
+        return (int)r->nfs++;
+    }
+
+    // The stub for `name` that calls the current version's function of that name (at `to`):
+    // the one following the name, or a new one.
+    static void *zr_stub_for(ZrReloader *r, const ZcManifest *m, const char *name, void *to)
+    {
+        const char *in = zr_intern(r, zr_strdup(name));
+        if (!in) return to;
+        int i = zr_stub_live(r, in);
+        if (i >= 0 && zr_stub_target(&r->fs[i]) == to) return r->fs[i].code;
+        const ZcMfFunc *f = m ? zr_func_find(m, name) : NULL;
+        const char *sig = f ? zr_intern(r, zr_fn_sig(f)) : NULL;
+        i = zr_stub_new(r, in, sig, to);
+        return i >= 0 ? r->fs[i].code : to;
+    }
+
+    // Why the stub `st` can't follow its name to `now` (the new version's function of that
+    // name, if the manifest lists it; `there` if the new version has a function of that
+    // name at all), or NULL.
+    static const char *zr_stub_why(ZrReloader *r, const struct ZrStub *st, const ZcMfFunc *now,
+                                   int there, char *why, size_t n)
+    {
+        if (!there) return "it's gone";
+        if (st->sig || now)
+        {
+            char *b = now ? zr_fn_sig(now) : NULL;
+            int same = st->sig && b && !strcmp(st->sig, b);
+            free(b);
+            if (!same) return "its signature changed";
+            return zr_fwd_types_why(r, now, why, n);
+        }
+        // Not in a manifest: a lambda (by number, not a name that means the same function
+        // from one version to the next), an enum's constructor (Type__Variant), or a helper
+        // of zc's.
+        if (!strncmp(st->name, "_lambda_", 8)) return "a lambda keeps the body it was made with";
+        const char *sep = strstr(st->name, "__");
+        if (sep && sep > st->name && (size_t)(sep - st->name) < 256 && r->types_prev && r->types_now)
+        {
+            char base[256];
+            memcpy(base, st->name, (size_t)(sep - st->name));
+            base[sep - st->name] = 0;
+            if (zr_mf_find(r->types_now, base) && zr_mf_changed(r->types_prev, r->types_now, base, 0, NULL))
+            {
+                snprintf(why, n, "it makes a %s, which changed", base);
+                return why;
+            }
+        }
+        return NULL;
+    }
+
+    // After a reload: each stub following its name, to the new version's function, or pinned
+    // where it is; then the new version's references to its functions, to their stubs. What
+    // stays on old code (of functions the manifests list) is noted in `log`.
+    static void zr_stubs_follow(ZrReloader *r, FILE *log)
+    {
+        ZrVersion *v = &r->current;
+        ZrFnTable now;
+        zr_fntab_init(&now, r->types_now);
+        int n_kept = 0;
+        char why_buf[320];
+        for (unsigned i = 0; i < r->nfs; i++)
+        {
+            struct ZrStub *st = &r->fs[i];
+            if (st->pinned) continue;
+            const ZcMfFunc *b = zr_fntab_get(&now, st->name);
+            void *to = b && b->addr ? b->addr : NULL;
+    #ifdef ZR_LOADER
+            if (!to && v->im && zl_is_func(v->im, st->name)) to = zl_sym(v->im, st->name);
+    #endif
+            if (!to && !v->im) to = zr_sym(v, st->name);
+            const char *why = zr_stub_why(r, st, b, to != NULL, why_buf, sizeof why_buf);
+            st->before = zr_stub_target(st);
+            st->changed_in = r->version;
+            if (why)
+            {
+                st->pinned = 1;
+                st->why = zr_intern(r, zr_strdup(why));
+                if (st->sig)
+                {
+                    if (n_kept < 4)
+                        fprintf(log, "%s%s (%s)", n_kept ? ", " : "reload: old code still runs for: ",
+                                st->name, why);
+                    n_kept++;
+                }
+                continue;
+            }
+            zr_stub_point(st, to);
+        }
+        if (n_kept > 4) fprintf(log, ", and %d more", n_kept - 4);
+        if (n_kept) fputc('\n', log);
+    #ifdef ZR_LOADER
+        ZlImage *im = v->im;
+        for (unsigned k = 0; im && k < im->nrefs; k++)
+        {
+            unsigned sym = im->refs[k].sym;
+            void *to = (void *)(uintptr_t)im->addr[sym];
+            void *stub = zr_stub_for(r, r->types_now, zl_name(im, sym), to);
+            if (stub != to) zl_bind(im, k, (uint64_t)(uintptr_t)stub);
+        }
+    #endif
+        free(now.slot);
+    }
+
+    // Undoes zr_stubs_follow for the reload that made version `crashed`: the stubs it moved
+    // or pinned go back; those it made for the crashed version's functions call the version
+    // before's of the same name where the call means the same, or stay.
+    static void zr_stubs_undo(ZrReloader *r, int crashed, const ZcManifest *back, ZrVersion *to_v)
+    {
+        ZrFnTable to;
+        zr_fntab_init(&to, back);
+        char why[320];
+        for (unsigned i = 0; i < r->nfs; i++)
+        {
+            struct ZrStub *st = &r->fs[i];
+            if (st->made_in == crashed)
+            {
+                const ZcMfFunc *b = zr_fntab_get(&to, st->name);
+                void *addr = b && b->addr ? b->addr : NULL;
+    #ifdef ZR_LOADER
+                if (!addr && to_v->im && zl_is_func(to_v->im, st->name)) addr = zl_sym(to_v->im, st->name);
+    #endif
+                if (addr && !zr_stub_why(r, st, b, 1, why, sizeof why)) zr_stub_point(st, addr);
+                continue;
+            }
+            if (st->changed_in != crashed) continue;
+            zr_stub_point(st, st->before);
+            if (st->pinned)
+            {
+                st->pinned = 0;
+                st->why = NULL;
+                zr_stub_index_name(r, i); // the newest of its name again
+            }
+            st->changed_in = crashed - 1;
+        }
+        // A name both pinned and made again in that reload: the one made goes, the one put
+        // back follows.
+        for (unsigned i = 0; i < r->nfs; i++)
+        {
+            struct ZrStub *st = &r->fs[i];
+            if (st->made_in != crashed || st->pinned) continue;
+            int live = zr_stub_live(r, st->name);
+            if (live >= 0 && (unsigned)live != i)
+            {
+                st->pinned = 1;
+                st->why = "made by a version that crashed";
+            }
+        }
+        free(to.slot);
     }
 
     #ifdef ZR_FORWARD
@@ -3435,13 +3847,14 @@ raw {
         ZcManifest *crashed_types = r->types_now;
         r->types_now = r->types_prev;
         r->types_prev = crashed_types; // for the checks below: from the crashed to the one before
+        zr_stubs_undo(r, r->version, r->types_now, &r->current);
     #ifdef ZR_FORWARD
         // The crashed version's functions run the replaced version's, where the call means
         // the same (outside any name's followers: they are never moved again).
         ZrFnTable to;
         zr_fntab_init(&to, r->types_now);
         char why[320];
-        for (unsigned i = 0; r->types_prev && i < r->types_prev->nfuncs; i++)
+        for (unsigned i = 0; !crashed.im && r->types_prev && i < r->types_prev->nfuncs; i++)
         {
             const ZcMfFunc *a = &r->types_prev->funcs[i];
             const ZcMfFunc *b = zr_fntab_get(&to, zr_s(a->name));
@@ -3727,9 +4140,19 @@ raw {
         if (r->current.owns_globals && r->store) zr_keep_old_vtables(r);
         if (r->types_prev && r->types_now && log) zr_reset_globals(r, log);
         zr_note_fns(r, r->types_now);
+        // Stubs first (what the state's function pointers are, reported next); old code made
+        // to jump to new code only between versions libtcc loaded.
+        ZrVersion *replaced = keep_current ? &r->old[r->old_count - 1] : NULL;
+        char *kept_text = NULL;
+        size_t kept_len = 0;
+        FILE *kept_log = open_memstream(&kept_text, &kept_len);
+        if (kept_log) zr_stubs_follow(r, kept_log);
+        if (kept_log) fclose(kept_log);
         if (r->types_prev && r->types_now && log) zr_repoint_state(r, log);
-        if (r->types_prev && r->types_now && log)
-            zr_forward(r, keep_current ? &r->old[r->old_count - 1] : NULL, log);
+        if (kept_text && log) fputs(kept_text, log);
+        free(kept_text);
+        if (r->types_prev && r->types_now && log && !r->current.im && (!replaced || !replaced->im))
+            zr_forward(r, replaced, log);
         if (log) fclose(log);
         if (r->current.owns_globals) zr_store_set(r, zr_version_manifest(&r->current));
 
@@ -3769,7 +4192,14 @@ raw {
         }
         if (!known && r->fetched_count < r->fetched_cap) r->fetched[r->fetched_count++] = zr_strdup(name);
         if (!r->current.loaded) return NULL;
-        return zr_sym(&r->current, name);
+        void *addr = zr_sym(&r->current, name);
+    #ifdef ZR_LOADER
+        // A function: its stub, which calls the newest version's (a pointer the host keeps
+        // past a reload still works).
+        if (addr && r->current.im && zl_is_func(r->current.im, name))
+            return zr_stub_for(r, r->types_now, name, addr);
+    #endif
+        return addr;
     }
 
     static const void *zr_manifest(void *h)
@@ -3830,6 +4260,9 @@ raw {
         for (unsigned i = 0; i < r->nstubs; i++) munmap(r->stubs[i].page, r->stubs[i].size);
     #endif
         free(r->stubs);
+        free(r->fs); // the stubs' code is in kept memory, for the process
+        free(r->fs_by_name);
+        free(r->fs_by_addr);
         free(r->state_before);
         for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
         for (int i = 0; i < r->required_count; i++) free(r->required[i]);

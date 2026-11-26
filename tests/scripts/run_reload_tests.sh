@@ -11,6 +11,11 @@
 # A step that does not build fails the case, even an xfail one, unless `expected` says it
 # does not build.
 #
+# With ZC_RELOAD_MEMORY set (libtcc loads each version, so there are no stubs, and every old
+# function that can't follow is reported), a case's `expected-memory`, if it has one, is
+# compared instead, and a case with a `loader-only` file (it needs what only the Reloader's own
+# loading does: stubs, versions released whole) is skipped.
+#
 # Usage: tests/scripts/run_reload_tests.sh [ZC]   (default ./zc)
 # Env:   TCC_DIR=dir   a libtcc installed under dir/include and dir/lib (default: the
 #                      system's, or /usr/local's)
@@ -47,8 +52,13 @@ fi
 
 passed=0; failed=0; xfail=0; xpass=0
 failed_names=""
+skipped=0
 for dir in "$CASES"/*/; do
     name="$(basename "$dir")"
+    if [ -n "$ZC_RELOAD_MEMORY" ] && [ -f "$dir/loader-only" ]; then
+        skipped=$((skipped + 1))
+        continue
+    fi
     mkdir -p "$WORK/$name"
     export ERR="$WORK/$name/err"
     flag=""
@@ -59,14 +69,16 @@ for dir in "$CASES"/*/; do
     bash -c '"$@" 2> "$ERR"; exit $?' _ timeout 60 "$WORK/host" "$ZC" "$dir" "$WORK/$name" \
         $flag > "$WORK/$name/out" 2> /dev/null
     rc=$?
-    want_failed=$(grep -c "^(build failed" "$dir/expected")
+    want="$dir/expected"
+    [ -n "$ZC_RELOAD_MEMORY" ] && [ -f "$dir/expected-memory" ] && want="$dir/expected-memory"
+    want_failed=$(grep -c "^(build failed" "$want")
     got_failed=$(grep -c "^(build failed" "$WORK/$name/out")
     if [ "$got_failed" -gt "$want_failed" ]; then
         echo "  [FAIL] $name (a step did not build)"
         sed 's/^/      stderr: /' "$WORK/$name/err" | head -10
         failed=$((failed + 1))
         failed_names="$failed_names $name"
-    elif [ $rc -eq 0 ] && diff -u "$dir/expected" "$WORK/$name/out" > "$WORK/$name/diff"; then
+    elif [ $rc -eq 0 ] && diff -u "$want" "$WORK/$name/out" > "$WORK/$name/diff"; then
         if [ -f "$dir/xfail" ]; then
             echo "  [XPASS] $name (now passes: remove its xfail file; with libtcc 0.9.28 a" \
                 "dangling pointer can also pass by luck, see std/reload.zc)"
@@ -80,7 +92,7 @@ for dir in "$CASES"/*/; do
         xfail=$((xfail + 1))
     else
         echo "  [FAIL] $name (host exit $rc)"
-        diff -u "$dir/expected" "$WORK/$name/out" | sed 's/^/      /' | head -20
+        diff -u "$want" "$WORK/$name/out" | sed 's/^/      /' | head -20
         sed 's/^/      stderr: /' "$WORK/$name/err" | head -10
         failed=$((failed + 1))
         failed_names="$failed_names $name"
@@ -110,6 +122,7 @@ echo "Results (reload):"
 echo "-> Passed:  $passed"
 echo "-> Failed:  $failed"
 echo "-> Known not to work yet (XFAIL): $xfail"
+[ $skipped -ne 0 ] && echo "-> Skipped (they need the Reloader's own loading): $skipped"
 [ $xpass -ne 0 ] && echo "-> Unexpectedly passing (XPASS): $xpass"
 echo "----------------------------------------"
 [ $failed -ne 0 ] && { echo "Failed:$failed_names"; exit 1; }
