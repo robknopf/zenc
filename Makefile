@@ -566,6 +566,11 @@ test-reload: $(TARGET)
 test-debugger: $(TARGET)
 	./tests/scripts/run_debugger_tests.sh
 
+# A long session of random edits, checked against a model (SOAK_ARGS="--iterations 1000
+# --seed N" to change it; it prints the seed to repeat a failure).
+test-reload-soak: $(TARGET)
+	python3 tests/reload/soak.py $(SOAK_ARGS)
+
 # Files that the full typechecker (`zc check`) must accept with no errors.
 test-check: $(TARGET)
 	./tests/scripts/run_check_clean.sh

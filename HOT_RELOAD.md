@@ -13,7 +13,9 @@ none of this in it.
 Everything here is checked by a test case in `tests/reload/cases/` (run by
 `make test-reload`), named in brackets after the claim. `make test-reload` also runs every
 compiler test program through the Reloader's own loader (`run_loader_tests.sh`), and
-`make test-debugger` checks gdb on reloaded code (`run_debugger_tests.sh`).
+`make test-debugger` checks gdb on reloaded code (`run_debugger_tests.sh`), and
+`make test-reload-soak` runs a long session of random edits checked against a model of what
+must follow and what must stay (`tests/reload/soak.py`).
 
 ## Using it
 

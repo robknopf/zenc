@@ -1,0 +1,76 @@
+// The host of the reload soak test (tests/reload/soak.py): a Reloader on one module, driven
+// by commands on stdin, one a line, each answered on stdout:
+//
+//   build   build and load the module now: "loaded N" (its version), or "failed"
+//   run     call its soak_step(state) through call(): what it prints, then "ran" or
+//           "crashed"
+//   mem     "rss KB": the process's resident memory
+//   quit
+//
+// Usage: soak_host ZC MODULE.zc C_FILE
+
+import "std/reload.zc"
+
+raw {
+    #ifdef _WIN32
+    #include <windows.h>
+    #include <psapi.h>
+    #endif
+    static long soak_rss_kb(void)
+    {
+    #ifdef _WIN32
+        PROCESS_MEMORY_COUNTERS pmc;
+        if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) return (long)(pmc.WorkingSetSize / 1024);
+        return -1;
+    #else
+        FILE *f = fopen("/proc/self/status", "r");
+        char line[256];
+        long kb = -1;
+        while (f && fgets(line, sizeof line, f))
+            if (!strncmp(line, "VmRSS:", 6)) kb = atol(line + 6);
+        if (f) fclose(f);
+        return kb;
+    #endif
+    }
+
+    static int soak_main(const char *zc, const char *source, const char *c_file)
+    {
+        setvbuf(stdout, NULL, _IONBF, 0);
+        void *r = zr_new(source, c_file);
+        zr_set_zc(r, zc);
+        zr_set_verbose(r, 0);
+        static unsigned char state[4096];
+        zr_keep_state(r, state, sizeof state);
+        char line[256];
+        while (fgets(line, sizeof line, stdin))
+        {
+            if (!strncmp(line, "build", 5))
+            {
+                if (zr_build(r)) printf("loaded %d\n", zr_version(r));
+                else printf("failed\n");
+            }
+            else if (!strncmp(line, "run", 3))
+            {
+                void *step = zr_symbol(r, "soak_step");
+                int ok = step && zr_call(r, step, state, 1);
+                fflush(stdout);
+                printf(ok ? "ran\n" : "crashed\n");
+            }
+            else if (!strncmp(line, "mem", 3))
+                printf("rss %ld\n", soak_rss_kb());
+            else if (!strncmp(line, "quit", 4))
+                break;
+        }
+        zr_free(r);
+        return 0;
+    }
+}
+extern fn soak_main(zc: const char*, source: const char*, c_file: const char*) -> int;
+
+fn main(argc: int, argv: char**) -> int {
+    if argc < 4 {
+        fprintf(stderr, "usage: soak_host ZC MODULE.zc C_FILE\n");
+        return 2;
+    }
+    return soak_main(argv[1], argv[2], argv[3]);
+}
