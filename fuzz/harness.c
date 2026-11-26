@@ -26,6 +26,8 @@ static void free_everything(void)
     zvec_free_Str(&compiler.config.c_files);
     zvec_free_Str(&compiler.config.extra_files);
     zvec_free_Str(&compiler.config.backend_opts);
+    zvec_free_Str(&compiler.config.c_include_paths);
+    zvec_free_Str(&compiler.config.c_quote_paths);
     zarena_free(&g_arena);
 }
 
@@ -121,6 +123,8 @@ __attribute__((used)) int LLVMFuzzerTestOneInput(const uint8_t *data, size_t siz
     zvec_free_Str(&compiler.config.c_files);
     zvec_free_Str(&compiler.config.extra_files);
     zvec_free_Str(&compiler.config.backend_opts);
+    zvec_free_Str(&compiler.config.c_include_paths);
+    zvec_free_Str(&compiler.config.c_quote_paths);
 
     return 0;
 }
