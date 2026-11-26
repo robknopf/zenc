@@ -1,0 +1,4 @@
+--- step 1
+queue: 3 4 5 6 stack: 8 7 map: a 10 c 12 has b false box: 9
+--- step 2
+queue: 300 400 500 600 1301 stack: 800 700 map: a 1000 c 1200 has b false box: 900

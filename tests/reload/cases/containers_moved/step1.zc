@@ -1,0 +1,48 @@
+// std containers other than Vec, in the state, whose element type changes: a Queue (its
+// ring wrapped round), a Stack, a Map (with a removed slot) and a Box. Each one's elements
+// are moved to the new layout in a new buffer, at the same places, and it works as before.
+import "std/queue.zc"
+import "std/stack.zc"
+import "std/map.zc"
+import "std/mem.zc"
+struct Rock { x: int; }
+struct State { started: bool; q: Queue<Rock>; s: Stack<Rock>; m: Map<Rock>; b: Box<Rock>; }
+fn rock(x: int) -> Rock { return Rock { x: x }; }
+fn show(r: Rock) -> int { return r.x; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if !state.started {
+        state.started = true;
+        state.q = Queue<Rock>::new();
+        state.q.push(rock(1));
+        state.q.push(rock(2));
+        state.q.push(rock(3));
+        state.q.pop();
+        state.q.pop();
+        state.q.push(rock(4));
+        state.q.push(rock(5));
+        state.q.push(rock(6));
+        state.s = Stack<Rock>::new();
+        state.s.push(rock(7));
+        state.s.push(rock(8));
+        state.m = Map<Rock>::new();
+        state.m.put("a", rock(10));
+        state.m.put("b", rock(11));
+        state.m.put("c", rock(12));
+        state.m.remove("b");
+        state.b = Box<Rock>::new();
+        *state.b.get() = rock(9);
+    }
+
+    let q = state.q.clone();
+    print "queue:";
+    while !q.is_empty() { let r = q.pop().unwrap(); print " {show(r)}"; }
+    let s = state.s.clone();
+    print " stack:";
+    while !s.is_empty() { let r = s.pop().unwrap(); print " {show(r)}"; }
+    let a = show(state.m.get("a").unwrap());
+    let c = show(state.m.get("c").unwrap());
+    let has_b = state.m.contains("b");
+    let bx = show(*state.b.get());
+    println " map: a {a} c {c} has b {has_b} box: {bx}";
+}

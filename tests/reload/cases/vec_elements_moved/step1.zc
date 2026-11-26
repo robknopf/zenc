@@ -1,0 +1,15 @@
+// A std Vec in the state whose element type changes: its elements are moved to the new
+// layout, by field name, into a new buffer; it can grow as before.
+import "std/vec.zc"
+struct Rock { x: int; }
+struct State { rocks: Vec<Rock>; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    state.rocks.push(Rock { x: 1 }); state.rocks.push(Rock { x: 2 }); state.rocks.push(Rock { x: 3 });
+    let i: usize = 0;
+    while i < state.rocks.len {
+        let r = state.rocks.data[i];
+        println "rock {i}: x {r.x}";
+        i = i + 1;
+    }
+}

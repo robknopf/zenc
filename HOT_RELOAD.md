@@ -121,6 +121,12 @@ to the new layout:
 - **Numbers converted** when a field's type changes from one numeric type to another
   (`int32_t` to `int64_t`, `float` to `double`, an integer to a float) [`state_converted`].
 
+- **std containers** whose element type changed: `Vec<T>`, `Stack<T>`, `Queue<T>`,
+  `Map<V>` and `Box<T>`, held by the state. Their elements are moved to the new layout
+  as above, into a new buffer of the same capacity, at the same places, and the
+  container keeps working [`vec_elements_moved`], [`containers_moved`]. The old buffer is
+  left as it was.
+
 All of that at once [`state_moved_deep`]. The host's block is moved in place, so the
 host's pointer to it stays valid.
 
@@ -229,7 +235,8 @@ to use the edit, or undo it; the next save tries again. `refused()` counts these
 | The module doesn't build | `src/x.zc did not build` / `did not compile`, after the errors | | fix and save |
 
 A pointer to a type that *didn't* change is kept as it is, and so are pointers in types
-the state doesn't hold.
+the state doesn't hold. A std container's buffer isn't such a pointer: it is moved (see
+"Layout changes").
 
 ## What a reload doesn't handle
 
@@ -278,7 +285,7 @@ for that.
 - A crash is caught only in code called through `call()` or `call_with()`, and only what
   is listed above is undone.
 - Data reached only through pointers (heap objects) is never moved, only the pointers
-  checked.
+  checked; the std containers above are the exception.
 - Types are matched by their C name. Two structs of the same name under different `@cfg`
   are one entry (only one is compiled).
 
@@ -286,9 +293,10 @@ for that.
 
 - **Keep state in globals, or in one struct the host keeps.** Both survive, and follow
   layout changes.
-- **Hold things by value, or by index or handle, not by pointer to a type you'll edit.**
-  libwgf's actors are integer handles, so a game's state of handles moves freely; a
-  pointer to a `Rock` stops the reload when `Rock` changes.
+- **Hold things by value, in std containers, or by index or handle, not by pointer to a
+  type you'll edit.** A `Vec<Rock>` in the state moves when `Rock` changes; libwgf's
+  actors are integer handles, so a game's state of handles moves freely; a `Rock*` stops
+  the reload when `Rock` changes.
 - **Write the types of globals and statics** (`let speed: f32 = 3.0;`), so the host can
   keep them.
 - **Keep lambdas thin**: `fn(x: int) { on_hit(x); }` calls `on_hit` by name, which runs

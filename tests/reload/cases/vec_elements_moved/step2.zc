@@ -1,0 +1,16 @@
+// A std Vec in the state whose element type changes: its elements are moved to the new
+// layout, by field name, into a new buffer; it can grow as before.
+import "std/vec.zc"
+// Rock gains fields before and after x; one more rock is pushed.
+struct Rock { tag: int; x: int; y: f32; }
+struct State { rocks: Vec<Rock>; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    state.rocks.push(Rock { tag: 7, x: 4, y: 0.5 });
+    let i: usize = 0;
+    while i < state.rocks.len {
+        let r = state.rocks.data[i];
+        println "rock {i}: tag {r.tag} x {r.x} y {r.y}";
+        i = i + 1;
+    }
+}

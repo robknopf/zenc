@@ -742,8 +742,54 @@ raw {
         return buf;
     }
 
+    static const char *zr_pointee(const char *type, char *buf, size_t size);
+
+    // std containers that hold their elements in a buffer of their own: Vec<T> and
+    // Stack<T> (data, len, cap: [0, len) of cap), Queue<T> (data, cap, head, count: a ring),
+    // Map<V> (vals, cap, occupied, deleted: the occupied, not deleted, slots) and Box<T>
+    // (ptr: one). When the element type changes, the buffer is moved like an array
+    // (zr_move_container).
+    enum { ZR_VEC = 1, ZR_QUEUE, ZR_MAP, ZR_BOX };
+
+    static const ZcMfField *zr_field_named(const ZcMfType *t, const char *name)
+    {
+        for (unsigned i = 0; i < t->nfields; i++)
+            if (!strcmp(zr_s(t->fields[i].name), name)) return &t->fields[i];
+        return NULL;
+    }
+
+    // Which container `t` is (0: none), and its element type, into `buf`.
+    static int zr_container(const ZcMfType *t, char *buf, size_t size, const char **elem)
+    {
+        *elem = NULL;
+        if (!t || t->kind != 1) return 0;
+        const char *zn = zr_s(t->zc_name);
+        int kind = !strncmp(zn, "Vec<", 4) || !strncmp(zn, "Stack<", 6) ? ZR_VEC
+                   : !strncmp(zn, "Queue<", 6)                           ? ZR_QUEUE
+                   : !strncmp(zn, "Map<", 4)                             ? ZR_MAP
+                   : !strncmp(zn, "Box<", 4)                             ? ZR_BOX
+                                                                         : 0;
+        static const char *const need[][5] = {
+            {0}, {"data", "len", "cap"}, {"data", "cap", "head", "count"},
+            {"vals", "cap", "occupied", "deleted"}, {"ptr"}};
+        if (!kind) return 0;
+        for (int i = 0; i < 5 && need[kind][i]; i++)
+            if (!zr_field_named(t, need[kind][i])) return 0;
+        const ZcMfField *buffer = zr_field_named(t, need[kind][0]);
+        if (buffer->size != sizeof(void *)) return 0;
+        *elem = zr_pointee(zr_s(buffer->type), buf, size);
+        return *elem ? kind : 0;
+    }
+
+    static const char *zr_vec_elem(const ZcMfType *t, char *buf, size_t size)
+    {
+        const char *elem;
+        return zr_container(t, buf, size, &elem) ? elem : NULL;
+    }
+
     // `name` changed between the manifests: it is in only one, its description differs,
-    // or a type it holds by value changed. The one it holds is named in `via`, if given.
+    // or a type it holds by value changed (or a Vec's element type). The one it holds is
+    // named in `via`, if given.
     static int zr_mf_changed(const ZcManifest *old, const ZcManifest *now, const char *name,
                              int depth, const char **via)
     {
@@ -762,6 +808,13 @@ raw {
                 if (via) *via = h->zc_name ? h->zc_name : h->c_name;
                 return 1;
             }
+        }
+        const char *elem = zr_vec_elem(b, buf, sizeof(buf));
+        const ZcMfType *e = elem ? zr_mf_find(now, elem) : NULL;
+        if (e && zr_mf_changed(old, now, elem, depth + 1, NULL))
+        {
+            if (via) *via = e->zc_name ? e->zc_name : e->c_name;
+            return 1;
         }
         return 0;
     }
@@ -1245,6 +1298,93 @@ raw {
         }
     }
 
+    // Two descriptions of a container whose own fields are laid out alike (only what they
+    // point to differs).
+    static int zr_mf_same_shape(const ZcMfType *a, const ZcMfType *b)
+    {
+        if (a->size != b->size || a->nfields != b->nfields) return 0;
+        for (unsigned i = 0; i < a->nfields; i++)
+            if (strcmp(zr_s(a->fields[i].name), zr_s(b->fields[i].name)) ||
+                a->fields[i].offset != b->fields[i].offset || a->fields[i].size != b->fields[i].size)
+                return 0;
+        return 1;
+    }
+
+    static unsigned long long zr_field_int(const ZcMfType *t, const unsigned char *p, const char *name)
+    {
+        const ZcMfField *f = zr_field_named(t, name);
+        return f ? (unsigned long long)zr_int_read(p + f->offset, f->size) : 0;
+    }
+
+    static void *zr_field_ptr(const ZcMfType *t, const unsigned char *p, const char *name)
+    {
+        const ZcMfField *f = zr_field_named(t, name);
+        void *v = NULL;
+        if (f && f->size == sizeof v) memcpy(&v, p + f->offset, sizeof v);
+        return v;
+    }
+
+    // A std container (zr_container) whose element type changed: a new buffer, of the same
+    // capacity, holding each element it holds moved to the new layout, at the same place
+    // in it; the container is pointed at it, the rest of it as it was. The old buffer is
+    // left as it is (going back after a crash puts back a container pointing to it).
+    static void zr_move_container(ZrMove *mv, const char *path, const ZcMfType *ot,
+                                  const unsigned char *src, const ZcMfType *nt, unsigned char *dst,
+                                  int kind, const char *elem, int depth)
+    {
+        char obuf[256];
+        const char *oelem = NULL;
+        int okind = zr_container(ot, obuf, sizeof obuf, &oelem);
+        unsigned oes = oelem ? zr_type_size(mv->old, oelem) : 0, nes = zr_type_size(mv->now, elem);
+        if (okind != kind || !oes || !nes || !zr_mf_same_shape(ot, nt))
+        {
+            zr_move_note(mv, path, "(a %s) not carried", zr_s(nt->zc_name));
+            return;
+        }
+        if (mv->dry) return;
+        static const char *const buffer_field[] = {0, "data", "data", "vals", "ptr"};
+        const unsigned char *odata = (const unsigned char *)zr_field_ptr(ot, src, buffer_field[kind]);
+        unsigned long long cap = kind == ZR_BOX ? 1 : zr_field_int(ot, src, "cap");
+        unsigned long long held = 0;
+        unsigned char *ndata = NULL;
+        memcpy(dst, src, nt->size < ot->size ? nt->size : ot->size); // what isn't the buffer
+        if (cap && odata)
+        {
+            ndata = (unsigned char *)calloc((size_t)cap, nes);
+            if (!ndata)
+            {
+                zr_move_note(mv, path, "(a %s) not carried: out of memory", zr_s(nt->zc_name));
+                return;
+            }
+            unsigned long long len = kind == ZR_VEC ? zr_field_int(ot, src, "len")
+                                     : kind == ZR_QUEUE ? zr_field_int(ot, src, "count")
+                                     : kind == ZR_BOX   ? 1
+                                                        : cap;
+            unsigned long long head = kind == ZR_QUEUE ? zr_field_int(ot, src, "head") : 0;
+            const unsigned char *occ = kind == ZR_MAP ? (const unsigned char *)zr_field_ptr(ot, src, "occupied") : NULL;
+            const unsigned char *del = kind == ZR_MAP ? (const unsigned char *)zr_field_ptr(ot, src, "deleted") : NULL;
+            if (len > cap) len = cap;
+            // The notes of the first element only: the others say the same.
+            FILE *notes = mv->notes;
+            char sub[512];
+            snprintf(sub, sizeof sub, "%s%s%s[]", path, *path ? "." : "", buffer_field[kind]);
+            for (unsigned long long i = 0; i < len; i++)
+            {
+                unsigned long long at = kind == ZR_QUEUE ? (head + i) % cap : i;
+                if (kind == ZR_MAP && (!occ || !occ[at] || (del && del[at]))) continue;
+                if (held++ == 1) mv->notes = NULL;
+                zr_move_value(mv, sub, oelem, oes, odata + at * oes, elem, nes, ndata + at * nes, depth + 1);
+            }
+            mv->notes = notes;
+        }
+        const ZcMfField *nb = zr_field_named(nt, buffer_field[kind]);
+        memcpy(dst + nb->offset, &ndata, sizeof ndata);
+        const ZcMfType *et = zr_mf_find(mv->now, elem);
+        zr_move_note(mv, path, "(a %s) %llu element%s moved to the new layout",
+                     zr_s(nt->zc_name), held, held == 1 ? "" : "s");
+        (void)et;
+    }
+
     // One value of type `otype` (osize bytes at src) into `ntype` (nsize bytes at dst).
     static void zr_move_value(ZrMove *mv, const char *path, const char *otype, unsigned osize,
                               const unsigned char *src, const char *ntype, unsigned nsize,
@@ -1270,6 +1410,14 @@ raw {
             if (ot->kind != nt->kind)
             {
                 zr_move_note(mv, path, "is now a different kind of type, not carried");
+                return;
+            }
+            char eb[256];
+            const char *celem = NULL;
+            int ckind = nt->kind == 1 ? zr_container(nt, eb, sizeof eb, &celem) : 0;
+            if (ckind)
+            {
+                zr_move_container(mv, path, ot, src, nt, dst, ckind, celem, depth);
                 return;
             }
             if (nt->kind == 1) // struct
@@ -1423,6 +1571,14 @@ raw {
         const ZcMfType *t = zr_mf_find(mv->now, type);
         if (!t) return;
         char sub[512];
+        char ebuf[256];
+        const char *vec_elem = zr_vec_elem(t, ebuf, sizeof ebuf);
+        if (vec_elem) // its buffer is moved: what its elements point to is what matters
+        {
+            snprintf(sub, sizeof sub, "%s%s%s", path, *path ? "." : "", "[]");
+            zr_check_pointers(mv, sub, vec_elem, depth + 1);
+            return;
+        }
         for (unsigned i = 0; i < t->nfields; i++)
         {
             if (t->kind == 4) break; // tag and data: the payloads are below
@@ -2187,9 +2343,15 @@ raw {
             struct ZrFwdName *fn = zr_fwd_name(r, name, !why && prev);
             if (why)
             {
+                // The first few, then how many more (a changed type is taken by every
+                // function generated for it: Vec<T>'s, Option<T>'s).
                 if (b || strncmp(name, "_zc_", 4) != 0)
-                    fprintf(log, "%s%s (%s)", n_kept++ ? ", " : "reload: old code still runs for: ",
-                            name, why);
+                {
+                    if (n_kept < 4)
+                        fprintf(log, "%s%s (%s)", n_kept ? ", " : "reload: old code still runs for: ",
+                                name, why);
+                    n_kept++;
+                }
                 if (fn) fn->head = -1; // its followers stay with the previous version's
                 continue;
             }
@@ -2223,6 +2385,7 @@ raw {
             f->next = fn->head;
             fn->head = (int)r->nfwd++;
         }
+        if (n_kept > 4) fprintf(log, ", and %d more", n_kept - 4);
         if (n_kept) fputc('\n', log);
         // Names the new version doesn't have at all were reported above; a name only older
         // versions had keeps its followers where they are.
