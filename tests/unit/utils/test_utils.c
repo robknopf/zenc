@@ -68,14 +68,20 @@ static ZenCompiler *scan(const char *src)
     memset(&ctx, 0, sizeof(ctx));
     ctx.compiler = &compiler;
     ctx.config = &compiler.config;
-    scan_build_directives(&ctx, src);
+    scan_build_directives(&ctx, src, NULL);
     return &compiler;
 }
 
-UTEST(scan_build_directives, include_adds_one_flag_per_path)
+// //> include: gives the C compiler's include paths, each an argument of its own (not the
+// cflags string, which is split at spaces); a quoted one holds spaces.
+UTEST(scan_build_directives, include_adds_one_path_per_word)
 {
-    ZenCompiler *c = scan("//> include: /opt/a/include   /opt/b/inc\n");
-    ASSERT_STREQ("-I/opt/a/include -I/opt/b/inc", c->cflags);
+    ZenCompiler *c = scan("//> include: /opt/a/include   /opt/b/inc \"/opt/c d/inc\"\n");
+    ASSERT_EQ((size_t)3, c->config.c_include_paths.length);
+    ASSERT_STREQ("/opt/a/include", c->config.c_include_paths.data[0]);
+    ASSERT_STREQ("/opt/b/inc", c->config.c_include_paths.data[1]);
+    ASSERT_STREQ("/opt/c d/inc", c->config.c_include_paths.data[2]);
+    ASSERT_STREQ("", c->cflags);
 }
 
 UTEST(scan_build_directives, lib_adds_one_flag_per_path)
@@ -93,10 +99,21 @@ UTEST(scan_build_directives, framework_adds_one_flag_per_name)
 UTEST(scan_build_directives, a_path_longer_than_the_flags_is_cut_safely)
 {
     char src[2100];
+    int n = snprintf(src, sizeof(src), "//> lib: /");
+    memset(src + n, 'a', 2000);
+    snprintf(src + n + 2000, sizeof(src) - (size_t)n - 2000, "\n");
+    ZenCompiler *c = scan(src);
+    ASSERT_LT(strlen(c->link_flags), sizeof(c->link_flags));
+    ASSERT_EQ(0, strncmp(c->link_flags, "-L/aaa", 6));
+}
+
+UTEST(scan_build_directives, a_long_include_path_is_cut_safely)
+{
+    char src[2100];
     int n = snprintf(src, sizeof(src), "//> include: /");
     memset(src + n, 'a', 2000);
     snprintf(src + n + 2000, sizeof(src) - (size_t)n - 2000, "\n");
     ZenCompiler *c = scan(src);
-    ASSERT_LT(strlen(c->cflags), sizeof(c->cflags));
-    ASSERT_EQ(0, strncmp(c->cflags, "-I/aaa", 6));
+    ASSERT_EQ((size_t)1, c->config.c_include_paths.length);
+    ASSERT_EQ(0, strncmp(c->config.c_include_paths.data[0], "/aaa", 4));
 }
