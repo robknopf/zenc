@@ -36,6 +36,14 @@ raw {
     #include <dirent.h>
     #include <stdint.h>
     #include <sys/stat.h>
+    static _Bool own_loader(void)
+    {
+    #ifdef ZR_LOADER
+        return 1;
+    #else
+        return 0;
+    #endif
+    }
     static _Bool on_linux(void)
     {
     #ifdef __linux__
@@ -103,6 +111,7 @@ extern fn registered(p: void*) -> c_int;
 extern fn make_dir(path: const char*);
 extern fn replace_file(from: const char*, to: const char*);
 extern fn on_linux() -> bool;
+extern fn own_loader() -> bool;
 extern fn files_left(dir: const char*) -> int;
 extern fn put(path: const char*, text: const char*);
 extern fn module_src(out: char*, n: usize, value: int);
@@ -148,11 +157,10 @@ fn main(argc: int, argv: char**) -> int {
     if !code.build() { println "FAIL the module does not build"; return 1; }
     let value: fn*() -> int = code.symbol("poll_value");
 
-    // Each version is registered with debuggers unless libtcc loads it (ZC_RELOAD_MEMORY),
-    // and leaves no file beside the C file either way.
-    let mem = getenv("ZC_RELOAD_MEMORY");
-    let in_memory = mem != NULL && mem[0] != 0;
-    check("registered with debuggers", registered((void*)code.manifest()) != 0, !in_memory);
+    // Each version is registered with debuggers where the Reloader loads it itself (where
+    // libtcc does, it isn't), and leaves no file beside the C file either way.
+    let loads_itself = own_loader();
+    check("registered with debuggers", registered((void*)code.manifest()) != 0, loads_itself);
     check("no file left beside the C file", files_left(argv[2]) == 0, true);
 
     check("nothing changed (first poll)", poll_now(&code), false);
@@ -163,7 +171,7 @@ fn main(argc: int, argv: char**) -> int {
     check("written in place", poll_now(&code), true);
     value = code.symbol("poll_value");
     check("and the new code runs", value() == 2, true);
-    check("the new version registered too", registered((void*)code.manifest()) != 0, !in_memory);
+    check("the new version registered too", registered((void*)code.manifest()) != 0, loads_itself);
     check("nothing changed since", poll_now(&code), false);
 
     // An editor's save: a temporary file, renamed over the source.

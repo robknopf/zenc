@@ -99,11 +99,13 @@ raw {
     #include <link.h>
     #include <sys/sysmacros.h>
     #endif
-    #if defined(__x86_64__) && !defined(_WIN32)
-    #define ZR_FORWARD 1 // old functions can be made to jump to new ones (zr_forward)
-    #endif
     #if defined(__x86_64__) && (defined(__linux__) || defined(_WIN32))
     #define ZR_LOADER 1 // the Reloader loads each version itself (zl_load)
+    #endif
+    // Elsewhere libtcc loads each version, and on x86-64 old functions are made to jump to
+    // new ones (zr_forward) instead of stubs.
+    #if defined(__x86_64__) && !defined(_WIN32) && !defined(ZR_LOADER)
+    #define ZR_FORWARD 1
     #endif
 
     // What Windows spells otherwise.
@@ -234,8 +236,6 @@ raw {
         int ino_failed; // it couldn't be set up for ino_root: poll() scans instead
         int force_scan; // ZC_RELOAD_SCAN set: scan, never inotify (to test the scanning)
         double last_scan; // when poll() last scanned the files (without inotify), or 0
-        int in_memory;    // libtcc loads the versions, not the Reloader (ZC_RELOAD_MEMORY, or
-                          // the Reloader couldn't load one)
         char *ino_root; // the directory ino_fd watches
         // Old functions made to jump to the new code (zr_forward): where, the bytes the jump
         // replaced, the name, and whether it still follows the newest version of that name.
@@ -1681,8 +1681,6 @@ raw {
         r->ino_fd = -1;
         const char *scan = getenv("ZC_RELOAD_SCAN");
         r->force_scan = scan && *scan && strcmp(scan, "0") != 0;
-        const char *mem = getenv("ZC_RELOAD_MEMORY");
-        r->in_memory = mem && *mem && strcmp(mem, "0") != 0;
         return r;
     }
 
@@ -3181,10 +3179,12 @@ raw {
     // and the Reloader loads it (zl_load), registered with debuggers: breakpoints by .zc file
     // and line (the C's #line directives) bind in every version as it loads, and backtraces
     // and variables read through it. DWARF with libtcc 0.9.28 (-gdwarf); 0.9.27 writes stabs,
-    // which gdb no longer binds breakpoints in. If the Reloader can't load it, or with
-    // ZC_RELOAD_MEMORY=1, libtcc compiles it into memory instead, where a debugger sees no
-    // symbols.
+    // which gdb no longer binds breakpoints in. Where the Reloader doesn't load versions
+    // itself (not x86-64 Linux or Windows), libtcc compiles them into memory, where a
+    // debugger sees no symbols.
+    #ifndef ZR_LOADER
     static int zr_compile_memory(ZrReloader *r, ZrVersion *v, int own);
+    #endif
 
     // What zc would give the C compiler besides the module's C file, which zc --reload
     // writes in <c_file>.build, one a line: its include directories (-I), defines (-D), and
@@ -3240,7 +3240,6 @@ raw {
     static int zr_compile(ZrReloader *r, ZrVersion *v, int own)
     {
     #ifdef ZR_LOADER
-        if (r->in_memory) return zr_compile_memory(r, v, own);
         memset(v, 0, sizeof(*v));
         v->tcc = zr_tcc_new();
         if (!v->tcc) return -1;
@@ -3290,13 +3289,11 @@ raw {
         }
         if (!v->im)
         {
-            if (r->verbose)
-                fprintf(stderr, "reload: the module can't be loaded by the Reloader (%s); "
-                                "libtcc loads it instead, where a debugger sees no symbols\n",
-                        err);
+            // (Not the module's fault: a relocation the loader doesn't know, no room left.
+            // The version isn't loaded; the one running stays.)
+            if (own) fprintf(stderr, "reload: the Reloader can't load this version: %s\n", err);
             zr_version_delete(v);
-            r->in_memory = 1;
-            return zr_compile_memory(r, v, own);
+            return -1;
         }
         v->loaded = 1;
         const ZcManifest *m = own ? zr_version_manifest(v) : NULL;
@@ -3307,6 +3304,7 @@ raw {
     #endif
     }
 
+    #ifndef ZR_LOADER
     static int zr_compile_memory(ZrReloader *r, ZrVersion *v, int own)
     {
         memset(v, 0, sizeof(*v));
@@ -3336,6 +3334,7 @@ raw {
         v->owns_globals = m && m->nglobals > 0;
         return 0;
     }
+    #endif
 
     // `v`, compiled to use the store, really does: each of its globals is one in the store,
     // of the same type, at the store's address (not, say, a variable of the same name that
@@ -3703,7 +3702,7 @@ raw {
     //
     // Only while old versions are kept (the default): keep_old(false) deletes them, so the
     // jumps are undone. x86-64 only; elsewhere old code runs as it did. This is for versions
-    // libtcc loads (ZC_RELOAD_MEMORY, or where the Reloader can't load them itself): those it
+    // libtcc loads (where the Reloader doesn't load them itself): those it
     // loads have stubs instead (zr_stubs_follow), and their old code is left as it is.
 
     // A name -> function table of a manifest's functions, for one reload.

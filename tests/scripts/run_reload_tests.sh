@@ -11,15 +11,11 @@
 # A step that does not build fails the case, even an xfail one, unless `expected` says it
 # does not build.
 #
-# With ZC_RELOAD_MEMORY set (libtcc loads each version, so there are no stubs, and every old
-# function that can't follow is reported), a case's `expected-memory`, if it has one, is
-# compared instead, and a case with a `loader-only` file (it needs what only the Reloader's own
-# loading does: stubs, versions released whole) is skipped.
-#
-# Usage: tests/scripts/run_reload_tests.sh [ZC]   (default ./zc)
-# Env:   TCC_DIR=dir   a libtcc installed under dir/include and dir/lib (default: the
-#                      system's, or /usr/local's)
-# Skipped, successfully, when libtcc is not available.
+# Where the Reloader doesn't load versions itself (not x86-64 Linux or Windows: libtcc loads
+# them, so there are no stubs, and every old function that can't follow is reported), a
+# case's `expected-memory`, if it has one, is compared instead, and a case with a
+# `loader-only` file (it needs what only the Reloader's own loading does: stubs, versions
+# released whole) is skipped.
 
 ZC="${1:-./zc}"
 ZC="$(cd "$(dirname "$ZC")" && pwd)/$(basename "$ZC")"
@@ -57,10 +53,15 @@ fi
 
 passed=0; failed=0; xfail=0; xpass=0
 failed_names=""
+# The Reloader loads versions itself on x86-64 Linux and Windows (std/reload.zc's ZR_LOADER).
+OWN_LOADER=0
+case "$(uname -s)/$(uname -m)" in
+    Linux/x86_64|MINGW*/x86_64|MSYS*/x86_64|CYGWIN*/x86_64) OWN_LOADER=1 ;;
+esac
 skipped=0
 for dir in "$CASES"/*/; do
     name="$(basename "$dir")"
-    if [ -n "$ZC_RELOAD_MEMORY" ] && [ -f "$dir/loader-only" ]; then
+    if [ $OWN_LOADER -eq 0 ] && [ -f "$dir/loader-only" ]; then
         skipped=$((skipped + 1))
         continue
     fi
@@ -75,7 +76,7 @@ for dir in "$CASES"/*/; do
         $flag > "$WORK/$name/out" 2> /dev/null
     rc=$?
     want="$dir/expected"
-    [ -n "$ZC_RELOAD_MEMORY" ] && [ -f "$dir/expected-memory" ] && want="$dir/expected-memory"
+    [ $OWN_LOADER -eq 0 ] && [ -f "$dir/expected-memory" ] && want="$dir/expected-memory"
     want_failed=$(grep -c "^(build failed" "$want")
     got_failed=$(grep -c "^(build failed" "$WORK/$name/out")
     if [ "$got_failed" -gt "$want_failed" ]; then

@@ -72,8 +72,9 @@ has `-rdynamic`, `-Wl,--export-all-symbols` (`zc build`, which links statically 
 links `libtcc.dll` dynamically: tcc builds no static library for Windows); MinGW's gdb debugs it (below). `poll()` scans
 the files there (no inotify yet: up to 200 ms to see a save). Elsewhere (macOS, arm64)
 libtcc loads each version, without the Reloader's own loading: old versions stay loaded,
-and a debugger sees none of them; on Windows that fallback (`ZC_RELOAD_MEMORY=1`) doesn't
-keep globals across reloads either.
+and a debugger sees none of them. Where the Reloader loads versions itself, a version it
+can't load (a relocation it doesn't know, no room left in its address space or kept
+memory) is not loaded: the reload says why, and the version running stays.
 
 Not yet: `--misra` (an error with `--reload`), and C++ output.
 
@@ -344,9 +345,7 @@ same.
 A released version (see "What an old version costs") is unregistered: a breakpoint in it
 goes with it, and stays set for the versions that have that line. A function copied out of
 an old version (a stub that stays on it) has no debug information: a backtrace through it
-shows its address. `ZC_RELOAD_MEMORY=1` has libtcc load each version instead, as it was
-before the Reloader loaded them itself, where a debugger sees no symbols; it is also what
-happens if the Reloader can't load one (the reload says why). Compiling with debug
+shows its address. Compiling with debug
 information costs a little per reload: about 50 ms at 1000 generated modules, 230 ms at
 3000.
 
