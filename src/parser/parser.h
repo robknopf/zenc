@@ -528,8 +528,11 @@ struct ParserContext
     char **c_names;
     unsigned c_names_cap, c_names_count;
     int c_names_ready;
-    void *c_decls;   ///< What the program's C declares, by name (c_decls.h); NULL if not read.
-    int is_comptime; // Flag for comptime execution context
+    void *c_decls; ///< What the program's C declares, by name (c_decls.h); NULL if not read.
+    /// LSP only: the first import of each module, by path, for a document that imports a
+    /// module another document imported first (stmt_import.c).
+    struct LspModuleRoot *lsp_module_roots;
+    int is_comptime;         // Flag for comptime execution context
     char **extern_symbols;   ///< Explicitly declared extern symbols.
     int extern_symbol_count; ///< Count of external symbols.
 

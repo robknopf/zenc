@@ -441,6 +441,10 @@ static void check_call(ParserContext *ctx, ASTNode *call, cJSON *diagnostics)
 
 static void walk(ParserContext *ctx, ASTNode *node, cJSON *diagnostics, int depth);
 
+// Whether undefined names are reported: not in a document with a comptime block at its top,
+// which can declare any name (`yield("def X = 1;")`) and which the server doesn't run.
+static int g_report_undefined;
+
 static void walk_list(ParserContext *ctx, ASTNode *node, cJSON *diagnostics, int depth)
 {
     for (; node; node = node->next)
@@ -449,15 +453,62 @@ static void walk_list(ParserContext *ctx, ASTNode *node, cJSON *diagnostics, int
     }
 }
 
+// "Undefined function 'x'" / "Undefined name 'X'", as a build says it.
+static void report_undefined(ParserContext *ctx, ASTNode *ref, const char *what, cJSON *diagnostics)
+{
+    const char *close = c_name_closest(ctx, ref->var_ref.name);
+    char msg[1024];
+    if (close)
+    {
+        snprintf(msg, sizeof(msg), "Undefined %s '%s'\nDid you mean '%s'?", what, ref->var_ref.name,
+                 close);
+    }
+    else
+    {
+        snprintf(msg, sizeof(msg),
+                 "Undefined %s '%s'\nNot declared here, nor by an included C header", what,
+                 ref->var_ref.name);
+    }
+    add_diagnostic(diagnostics, ref->token, msg);
+}
+
 static void walk(ParserContext *ctx, ASTNode *node, cJSON *diagnostics, int depth)
 {
-    if (!node || depth > 512)
+    // (an imported module's code is its own document's: its diagnostics are given there)
+    if (!node || depth > 512 || node->kind == NODE_COMPTIME || node->kind == NODE_IMPORT)
     {
         return;
     }
-    if (node->kind == NODE_EXPR_CALL)
+    if (node->kind == NODE_EXPR_CALL && node->call.callee &&
+        node->call.callee->kind == NODE_EXPR_VAR)
     {
-        check_call(ctx, node, diagnostics);
+        // The check a build makes, with what was in scope where each name was parsed.
+        if (g_report_undefined && !c_names_call_known_parsed(ctx, node->call.callee))
+        {
+            report_undefined(ctx, node->call.callee, "function", diagnostics);
+        }
+        else
+        {
+            check_call(ctx, node, diagnostics);
+        }
+        walk_list(ctx, node->call.args, diagnostics, depth + 1);
+        return;
+    }
+    if (node->kind == NODE_EXPR_VAR)
+    {
+        if (g_report_undefined && c_names_name_unknown_parsed(ctx, node))
+        {
+            report_undefined(ctx, node, "name", diagnostics);
+        }
+        return;
+    }
+    if (node->kind == NODE_RAW_STMT)
+    {
+        // (an interpolated string's expressions: the C gets them as text)
+        for (int i = 0; i < node->raw_stmt.interp_expr_count; i++)
+        {
+            walk(ctx, node->raw_stmt.interp_exprs[i], diagnostics, depth + 1);
+        }
     }
     ASTChildren ch = ast_children(node);
     for (int i = 0; i < ch.count; i++)
@@ -473,5 +524,14 @@ void lsp_c_decls_add_diagnostics(ProjectFile *pf, cJSON *diagnostics)
         return;
     }
     lsp_c_decls_use(pf);
+    g_report_undefined = 1;
+    ASTNode *top = pf->ast->kind == NODE_ROOT ? pf->ast->root.children : pf->ast;
+    for (ASTNode *n = top; n; n = n->next)
+    {
+        if (n->kind == NODE_COMPTIME)
+        {
+            g_report_undefined = 0;
+        }
+    }
     walk_list(g_project->ctx, pf->ast, diagnostics, 0);
 }

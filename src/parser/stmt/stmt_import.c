@@ -15,6 +15,35 @@
 #include "zprep_plugin.h"
 #include "analysis/move_check.h"
 
+// LSP only: the first import node of each module, by path.
+typedef struct LspModuleRoot
+{
+    char *path;
+    ASTNode *import_node;
+    struct LspModuleRoot *next;
+} LspModuleRoot;
+
+static void lsp_module_root_note(ParserContext *ctx, const char *path, ASTNode *import_node)
+{
+    LspModuleRoot *e = xcalloc(1, sizeof(LspModuleRoot));
+    e->path = xstrdup(path);
+    e->import_node = import_node;
+    e->next = ctx->lsp_module_roots;
+    ctx->lsp_module_roots = e;
+}
+
+static ASTNode *lsp_module_root_find(ParserContext *ctx, const char *path)
+{
+    for (LspModuleRoot *e = ctx->lsp_module_roots; e; e = e->next)
+    {
+        if (strcmp(e->path, path) == 0)
+        {
+            return e->import_node;
+        }
+    }
+    return NULL;
+}
+
 static void try_parse_c_function_decl(ParserContext *ctx, const char *line)
 {
     const char *p = line;
@@ -905,6 +934,29 @@ ASTNode *parse_import(ParserContext *ctx, Lexer *l, int is_re_export)
         }
         zvec_free_Str(&symbols);
         zvec_free_Str(&aliases);
+        // The LSP parses each document into the same context, so the header or module may
+        // have been imported by another document: this one's C still includes the header,
+        // and the module's (lsp_c_decls.c). A build has them from the first import already.
+        if (ctx->config->mode_lsp && strlen(fn) > 2 && strcmp(fn + strlen(fn) - 2, ".h") == 0)
+        {
+            ASTNode *n = ast_create(NODE_INCLUDE);
+            n->include.path = fn;
+            n->include.is_system = 0;
+            return n;
+        }
+        if (ctx->config->mode_lsp)
+        {
+            ASTNode *first = lsp_module_root_find(ctx, fn);
+            if (first)
+            {
+                ASTNode *n = ast_create(NODE_IMPORT);
+                n->token = first->token;
+                n->import_stmt.path = first->import_stmt.path;
+                n->import_stmt.module_root = first->import_stmt.module_root;
+                zfree(fn);
+                return n;
+            }
+        }
         zfree(fn);
         return NULL;
     }
@@ -1146,6 +1198,10 @@ ASTNode *parse_import(ParserContext *ctx, Lexer *l, int is_re_export)
     import_node->token = t;
     import_node->import_stmt.path = xstrdup(fn);
     import_node->import_stmt.module_root = r;
+    if (ctx->config->mode_lsp)
+    {
+        lsp_module_root_note(ctx, fn, import_node);
+    }
     import_cfg_note_file(ctx, fn, r);
 
     return import_node;

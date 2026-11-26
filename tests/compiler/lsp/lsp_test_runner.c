@@ -1096,6 +1096,52 @@ static void test_c_header_completion(void)
     printf("PASS: test_c_header_completion\n");
 }
 
+// The diagnostics the server publishes for `path` (after it was opened) contain `want1` and
+// `want2` (each may be NULL), and no other diagnostic contains `none_of`.
+static void expect_diagnostics(int id, const char *path, const char *want1, const char *want2,
+                               const char *none_of)
+{
+    char *found = NULL;
+    for (int i = 0; i < 40 && !found; i++)
+    {
+        char *message = read_message();
+        if (!message)
+        {
+            break;
+        }
+        if (strstr(message, "publishDiagnostics") && strstr(message, path))
+        {
+            found = message;
+            break;
+        }
+        free(message);
+    }
+    if (!found)
+    {
+        printf("%d: no diagnostics for %s\n", id, path);
+        fail("No diagnostics published");
+    }
+    cJSON *parsed = cJSON_Parse(found);
+    cJSON *list = cJSON_GetObjectItem(cJSON_GetObjectItem(parsed, "params"), "diagnostics");
+    int have1 = !want1, have2 = !want2, unwanted = 0;
+    for (int i = 0; i < cJSON_GetArraySize(list); i++)
+    {
+        cJSON *m = cJSON_GetObjectItem(cJSON_GetArrayItem(list, i), "message");
+        const char *text = cJSON_IsString(m) ? m->valuestring : "";
+        have1 |= want1 && strcmp(text, want1) == 0;
+        have2 |= want2 && strcmp(text, want2) == 0;
+        int wanted = (want1 && strcmp(text, want1) == 0) || (want2 && strcmp(text, want2) == 0);
+        unwanted |= !wanted && strstr(text, none_of) != NULL;
+    }
+    if (!have1 || !have2 || unwanted)
+    {
+        printf("%d: diagnostics for %s: %s\n", id, path, found);
+        fail("Wrong diagnostics");
+    }
+    cJSON_Delete(parsed);
+    free(found);
+}
+
 // The C a document includes, read as a build reads it (the preprocessor, then tree-sitter):
 // what only that sees (a function a macro declares), the C declaration in hover, C calls
 // checked as you type, C names and a C struct's fields completed.
@@ -1171,6 +1217,42 @@ static void test_c_decls(void)
     expect_completion(845, path, 5, 6, "y", 5);
     expect_completion(846, path, 6, 10, "dvec2_make", 3);
     expect_completion(847, path, 7, 9, "made_by_macro", 3);
+
+    // Undefined functions and names, as a build reports them; not a local, a loop variable or
+    // a lambda's parameter, and not in a document with a comptime block (which can declare
+    // anything). The second document imports what the first did: its C is still read.
+    const char *undef_path = C_TEST_DIR "/undef.zc";
+    open_document(undef_path, "//> include: " C_TEST_DIR "/include\n"
+                              "include \"decls.h\"\n"
+                              "import \"std/string.zc\"\n"
+                              "import \"stdio.h\"\n"
+                              "fn main() {\n"
+                              "    dvec2_mak(1.0, 2.0);\n"
+                              "    let c = D_GREN;\n"
+                              "    let f = fn(x: int) -> int { return x + 1; };\n"
+                              "    for i in 0..2 { printf(\"%d\", f(i)); }\n"
+                              "    let s = String::new(\"x\");\n"
+                              "}\n");
+    expect_diagnostics(848, undef_path,
+                       "Undefined function 'dvec2_mak'\nDid you mean 'dvec2_make'?",
+                       "Undefined name 'D_GREN'\nDid you mean 'D_GREEN'?", "Undefined");
+    const char *again_path = C_TEST_DIR "/undef_again.zc";
+    open_document(again_path, "import \"std/string.zc\"\n"
+                              "import \"stdio.h\"\n"
+                              "fn main() {\n"
+                              "    let s = String::new(\"x\");\n"
+                              "    printf(\"%s\", s.c_str());\n"
+                              "    puts(\"x\");\n"
+                              "}\n");
+    expect_diagnostics(849, again_path, NULL, NULL, "Undefined");
+    const char *comptime_path = C_TEST_DIR "/undef_comptime.zc";
+    open_document(comptime_path, "comptime {\n"
+                                 "    yield(\"def MADE_HERE = 1;\");\n"
+                                 "}\n"
+                                 "fn main() {\n"
+                                 "    let x = MADE_HERE;\n"
+                                 "}\n");
+    expect_diagnostics(850, comptime_path, NULL, NULL, "Undefined");
     printf("PASS: test_c_decls\n");
 }
 

@@ -414,6 +414,10 @@ struct ASTNode
             char *name;
             char *suggestion;
             struct ZenSymbol *symbol;
+            /// The name was a symbol in scope where it was parsed (a local, a parameter, a
+            /// binding, a global declared before it): what a check after the parse, which
+            /// has no scopes (the LSP's), knows of locals.
+            int bound;
         } var_ref;
 
         struct
