@@ -410,8 +410,9 @@ void build_compile_arg_list(ArgList *list, const char *outfile, const char *temp
         arg_list_add(list, file);
     }
 
-    // Platform flags
-    if (z_is_windows() && !cfg->is_freestanding)
+    // Platform flags. (Not for tcc: it links Windows' DLLs through its .def files, which
+    // -static turns off, so ws2_32 and the like aren't found.)
+    if (z_is_windows() && !cfg->is_freestanding && !z_path_match_compiler(cfg->cc, "tcc"))
     {
         arg_list_add(list, "-static");
     }

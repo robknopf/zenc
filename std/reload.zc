@@ -933,8 +933,9 @@ raw {
     // For a debugger to walk the stack through the version's code, it needs to know how each
     // function's frame is laid out. tcc's object files for Linux say so (.eh_frame); those for
     // Windows don't (their .pdata is for the system, and gdb reads it only from a program's
-    // own image). tcc starts every function the same way (push %rbp; mov %rsp,%rbp), so for
-    // each one that does, a .debug_frame says so, added to the object file the debugger reads.
+    // own image). tcc starts every function one of two ways (push %rbp; mov %rsp,%rbp, or
+    // through __chkstk), so for each function a .debug_frame says which, added to the object
+    // file the debugger reads.
     static void zl_add_frames(ZlImage *im)
     {
         ZlEhdr *eh = (ZlEhdr *)im->img;
@@ -957,7 +958,12 @@ raw {
         {
             const ZlSym *y = &im->syms[s];
             if (ZL_TYPE(y->st_info) != ZL_STT_FUNC || !y->st_size || !zl_in(im, im->addr[s])) continue;
-            if (memcmp((const void *)(uintptr_t)im->addr[s], "\x55\x48\x89\xe5", 4) != 0) continue;
+            const unsigned char *code = (const unsigned char *)(uintptr_t)im->addr[s];
+            // push %rbp; mov %rsp,%rbp (...). Or, for a frame over 4 KB on Windows,
+            // mov $size,%eax; call __chkstk, which pushes %rbp and makes the frame itself.
+            int plain = !memcmp(code, "\x55\x48\x89\xe5", 4);
+            int chkstk = code[0] == 0xb8 && code[5] == 0xe8;
+            if (!plain && !chkstk) continue;
             unsigned char *e = fr + f;
             uint32_t len = 36, cie_at = 0;
             memcpy(e, &len, 4);
@@ -966,7 +972,9 @@ raw {
             memcpy(e + 16, &y->st_size, 8);
             // after push %rbp: CFA = %rsp + 16, %rbp at CFA - 16; after mov: CFA = %rbp + 16
             static const unsigned char ops[16] = {0x41, 0x0e, 16, 0x86, 2, 0x43, 0x0d, 6, 0, 0, 0, 0, 0, 0, 0, 0};
-            memcpy(e + 24, ops, 16);
+            // (after the call: CFA = %rbp + 16, %rbp at CFA - 16)
+            static const unsigned char ops_chkstk[16] = {0x4a, 0x0c, 6, 16, 0x86, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+            memcpy(e + 24, plain ? ops : ops_chkstk, 16);
             f += 40;
         }
         // The object file again, with .debug_frame and a section-name table that names it.
@@ -1077,7 +1085,13 @@ raw {
             if (y->st_shndx != ZL_SHN_UNDEF) continue;
             const char *name = im->strtab + y->st_name;
             if (!*name) continue;
+            // tcc's own runtime first for what it calls in its own way: its __chkstk (on
+            // Windows, a function with a frame over 4 KB starts `mov $size,%eax; call
+            // __chkstk`, which makes the frame; ntdll's of the same name only probes the stack)
+            // and alloca.
+            int tcc_own = !strcmp(name, "__chkstk") || !strcmp(name, "alloca") || !strcmp(name, "__alloca");
             void *p = resolve ? resolve(ctx, name) : NULL;
+            if (!p && tcc_own) p = zl_helper(name);
             if (!p) p = zl_host_sym(name);
             if (!p) p = zl_helper(name);
             if (!p && ZL_BIND(y->st_info) != ZL_STB_WEAK)
@@ -1610,6 +1624,20 @@ raw {
             if (ZL_TYPE(im->syms[s].st_info) == ZL_STT_FUNC && im->addr[s] == addr && im->syms[s].st_shndx != ZL_SHN_UNDEF)
                 return s;
         return 0;
+    }
+
+    // Runs the constructors of `im` (its .init_array), as a program's start would. Not for
+    // the Reloader's versions (zc --reload writes none, and a reload doesn't start the program
+    // again): for tests/reload/load_host.zc, which runs whole programs through zl_load.
+    static void zl_run_init(ZlImage *im)
+    {
+        for (unsigned i = 0; i < im->nsh; i++)
+        {
+            if (im->sh[i].sh_type != 14 || !im->sec[i]) continue; // SHT_INIT_ARRAY
+            void (**fn)(void) = (void (**)(void))(uintptr_t)im->sec[i];
+            for (size_t k = 0; k < im->sh[i].sh_size / sizeof(void *); k++)
+                if (fn[k]) fn[k]();
+        }
     }
 
     static unsigned char *zl_read_file(const char *path, size_t *size)

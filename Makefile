@@ -560,6 +560,7 @@ test: $(TARGET) $(PLUGINS)
 # Hot reload of modules through libtcc (skipped without libtcc).
 test-reload: $(TARGET)
 	./tests/scripts/run_reload_tests.sh
+	./tests/scripts/run_loader_tests.sh
 
 # Files that the full typechecker (`zc check`) must accept with no errors.
 test-check: $(TARGET)

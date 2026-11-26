@@ -1,0 +1,96 @@
+// The loader's test over whole programs (tests/scripts/run_loader_tests.sh): compiles a C
+// file the way std/reload.zc compiles a version (libtcc, an object file with debug
+// information, thread-locals as ordinary globals), loads it with the Reloader's own loader
+// (zl_load), runs its constructors and its main, and exits with what main returned. The
+// script compares that with the same C built into a program by tcc.
+//
+// Usage: load_host FILE.c [MORE.c]... [-IDIR | -DNAME[=VALUE]]... [-- ARGS...]
+// (more C files are compiled into the same object file: C a program links too, as std's regex)
+
+import "std/reload.zc"
+
+raw {
+    #ifdef ZR_LOADER
+    static int load_and_run(int argc, char **argv)
+    {
+        TCCState *s = zr_tcc_new();
+        if (!s) return 125;
+        tcc_set_error_func(s, NULL, zr_on_tcc_error);
+    #ifdef TCC_RELOCATE_AUTO
+        tcc_set_options(s, "-g");
+    #else
+        tcc_set_options(s, "-gdwarf");
+    #endif
+        tcc_set_output_type(s, TCC_OUTPUT_OBJ);
+        tcc_define_symbol(s, "_Thread_local", "");
+        tcc_define_symbol(s, "__thread", "");
+        int a = 2;
+        for (; a < argc && strcmp(argv[a], "--") != 0; a++)
+        {
+            size_t len = strlen(argv[a]);
+            if (len > 2 && !strcmp(argv[a] + len - 2, ".c") && argv[a][0] != '-') continue; // below
+            if (!strncmp(argv[a], "-I", 2)) tcc_add_include_path(s, argv[a] + 2);
+            else if (!strncmp(argv[a], "-D", 2))
+            {
+                char *eq = strchr(argv[a] + 2, '=');
+                if (eq) *eq = 0;
+                tcc_define_symbol(s, argv[a] + 2, eq ? eq + 1 : "1");
+            }
+        }
+        if (tcc_add_file(s, argv[1]) == -1) return 124;
+        for (int i = 2; i < argc && strcmp(argv[i], "--") != 0; i++)
+        {
+            size_t len = strlen(argv[i]);
+            if (len > 2 && !strcmp(argv[i] + len - 2, ".c") && argv[i][0] != '-' && tcc_add_file(s, argv[i]) == -1)
+                return 124;
+        }
+        char obj[4096];
+        snprintf(obj, sizeof obj, "%s.%d.o", argv[1], (int)getpid());
+        if (tcc_output_file(s, obj) != 0) return 124;
+        tcc_delete(s);
+        size_t n = 0;
+        unsigned char *img = zl_read_file(obj, &n);
+        remove(obj);
+        if (!img) return 124;
+        char err[512] = "";
+        int fault = 0;
+        ZlImage *im = zl_load(img, n, NULL, NULL, 1, &fault, err, sizeof err);
+        if (!im)
+        {
+            fprintf(stderr, "load_host: not loaded: %s\n", err);
+            return 123;
+        }
+        int (*main_fn)(int, char **) = (int (*)(int, char **))zl_sym(im, "main");
+        if (!main_fn)
+        {
+            fprintf(stderr, "load_host: no main\n");
+            return 123;
+        }
+        zl_run_init(im);
+        // The program's own arguments: its name, then what follows "--".
+        char **pargv = argv + (a < argc ? a : argc - 1);
+        int pargc = argc - (int)(pargv - argv);
+        pargv[0] = argv[1];
+        int rc = main_fn(pargc, pargv);
+        fflush(stdout);
+        return rc;
+    }
+    #else
+    static int load_and_run(int argc, char **argv)
+    {
+        (void)argc;
+        (void)argv;
+        fprintf(stderr, "load_host: the Reloader doesn't load versions itself here\n");
+        return 122;
+    }
+    #endif
+}
+extern fn load_and_run(argc: int, argv: char**) -> int;
+
+fn main(argc: int, argv: char**) -> int {
+    if argc < 2 {
+        fprintf(stderr, "usage: load_host FILE.c [MORE.c]... [-IDIR | -DNAME[=VALUE]]... [-- ARGS...]\n");
+        return 2;
+    }
+    return load_and_run(argc, argv);
+}
