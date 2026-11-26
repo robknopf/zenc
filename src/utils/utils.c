@@ -660,7 +660,27 @@ static int next_directive_word(const char **pp, char *out, size_t size)
     return 1;
 }
 
-void scan_build_directives(ParserContext *ctx, const char *src)
+// `dir`, a directory a directive names, as it is used: from the directory of the file the
+// directive is in, if it is relative and there; else as written (from where zc runs, as it
+// always was).
+static void directive_dir(const char *file, const char *dir, char *out, size_t size)
+{
+    snprintf(out, size, "%s", dir);
+    const char *sep = file ? z_path_last_sep(file) : NULL;
+    if (!sep || z_is_abs_path(dir))
+    {
+        return;
+    }
+    char joined[MAX_PATH_LEN * 2];
+    snprintf(joined, sizeof(joined), "%.*s/%s", (int)(sep - file), file, dir);
+    struct stat st;
+    if (stat(joined, &st) == 0 && S_ISDIR(st.st_mode))
+    {
+        snprintf(out, size, "%s", joined);
+    }
+}
+
+void scan_build_directives(ParserContext *ctx, const char *src, const char *path)
 {
     ZenCompiler *compiler = ctx->compiler;
     const char *p = src;
@@ -731,10 +751,11 @@ void scan_build_directives(ParserContext *ctx, const char *src)
                 // Each directory to the C compiler as an argument of its own (not into cflags,
                 // a string split at spaces), so "inc dir", quoted, is one directory.
                 const char *words = directive + 8;
-                char dir[MAX_PATH_LEN];
+                char dir[MAX_PATH_LEN], used[MAX_PATH_LEN * 2];
                 while (next_directive_word(&words, dir, sizeof(dir)))
                 {
-                    zvec_push_Str(&compiler->config.c_include_paths, xstrdup(dir));
+                    directive_dir(path, dir, used, sizeof(used));
+                    zvec_push_Str(&compiler->config.c_include_paths, xstrdup(used));
                 }
             }
             else if (strncmp(directive, "lib:", 4) == 0)

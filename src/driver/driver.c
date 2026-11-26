@@ -141,7 +141,7 @@ static int compile_program(ZenCompiler *compiler)
         return 1;
     }
 
-    scan_build_directives(&ctx, src);
+    scan_build_directives(&ctx, src, compiler->config.input_file);
 
     Lexer l;
     lexer_init(&l, src, ctx.config, ctx.current_filename);
@@ -222,7 +222,7 @@ static int compile_program(ZenCompiler *compiler)
                 fflush(stdout);
             }
 
-            scan_build_directives(&ctx, extra_src);
+            scan_build_directives(&ctx, extra_src, extra_path);
             Lexer extra_l;
             lexer_init(&extra_l, extra_src, ctx.config, ctx.current_filename);
             ASTNode *extra_root = parse_program_nodes(&ctx, &extra_l);

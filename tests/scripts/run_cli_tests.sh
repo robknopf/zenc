@@ -412,6 +412,24 @@ else
     echo "$out" | head -10 | sed 's/^/      /'
 fi
 
+# A module in another directory: its include "x.h" is found next to it, and its
+# //> include: directory is taken from its directory, wherever zc runs.
+mkdir -p "$workdir/qinc/app" "$workdir/qinc/libs/foo/third"
+printf 'int foo_local(void);\n' > "$workdir/qinc/libs/foo/local.h"
+printf 'int foo_third(void);\n' > "$workdir/qinc/libs/foo/third/third.h"
+printf 'int foo_local(void) { return 1; }\nint foo_third(void) { return 2; }\n' > "$workdir/qinc/libs/foo/foo_impl.c"
+printf '//> include: third\ninclude "local.h"\ninclude <third.h>\nfn foo() -> int { return foo_local() + foo_third(); }\n' > "$workdir/qinc/libs/foo/foo.zc"
+printf 'import "../libs/foo/foo.zc"\nfn main() { println "{foo()}"; }\n' > "$workdir/qinc/app/main.zc"
+zc_abs="$(cd "$(dirname "$ZC")" && pwd)/$(basename "$ZC")"
+out_app=$(cd "$workdir/qinc/app" && "$zc_abs" run main.zc ../libs/foo/foo_impl.c -o m 2>&1)
+out_top=$(cd "$workdir/qinc" && "$zc_abs" run app/main.zc libs/foo/foo_impl.c -o m 2>&1)
+if echo "$out_app" | grep -q "^3$" && echo "$out_top" | grep -q "^3$"; then
+    check "a module's include \"x.h\" and //> include: are relative to it" 1
+else
+    check "a module's include \"x.h\" and //> include: are relative to it" 0
+    echo "$out_app" "$out_top" | head -8 | sed 's/^/      /'
+fi
+
 out=$(ZC_NO_C_NAMES=1 "$ZC" transpile "$workdir/cnames/bad.zc" -o "$workdir/cnames/bad.c" 2>&1)
 if ! echo "$out" | grep -q "Undefined"; then
     check "ZC_NO_C_NAMES=1 turns the C names check off" 1

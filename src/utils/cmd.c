@@ -292,6 +292,26 @@ static void add_include_args(ArgList *list, ZenCompiler *compiler)
         }
     }
 
+    // The directories of modules with a quoted include found there (c_quote_paths).
+    int has_iquote =
+        z_path_match_compiler(cfg->cc, "gcc") || z_path_match_compiler(cfg->cc, "g++") ||
+        z_path_match_compiler(cfg->cc, "clang") || z_path_match_compiler(cfg->cc, "emcc") ||
+        z_path_match_compiler(cfg->cc, "filcc");
+    for (size_t i = 0; i < cfg->c_quote_paths.length; i++)
+    {
+        char abs_dir[MAX_PATH_LEN];
+        z_get_absolute_path(cfg->c_quote_paths.data[i], abs_dir, sizeof(abs_dir));
+        if (abs_dir[0] && has_iquote)
+        {
+            arg_list_add(list, "-iquote");
+            arg_list_add(list, abs_dir);
+        }
+        else if (abs_dir[0])
+        {
+            arg_list_add_fmt(list, "-I%s", abs_dir);
+        }
+    }
+
     // Input directory (to resolve relative includes in raw blocks)
     if (cfg->input_dir)
     {

@@ -35,7 +35,9 @@ void str_join(char *out, size_t size, const char *const *parts, const char *sep)
  *  next call: using what snprintf returns instead overflows once the text is cut.
  *  Returns 0 if the text did not fit. */
 ZEN_FORMAT_PRINTF(4, 5) int str_appendf(char *buf, size_t size, size_t *used, const char *fmt, ...);
-void scan_build_directives(struct ParserContext *ctx, const char *src);
+/// The //> directives of `src`, the text of the file at `path` (relative directories in
+/// them are taken from its directory). `path` may be NULL.
+void scan_build_directives(struct ParserContext *ctx, const char *src, const char *path);
 int resolve_build_directive(const char *raw, char *out, size_t out_size);
 int is_safe_pkg_config_spec(const char *libs);
 int levenshtein(const char *s1, const char *s2);
