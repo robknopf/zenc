@@ -451,14 +451,140 @@ static void infer_lambda_return_type(ParserContext *ctx, ASTNode *node)
     zfree(types);
 }
 
+// --reload: what a lambda's emitted C (its context struct, drop function and body) says of
+// it, with lambda numbers and #line directives left out (they change when other code does):
+// its hash, and its signature (the struct and the function's prototype).
+static unsigned long long reload_lambda_text(const char *text, int id, char **sig)
+{
+    unsigned long long h = 1469598103934665603ULL;
+    size_t cap = strlen(text) + 1, n = 0;
+    char *norm = xmalloc(cap);
+    for (const char *p = text; *p;)
+    {
+        const char *q = p;
+        while ((p == text || p[-1] == '\n') && (*q == ' ' || *q == '\t'))
+        {
+            q++;
+        }
+        if ((p == text || p[-1] == '\n') && strncmp(q, "#line", 5) == 0)
+        {
+            p = q;
+            while (*p && *p != '\n')
+            {
+                p++;
+            }
+            if (*p)
+            {
+                p++;
+            }
+            continue;
+        }
+        static const char *const numbered[] = {"_lambda_", "Lambda_", "_z_ctx_"};
+        int skipped = 0;
+        for (int k = 0; k < 3 && !skipped; k++)
+        {
+            size_t len = strlen(numbered[k]);
+            if (strncmp(p, numbered[k], len) == 0 && p[len] >= '0' && p[len] <= '9')
+            {
+                memcpy(norm + n, p, len);
+                n += len;
+                p += len;
+                while (*p >= '0' && *p <= '9')
+                {
+                    p++;
+                }
+                norm[n++] = '#';
+                skipped = 1;
+            }
+        }
+        if (!skipped)
+        {
+            norm[n++] = *p++;
+        }
+    }
+    norm[n] = 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        h = (h ^ (unsigned char)norm[i]) * 1099511628211ULL;
+    }
+    // The signature: the context struct, and the function's first line up to its body.
+    char proto[64];
+    snprintf(proto, sizeof proto, " _lambda_%d(", id);
+    const char *def = strstr(text, proto);
+    const char *line = def;
+    while (line && line > text && line[-1] != '\n')
+    {
+        line--;
+    }
+    const char *end = def ? strchr(def, '{') : NULL;
+    char head[64];
+    snprintf(head, sizeof head, "struct Lambda_%d_Ctx {", id);
+    const char *st = strstr(text, head);
+    const char *st_end = st ? strstr(st, "};") : NULL;
+    size_t slen = (st && st_end ? (size_t)(st_end - st) : 0) + (line && end ? (size_t)(end - line) : 0) + 2;
+    char *raw = xmalloc(slen);
+    raw[0] = 0;
+    if (st && st_end)
+    {
+        strncat(raw, st, (size_t)(st_end - st));
+    }
+    strcat(raw, "|");
+    if (line && end)
+    {
+        strncat(raw, line, (size_t)(end - line));
+    }
+    // (numbers left out again, and the whitespace)
+    char *out = xmalloc(slen + 1);
+    size_t o = 0;
+    for (const char *p = raw; *p;)
+    {
+        if (*p == '\n' || *p == ' ' || *p == '\t')
+        {
+            p++;
+            continue;
+        }
+        if ((strncmp(p, "_lambda_", 8) == 0 && p[8] >= '0' && p[8] <= '9') ||
+            (strncmp(p, "Lambda_", 7) == 0 && p[7] >= '0' && p[7] <= '9'))
+        {
+            size_t len = p[0] == '_' ? 8 : 7;
+            memcpy(out + o, p, len);
+            o += len;
+            p += len;
+            while (*p >= '0' && *p <= '9')
+            {
+                p++;
+            }
+            out[o++] = '#';
+            continue;
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    zfree(raw);
+    zfree(norm);
+    *sig = out;
+    return h;
+}
+
 void emit_lambda_defs(ParserContext *ctx)
 {
     LambdaRef *cur = ctx->global_lambdas;
+    int reload = ctx->config->reload_mode && !ctx->config->use_cpp;
     while (cur)
     {
         ASTNode *node = cur->node;
         int saved_defer = ctx->cg.defer_count;
         ctx->cg.defer_count = 0;
+        // --reload: into a buffer first, to say what it is (reload_lambda_text).
+        Emitter *em = &ctx->cg.emitter;
+        int captured = reload && emitter_push(em);
+        if (captured)
+        {
+            em->mode = EMITTER_BUFFER;
+            em->buffer.buf = NULL;
+            em->buffer.len = 0;
+            em->buffer.cap = 0;
+        }
 
         infer_lambda_return_type(ctx, node);
 
@@ -657,6 +783,19 @@ void emit_lambda_defs(ParserContext *ctx)
         emitter_dedent(&ctx->cg.emitter);
         EMIT(ctx, "}\n\n");
 
+        if (captured)
+        {
+            char *text = emitter_take_string(em);
+            emitter_pop(em);
+            if (text)
+            {
+                struct ReloadLambda *l = reload_lambda(ctx, node->lambda.lambda_id, 1);
+                zfree(l->sig);
+                l->hash = reload_lambda_text(text, node->lambda.lambda_id, &l->sig);
+                emitter_write(em, text, strlen(text));
+                zfree(text);
+            }
+        }
         ctx->cg.defer_count = saved_defer;
         cur = cur->next;
     }

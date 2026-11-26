@@ -1,0 +1,17 @@
+--- step 1
+lambda version 1
+helper version 1
+returned 5
+--- step 2
+lambda version 2
+helper version 2
+returned 5
+--- step 3
+lambda version 2
+helper version 3
+returned 5
+--- step 4
+reload: old code still runs for: a lambda in setup (its body changed, and its function has other lambdas like it)
+lambda version 2
+helper version 4
+returned 5

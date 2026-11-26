@@ -1004,7 +1004,9 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
               "const char *const *params; void *addr; } ZcMfFunc;\n"
               "typedef struct { unsigned format; const char *zc_version; unsigned ntypes; "
               "const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; "
-              "unsigned nfuncs; const ZcMfFunc *funcs; } ZcManifest;\n#endif\n");
+              "unsigned nfuncs; const ZcMfFunc *funcs; } ZcManifest;\n"
+              "typedef struct { const char *c_name; const char *key; const char *sig; "
+              "unsigned long long hash; } ZcMfLambda;\n#endif\n");
 
     // The types to describe. One can be in the list more than once; it is described once
     // per @cfg.
@@ -1415,6 +1417,26 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
               "    sizeof(_zc_mf_globals) / sizeof(_zc_mf_globals[0]) - 1, _zc_mf_globals,\n"
               "    sizeof(_zc_mf_funcs) / sizeof(_zc_mf_funcs[0]) - 1, _zc_mf_funcs};\n");
     EMIT(ctx, "const ZcManifest *_zc_manifest(void)\n{\n    return &_zc_mf;\n}\n");
+
+    // The lambdas: each by its C name, where it is, what it takes and captures, and its
+    // body's hash (reload_lambda_text), so a closure kept past a reload finds the same
+    // lambda in the new version (std/reload.zc). Ends with an empty entry.
+    EMIT(ctx, "static const ZcMfLambda _zc_mf_lambdas[] = {\n");
+    for (int i = 0; i < ctx->cg.reload_lambda_count; i++)
+    {
+        struct ReloadLambda *l = &ctx->cg.reload_lambdas[i];
+        if (!l->sig)
+        {
+            continue; // not emitted
+        }
+        EMIT(ctx, "    {\"_lambda_%d\", ", l->id);
+        emit_manifest_string(ctx, l->key);
+        EMIT(ctx, ", ");
+        emit_manifest_string(ctx, l->sig);
+        EMIT(ctx, ", 0x%llxULL},\n", l->hash);
+    }
+    EMIT(ctx, "    {0}\n};\n");
+    EMIT(ctx, "const ZcMfLambda *_zc_manifest_lambdas(void)\n{\n    return _zc_mf_lambdas;\n}\n");
 }
 
 void codegen_c_program(ParserContext *ctx, ASTNode *node)

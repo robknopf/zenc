@@ -107,6 +107,7 @@ raw {
     typedef struct { const char *name; const char *type; unsigned size; void *addr; const char *init; const void *init_value; unsigned flags; } ZcMfGlobal;
     typedef struct { const char *name; const char *ret; unsigned nparams; const char *const *params; void *addr; } ZcMfFunc;
     typedef struct { unsigned format; const char *zc_version; unsigned ntypes; const ZcMfType *types; unsigned nglobals; const ZcMfGlobal *globals; unsigned nfuncs; const ZcMfFunc *funcs; } ZcManifest;
+    typedef struct { const char *c_name; const char *key; const char *sig; unsigned long long hash; } ZcMfLambda;
     #endif
 
     typedef struct
@@ -201,6 +202,14 @@ raw {
             int changed_in;     // the version whose reload last moved or pinned it
             int made_in;        // the version it was made for
             void *before;       // its target before that reload (to undo it)
+            const char *before_name;
+            // A lambda's (or its drop function's): which lambda, as the manifest's lambdas
+            // say (ZcMfLambda): where it is, its signature, its body's hash; and before.
+            const char *lkey, *lsig;
+            unsigned long long lhash;
+            const char *before_lkey, *before_lsig;
+            unsigned long long before_lhash;
+            int drop; // the lambda's drop function, not the lambda
         } *fs;
         unsigned nfs, fs_cap;
         unsigned *fs_by_name, *fs_by_addr; // index + 1, or 0
@@ -3541,6 +3550,75 @@ raw {
         return -1;
     }
 
+    // The manifest's lambdas of version `v` (ZcMfLambda, ending with an empty entry), or NULL.
+    static const ZcMfLambda *zr_lambdas(ZrVersion *v)
+    {
+        if (!v || !v->loaded) return NULL;
+        const ZcMfLambda *(*get)(void) = (const ZcMfLambda *(*)(void))zr_sym(v, "_zc_manifest_lambdas");
+        return get ? get() : NULL;
+    }
+
+    // `name` is a lambda's ("_lambda_N") or its drop function's ("_lambda_N_drop"): the
+    // lambda's name into `out`, and whether it's the drop function. 0 if it's neither.
+    static int zr_lambda_name(const char *name, char *out, size_t n, int *drop)
+    {
+        if (strncmp(name, "_lambda_", 8) != 0) return 0;
+        const char *p = name + 8;
+        if (*p < '0' || *p > '9') return 0;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p && strcmp(p, "_drop") != 0) return 0;
+        if ((size_t)(p - name) >= n) return 0;
+        memcpy(out, name, (size_t)(p - name));
+        out[p - name] = 0;
+        *drop = *p != 0;
+        return 1;
+    }
+
+    static const ZcMfLambda *zr_lambda_find(const ZcMfLambda *tab, const char *c_name)
+    {
+        for (; tab && tab->c_name; tab++)
+            if (!strcmp(tab->c_name, c_name)) return tab;
+        return NULL;
+    }
+
+    // Lambdas of `tab` in the same function as `key` (the part before '#') with signature
+    // `sig`, and the last of them.
+    static int zr_lambda_alike(const ZcMfLambda *tab, const char *key, const char *sig, const ZcMfLambda **last)
+    {
+        const char *hash = key ? strchr(key, '#') : NULL;
+        size_t flen = hash ? (size_t)(hash - key) : 0;
+        int n = 0;
+        for (; hash && tab && tab->c_name; tab++)
+            if (tab->key && !strncmp(tab->key, key, flen) && tab->key[flen] == '#' && !strcmp(zr_s(tab->sig), zr_s(sig)))
+            {
+                n++;
+                *last = tab;
+            }
+        return n;
+    }
+
+    // The new version's lambda (of `now`) a stub of a lambda of the version replaced (of
+    // `was`) follows: the one with the same body and signature, or else the only one in the
+    // same function with that signature, if the old lambda was the only one so there too.
+    // NULL, with why, if none.
+    static const ZcMfLambda *zr_lambda_match(const ZcMfLambda *was, const ZcMfLambda *now,
+                                             const struct ZrStub *st, const char **why)
+    {
+        const ZcMfLambda *exact = NULL;
+        for (const ZcMfLambda *e = now; e && e->c_name; e++)
+            if (e->hash == st->lhash && !strcmp(zr_s(e->sig), zr_s(st->lsig)) &&
+                (!exact || (st->lkey && e->key && !strcmp(e->key, st->lkey))))
+                exact = e;
+        if (exact) return exact;
+        const ZcMfLambda *in_now = NULL, *in_was = NULL;
+        int n_now = zr_lambda_alike(now, st->lkey, st->lsig, &in_now);
+        int n_was = zr_lambda_alike(was, st->lkey, st->lsig, &in_was);
+        if (n_now == 1 && n_was <= 1) return in_now;
+        *why = n_now > 1 || n_was > 1 ? "its body changed, and its function has other lambdas like it"
+                                      : "its function has no lambda that takes and captures the same now";
+        return NULL;
+    }
+
     // A new stub for `name` (interned), of signature `sig` (or NULL), calling `to`; -1 if
     // there's no memory for it.
     static int zr_stub_new(ZrReloader *r, const char *name, const char *sig, void *to)
@@ -3573,6 +3651,17 @@ raw {
         st->sig = sig;
         st->code = code;
         st->made_in = st->changed_in = r->version;
+        char lname[64];
+        if (zr_lambda_name(name, lname, sizeof lname, &st->drop))
+        {
+            const ZcMfLambda *l = zr_lambda_find(zr_lambdas(&r->current), lname);
+            if (l)
+            {
+                st->lkey = l->key ? zr_intern(r, zr_strdup(l->key)) : NULL;
+                st->lsig = zr_intern(r, zr_strdup(zr_s(l->sig)));
+                st->lhash = l->hash;
+            }
+        }
         zr_stub_point(st, to);
         zr_stub_index_name(r, r->nfs);
         zr_stub_index_addr(r, r->nfs);
@@ -3637,10 +3726,48 @@ raw {
         zr_fntab_init(&now, r->types_now);
         int n_kept = 0;
         char why_buf[320];
+        const ZcMfLambda *lam_now = zr_lambdas(v);
+        const ZcMfLambda *lam_was = r->old_count ? zr_lambdas(&r->old[r->old_count - 1]) : NULL;
         for (unsigned i = 0; i < r->nfs; i++)
         {
             struct ZrStub *st = &r->fs[i];
             if (st->pinned) continue;
+            st->before_name = st->name;
+            st->before_lkey = st->lkey;
+            st->before_lsig = st->lsig;
+            st->before_lhash = st->lhash;
+            if (st->lsig && lam_now)
+            {
+                // A lambda: to the same lambda in the new version (zr_lambda_match).
+                const char *lwhy = NULL;
+                const ZcMfLambda *m = zr_lambda_match(lam_was, lam_now, st, &lwhy);
+                char nm[80];
+                if (m) snprintf(nm, sizeof nm, "%s%s", m->c_name, st->drop ? "_drop" : "");
+                void *lto = m ? zr_sym(v, nm) : NULL;
+                st->before = zr_stub_target(st);
+                st->changed_in = r->version;
+                if (!lto)
+                {
+                    st->pinned = 1;
+                    st->why = zr_intern(r, zr_strdup(lwhy ? lwhy : "it's gone"));
+                    if (!st->drop && st->lkey)
+                    {
+                        const char *hash = strchr(st->lkey, '#');
+                        if (n_kept < 4)
+                            fprintf(log, "%sa lambda in %.*s (%s)", n_kept ? ", " : "reload: old code still runs for: ",
+                                    hash ? (int)(hash - st->lkey) : (int)strlen(st->lkey), st->lkey, st->why);
+                        n_kept++;
+                    }
+                    continue;
+                }
+                st->name = zr_intern(r, zr_strdup(nm));
+                st->lkey = m->key ? zr_intern(r, zr_strdup(m->key)) : NULL;
+                st->lsig = zr_intern(r, zr_strdup(zr_s(m->sig)));
+                st->lhash = m->hash;
+                zr_stub_index_name(r, i);
+                zr_stub_point(st, lto);
+                continue;
+            }
             const ZcMfFunc *b = zr_fntab_get(&now, st->name);
             void *to = b && b->addr ? b->addr : NULL;
     #ifdef ZR_LOADER
@@ -3703,6 +3830,14 @@ raw {
             }
             if (st->changed_in != crashed) continue;
             zr_stub_point(st, st->before);
+            if (st->before_name && st->before_name != st->name)
+            {
+                st->name = st->before_name;
+                zr_stub_index_name(r, i);
+            }
+            st->lkey = st->before_lkey;
+            st->lsig = st->before_lsig;
+            st->lhash = st->before_lhash;
             if (st->pinned)
             {
                 st->pinned = 0;

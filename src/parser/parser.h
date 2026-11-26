@@ -553,6 +553,17 @@ struct ParserContext
             const char *cfg;
         } *reload_statics;
         int reload_static_count;
+        /// --reload: each lambda's identity across versions (emit_reload_manifest's lambdas):
+        /// where it is (`function#n`, its function and which lambda of it), what it takes and
+        /// captures, and its emitted C's hash (lambda numbers and #line directives left out).
+        struct ReloadLambda
+        {
+            int id;
+            char *key;
+            char *sig;
+            unsigned long long hash;
+        } *reload_lambdas;
+        int reload_lambda_count;
         /// While a function is emitted: the names that mean a static local's storage, by the
         /// depth of the block that declared them (a NULL c_name: shadowed by another local).
         struct

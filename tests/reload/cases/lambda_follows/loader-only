@@ -1,0 +1,1 @@
+Needs stubs: under libtcc's loading (ZC_RELOAD_MEMORY) a lambda keeps its first body.

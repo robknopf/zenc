@@ -79,12 +79,45 @@ static char *reload_static_type(ParserContext *ctx, ASTNode *decl)
     return inferred;
 }
 
+// The lambda numbered `id`'s entry in reload_lambdas, made if `make`.
+struct ReloadLambda *reload_lambda(ParserContext *ctx, int id, int make)
+{
+    for (int i = 0; i < ctx->cg.reload_lambda_count; i++)
+    {
+        if (ctx->cg.reload_lambdas[i].id == id)
+        {
+            return &ctx->cg.reload_lambdas[i];
+        }
+    }
+    if (!make)
+    {
+        return NULL;
+    }
+    ctx->cg.reload_lambdas = xrealloc(ctx->cg.reload_lambdas, sizeof(*ctx->cg.reload_lambdas) *
+                                                                  (size_t)(ctx->cg.reload_lambda_count + 1));
+    struct ReloadLambda *l = &ctx->cg.reload_lambdas[ctx->cg.reload_lambda_count++];
+    memset(l, 0, sizeof(*l));
+    l->id = id;
+    return l;
+}
+
 static void reload_collect_in(ParserContext *ctx, ASTNode *node, const char *fname, const char *cfg,
-                              int depth)
+                              int depth, int *nlambda)
 {
     if (!node || depth > 4096)
     {
         return;
+    }
+    if (node->kind == NODE_LAMBDA)
+    {
+        // Where it is: its function, and which of the function's lambdas (in source order).
+        struct ReloadLambda *l = reload_lambda(ctx, node->lambda.lambda_id, 1);
+        if (!l->key)
+        {
+            size_t len = strlen(fname) + 24;
+            l->key = xmalloc(len);
+            snprintf(l->key, len, "%s#%d", fname, (*nlambda)++);
+        }
     }
     if (node->kind == NODE_VAR_DECL && node->var_decl.is_static &&
         !node->var_decl.is_thread_local && node->var_decl.name && !reload_static_name(ctx, node))
@@ -124,7 +157,7 @@ static void reload_collect_in(ParserContext *ctx, ASTNode *node, const char *fna
     {
         for (ASTNode *c = *children.slots[i]; c; c = c->next)
         {
-            reload_collect_in(ctx, c, fname, cfg, depth + 1);
+            reload_collect_in(ctx, c, fname, cfg, depth + 1, nlambda);
         }
     }
 }
@@ -139,8 +172,9 @@ void reload_collect_statics(ParserContext *ctx, ASTNode *funcs)
     {
         if (f->kind == NODE_FUNCTION && f->func.body && !f->func.generic_params)
         {
+            int nlambda = 0;
             reload_collect_in(ctx, f->func.body, f->link_name ? f->link_name : f->func.name,
-                              f->cfg_condition, 0);
+                              f->cfg_condition, 0, &nlambda);
         }
     }
 }
