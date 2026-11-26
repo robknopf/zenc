@@ -1,0 +1,10 @@
+--- step 1
+sum 7840 g0 1 g20 201 g30 301 g39 391
+--- step 2
+sum 7880 g0 2 g20 202 g30 302 g39 392 (v2)
+--- step 3
+reload: changes in version 3:
+reload:   globals: g20 retyped from int32_t to int64_t, g40 added, g0 removed
+reload: moved the globals: g20 converted from int32_t to int64_t
+reload: back to their initial values: g30 (initial value edited: 300 to 999)
+sum 9015 g20 203 g30 1000 g39 393 g40 401

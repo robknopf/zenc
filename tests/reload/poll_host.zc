@@ -1,0 +1,107 @@
+// The reload tests' check of poll(), on std/reload.zc.
+//
+// Usage: poll_host ZC WORK_DIR
+//
+// Writes a module in WORK_DIR/mod, builds it, then changes files the ways an editor does
+// and checks after each what poll() says: true when a .zc file under the module's
+// directory changed (written in place, saved through a rename, or added in a directory
+// made after the first poll), false when nothing did or only another file did, and false
+// again right after a true. On Linux poll() learns of changes through inotify; elsewhere it
+// scans every time, and the answers must be the same. Prints "ok" lines; on a wrong answer,
+// prints "FAIL" and exits 1.
+
+import "std/reload.zc"
+
+include <stdio.h>
+include <stdlib.h>
+include <string.h>
+include <sys/stat.h>
+include <unistd.h>
+
+raw {
+    static void put(const char *path, const char *text)
+    {
+        usleep(20000); // so each write has a newer modification time than the last
+        FILE *f = fopen(path, "w");
+        if (!f) { fprintf(stderr, "poll_host: can't write %s\n", path); exit(2); }
+        fputs(text, f);
+        fclose(f);
+    }
+
+    static void module_src(char *out, size_t n, int value)
+    {
+        snprintf(out, n, "@link_name(\"poll_value\")\nfn poll_value() -> int {\n    return %d;\n}\n", value);
+    }
+}
+extern fn put(path: const char*, text: const char*);
+extern fn module_src(out: char*, n: usize, value: int);
+
+fn check(what: const char*, got: bool, want: bool) {
+    if got != want {
+        println "FAIL {what}: poll() said {got}, expected {want}";
+        exit(1);
+    }
+    println "ok {what}";
+}
+
+fn main(argc: int, argv: char**) -> int {
+    if argc < 3 {
+        fprintf(stderr, "usage: poll_host ZC WORK_DIR\n");
+        return 2;
+    }
+    setvbuf(stdout, NULL, _IONBF, 0);
+    let dir: char[3072];
+    let main_zc: char[4096];
+    let tmp: char[4096];
+    let path: char[4096];
+    let c_file: char[4096];
+    let src: char[512];
+    snprintf(dir, 3072, "%s/mod", argv[2]);
+    mkdir(dir, 0o755);
+    snprintf(main_zc, 4096, "%s/main.zc", dir);
+    snprintf(c_file, 4096, "%s/module.c", argv[2]);
+
+    module_src(src, 512, 1);
+    put(main_zc, src);
+    let code = Reloader::new(main_zc, c_file);
+    code.set_zc(argv[1]);
+    code.verbose(false);
+    if !code.build() { println "FAIL the module does not build"; return 1; }
+    let value: fn*() -> int = code.symbol("poll_value");
+
+    check("nothing changed (first poll)", code.poll(), false);
+    check("nothing changed", code.poll(), false);
+
+    module_src(src, 512, 2);
+    put(main_zc, src);
+    check("written in place", code.poll(), true);
+    value = code.symbol("poll_value");
+    check("and the new code runs", value() == 2, true);
+    check("nothing changed since", code.poll(), false);
+
+    // An editor's save: a temporary file, renamed over the source.
+    module_src(src, 512, 3);
+    snprintf(tmp, 4096, "%s/main.zc.swp", dir);
+    put(tmp, src);
+    rename(tmp, main_zc);
+    check("saved through a rename", code.poll(), true);
+    value = code.symbol("poll_value");
+    check("and the new code runs", value() == 3, true);
+
+    snprintf(path, 4096, "%s/notes.txt", dir);
+    put(path, "not a .zc file\n");
+    check("another file written", code.poll(), false);
+
+    // A directory made after the first poll: a .zc in it counts, and so do later edits.
+    snprintf(path, 4096, "%s/sub", dir);
+    mkdir(path, 0o755);
+    snprintf(path, 4096, "%s/sub/extra.zc", dir);
+    put(path, r"fn extra() -> int { return 1; }");
+    check("a .zc added in a new directory", code.poll(), true);
+    put(path, r"fn extra() -> int { return 2; }");
+    check("that file edited", code.poll(), true);
+    check("nothing changed since", code.poll(), false);
+
+    code.free();
+    return 0;
+}

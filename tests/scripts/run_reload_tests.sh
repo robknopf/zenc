@@ -87,6 +87,22 @@ for dir in "$CASES"/*/; do
     fi
 done
 
+# poll(): tests/reload/poll_host.zc changes files itself and checks each answer.
+mkdir -p "$WORK/poll"
+if "$ZC" transpile -q "$ROOT/tests/reload/poll_host.zc" -o "$WORK/poll_host.c" \
+        > "$WORK/poll/build.log" 2>&1 &&
+    $CC "$WORK/poll_host.c" $TCC_DIRS -ltcc -ldl -lpthread -lm -o "$WORK/poll_host" \
+        >> "$WORK/poll/build.log" 2>&1 &&
+    timeout 60 "$WORK/poll_host" "$ZC" "$WORK/poll" > "$WORK/poll/out" 2>&1; then
+    echo "  [PASS] poll"
+    passed=$((passed + 1))
+else
+    echo "  [FAIL] poll"
+    sed 's/^/      /' "$WORK/poll/build.log" "$WORK/poll/out" | head -20
+    failed=$((failed + 1))
+    failed_names="$failed_names poll"
+fi
+
 echo "----------------------------------------"
 echo "Results (reload):"
 echo "-> Passed:  $passed"
