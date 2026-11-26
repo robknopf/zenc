@@ -1,0 +1,16 @@
+// A function pointer the reload can't see (here in the heap, behind a void*, as a library
+// would keep a callback) runs the newest version's function of the same name: the old
+// function jumps there. Once its signature changes, it stays with the last one that matched.
+// greet now takes two ints: the kept pointer goes on calling version 3's.
+struct Box { cb: fn*(int) -> int; }
+struct State { kept: void*; }
+fn greet(x: int, y: int) -> int {
+    println "greet version 4: {x} {y}";
+    return x + y;
+}
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    let b = (Box*)state.kept;
+    let r = b.cb(10);
+    println "returned {r}";
+}

@@ -1,0 +1,9 @@
+--- step 1
+take_pt version 1: 7
+take_int version 1: 8
+--- step 2
+reload: changes in version 2:
+reload:   Pt: size 4 -> 8 bytes, y added at byte 4
+reload: old code still runs for: take_pt (it takes or returns a Pt, which changed)
+take_pt version 1: 7
+take_int version 2: 8

@@ -887,6 +887,106 @@ static int manifest_kind(ASTNode *t)
 // so they are the module's own. A host gets it
 // through `const ZcManifest *_zc_manifest(void)`. std/reload.zc declares the same types: a
 // change to them is a change of `format`, in both.
+// An impl (or trait impl) of a generic struct or enum: its methods exist only as
+// instantiations, so neither it nor its methods are emitted as written.
+static int impl_is_generic(ParserContext *ctx, ASTNode *node)
+{
+    if (node->kind == NODE_IMPL)
+    {
+        char *sname = node->impl.struct_name;
+        if (!sname)
+        {
+            return 1; // nothing to emit
+        }
+
+        // Resolve opaque alias
+        const char *resolved = find_type_alias(ctx, sname);
+
+        char *mangled = replace_string_type(sname);
+        ASTNode *def = find_struct_def(ctx, mangled);
+        if (!def && resolved)
+        {
+            zfree(mangled);
+            mangled = replace_string_type(resolved);
+            def = find_struct_def(ctx, mangled);
+        }
+        int skip = 0;
+        if (def)
+        {
+            if (def->kind == NODE_STRUCT && def->strct.is_template)
+            {
+                skip = 1;
+            }
+            else if (def->kind == NODE_ENUM && def->enm.is_template)
+            {
+                skip = 1;
+            }
+        }
+        else
+        {
+            char *buf = strip_template_suffix(sname);
+            if (buf)
+            {
+                def = find_struct_def(ctx, buf);
+                if (def && def->strct.is_template)
+                {
+                    skip = 1;
+                }
+                zfree(buf);
+            }
+        }
+        if (mangled)
+        {
+            zfree(mangled);
+        }
+        if (skip)
+        {
+            return 1;
+        }
+    }
+    if (node->kind == NODE_IMPL_TRAIT)
+    {
+        char *sname = node->impl_trait.target_type;
+        if (!sname)
+        {
+            return 1; // nothing to emit
+        }
+
+        char *mangled = replace_string_type(sname);
+        ASTNode *def = find_struct_def(ctx, mangled);
+        int skip = 0;
+        if (def)
+        {
+            if (def->strct.is_template)
+            {
+                skip = 1;
+            }
+        }
+        else
+        {
+            char *buf = strip_template_suffix(sname);
+            if (buf)
+            {
+                def = find_struct_def(ctx, buf);
+                if (def && def->strct.is_template)
+                {
+                    skip = 1;
+                }
+                zfree(buf);
+            }
+        }
+        if (mangled)
+        {
+            zfree(mangled);
+        }
+        if (skip)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *globals,
                                  ASTNode *funcs)
 {
@@ -1198,14 +1298,47 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
     EMIT(ctx, "    {0}\n};\n");
 
     // The functions the module defines, with their C return and parameter types: what a
-    // host that looks one up calls it with.
-    int nfunc = 0;
+    // host that looks one up calls it with, and what an old version's function is checked
+    // against before it is made to run the new one. Methods too, of impls that aren't
+    // generic (with the impl's @cfg, if it has one).
+    int fn_count = 0, fn_cap = 64;
+    ASTNode **fn_list = xmalloc((size_t)fn_cap * sizeof(ASTNode *));
+    const char **fn_outer = xmalloc((size_t)fn_cap * sizeof(char *));
     for (ASTNode *f = funcs; f; f = f->next)
     {
-        if (f->kind != NODE_FUNCTION || !f->func.body || f->func.generic_params ||
-            f->func.count <= 0 || !f->func.arg_types)
+        ASTNode *one = f->kind == NODE_FUNCTION ? f : NULL;
+        ASTNode *methods = NULL;
+        if ((f->kind == NODE_IMPL || f->kind == NODE_IMPL_TRAIT) && !impl_is_generic(ctx, f))
+        {
+            methods = f->kind == NODE_IMPL ? f->impl.methods : f->impl_trait.methods;
+        }
+        for (ASTNode *m = one ? one : methods; m; m = one ? NULL : m->next)
+        {
+            if (m->kind != NODE_FUNCTION)
+            {
+                continue;
+            }
+            if (fn_count == fn_cap)
+            {
+                fn_cap *= 2;
+                fn_list = xrealloc(fn_list, (size_t)fn_cap * sizeof(ASTNode *));
+                fn_outer = xrealloc(fn_outer, (size_t)fn_cap * sizeof(char *));
+            }
+            fn_list[fn_count] = m;
+            fn_outer[fn_count++] = one ? NULL : f->cfg_condition;
+        }
+    }
+    int nfunc = 0;
+    for (int fi = 0; fi < fn_count; fi++)
+    {
+        ASTNode *f = fn_list[fi];
+        if (!f->func.body || f->func.generic_params || f->func.count <= 0 || !f->func.arg_types)
         {
             continue;
+        }
+        if (fn_outer[fi])
+        {
+            EMIT(ctx, "#if %s\n", fn_outer[fi]);
         }
         if (f->cfg_condition)
         {
@@ -1224,17 +1357,26 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
         {
             EMIT(ctx, "#endif\n");
         }
+        if (fn_outer[fi])
+        {
+            EMIT(ctx, "#endif\n");
+        }
         nfunc++;
     }
     EMIT(ctx, "static const ZcMfFunc _zc_mf_funcs[] = {\n");
     nfunc = 0;
-    for (ASTNode *f = funcs; f; f = f->next)
+    for (int fi = 0; fi < fn_count; fi++)
     {
-        if (f->kind != NODE_FUNCTION || !f->func.body || f->func.generic_params)
+        ASTNode *f = fn_list[fi];
+        if (!f->func.body || f->func.generic_params)
         {
             continue;
         }
         int has_params = f->func.count > 0 && f->func.arg_types;
+        if (fn_outer[fi])
+        {
+            EMIT(ctx, "#if %s\n", fn_outer[fi]);
+        }
         if (f->cfg_condition)
         {
             EMIT(ctx, "#if %s\n", f->cfg_condition);
@@ -1258,7 +1400,13 @@ static void emit_reload_manifest(ParserContext *ctx, ASTNode *types, ASTNode *gl
         {
             EMIT(ctx, "#endif\n");
         }
+        if (fn_outer[fi])
+        {
+            EMIT(ctx, "#endif\n");
+        }
     }
+    zfree(fn_list);
+    zfree(fn_outer);
     EMIT(ctx, "    {0}\n};\n");
 
     EMIT(ctx, "static const ZcManifest _zc_mf = {5, ");
@@ -1637,102 +1785,11 @@ void codegen_c_program(ParserContext *ctx, ASTNode *node)
         ASTNode *iter = merged_funcs;
         while (iter)
         {
-            if (iter->kind == NODE_IMPL)
+            if ((iter->kind == NODE_IMPL || iter->kind == NODE_IMPL_TRAIT) &&
+                impl_is_generic(ctx, iter))
             {
-                char *sname = iter->impl.struct_name;
-                if (!sname)
-                {
-                    iter = iter->next;
-                    continue;
-                }
-
-                // Resolve opaque alias
-                const char *resolved = find_type_alias(ctx, sname);
-
-                char *mangled = replace_string_type(sname);
-                ASTNode *def = find_struct_def(ctx, mangled);
-                if (!def && resolved)
-                {
-                    zfree(mangled);
-                    mangled = replace_string_type(resolved);
-                    def = find_struct_def(ctx, mangled);
-                }
-                int skip = 0;
-                if (def)
-                {
-                    if (def->kind == NODE_STRUCT && def->strct.is_template)
-                    {
-                        skip = 1;
-                    }
-                    else if (def->kind == NODE_ENUM && def->enm.is_template)
-                    {
-                        skip = 1;
-                    }
-                }
-                else
-                {
-                    char *buf = strip_template_suffix(sname);
-                    if (buf)
-                    {
-                        def = find_struct_def(ctx, buf);
-                        if (def && def->strct.is_template)
-                        {
-                            skip = 1;
-                        }
-                        zfree(buf);
-                    }
-                }
-                if (mangled)
-                {
-                    zfree(mangled);
-                }
-                if (skip)
-                {
-                    iter = iter->next;
-                    continue;
-                }
-            }
-            if (iter->kind == NODE_IMPL_TRAIT)
-            {
-                char *sname = iter->impl_trait.target_type;
-                if (!sname)
-                {
-                    iter = iter->next;
-                    continue;
-                }
-
-                char *mangled = replace_string_type(sname);
-                ASTNode *def = find_struct_def(ctx, mangled);
-                int skip = 0;
-                if (def)
-                {
-                    if (def->strct.is_template)
-                    {
-                        skip = 1;
-                    }
-                }
-                else
-                {
-                    char *buf = strip_template_suffix(sname);
-                    if (buf)
-                    {
-                        def = find_struct_def(ctx, buf);
-                        if (def && def->strct.is_template)
-                        {
-                            skip = 1;
-                        }
-                        zfree(buf);
-                    }
-                }
-                if (mangled)
-                {
-                    zfree(mangled);
-                }
-                if (skip)
-                {
-                    iter = iter->next;
-                    continue;
-                }
+                iter = iter->next;
+                continue;
             }
             if (iter->cfg_condition)
             {

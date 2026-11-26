@@ -140,6 +140,15 @@ host's pointer to it stays valid.
   block or a global, reached by value) **is pointed at the new version's function of the
   same name**. If that function's signature changed, it keeps calling the old one
   [`function_pointer_kept`].
+- **Any other call into old code runs the new code**: a function pointer in a heap object,
+  one handed to a library as a callback, a method kept the same way [`function_forwarded`],
+  [`method_forwarded`]. Each old function jumps to the newest version's function of the
+  same name. It follows its name from version to version only while the call means the
+  same: the same signature, and no type it takes or returns changed (a pointer to the
+  host's block is fine: the block is moved). Once that isn't so, it stays with the last
+  version that matched, and the reload says so: `old code still runs for: take_pt (it
+  takes or returns a Pt, which changed)` [`function_forward_type_changed`]. Needs old
+  versions kept (the default); x86-64 only for now.
 
 ### What it tells you
 
@@ -167,6 +176,7 @@ The lines:
 | `moved the globals: ...`, `moved the state (T) to the new layout: ...` | what moving did that wasn't simply keeping a value: added, dropped, converted, not carried |
 | `back to their initial values: ...` | globals reset: `@reset_on_reload`, or an edited initial value |
 | `function pointers in the state: ...` | which now call the new code, and which still call the old, and why |
+| `old code still runs for: ...` | old functions that don't run the new code, and why: signature changed, a type they take or return changed, or gone |
 
 `type_changed("T")` says whether the type `T` changed, itself or through what it holds.
 
@@ -198,14 +208,15 @@ These don't stop a reload. They are what to keep in mind.
 `free()`, so all of these keep working, but run the code they were made with:
 
 - a lambda: it keeps the body it was made with, as in hotreload-hx; what it calls by
-  name is also the old code;
-- a function pointer behind another pointer (in a heap object), or handed to a library;
-- a function pointer whose function's signature changed;
+  name runs the new code;
+- a function whose signature changed, or that takes or returns a type that changed,
+  called through a pointer kept from before (reported, see above);
 - a string literal: it points into the old version's memory [`string_literal_kept`].
 
-`keep_old(false)` deletes each old version when the next one loads. Use it only when
-nothing like that is kept: a call through one of them then crashes. Each old version
-costs its code's memory (printed: "N old versions kept loaded (K KB)" with libtcc 0.9.27).
+`keep_old(false)` deletes each old version when the next one loads, and old functions
+then don't run the new code. Use it only when nothing like that is kept: a call through
+one of them then crashes. Each old version costs its code's memory (printed: "N old
+versions kept loaded (K KB)" with libtcc 0.9.27).
 
 **Values that are not carried** when a type's layout changes, and are left at zero (or a
 global's initial value); each is in the "moved" line [`state_converted`]. Zero is a real
@@ -249,8 +260,8 @@ for that.
   pointer to a `Rock` stops the reload when `Rock` changes.
 - **Write the types of globals and statics** (`let speed: f32 = 3.0;`), so the host can
   keep them.
-- **Keep lambdas thin**: `fn(x: int) { on_hit(x); }` calls `on_hit` by name; edit
-  `on_hit`.
+- **Keep lambdas thin**: `fn(x: int) { on_hit(x); }` calls `on_hit` by name, which runs
+  the newest `on_hit`; edit that.
 - **Put derived data behind `@reset_on_reload`, and rebuilding in `@after_reload`.**
 - **Don't change the signature of a function the host looks up** without changing the
   host; that needs a restart anyway.
@@ -275,10 +286,18 @@ for that.
 - **Code pointers.** Vtables are refilled from a constant copy of the new version's.
   Function pointers in the state are matched by address against every loaded version's
   functions and pointed at the new version's of the same name and signature.
+- **Forwarding.** The manifest lists every function and method with its C signature. On
+  a reload, each function of the version replaced, and each older one still following its
+  name, gets a 5-byte jump to the new version's function at its entry (tcc starts every
+  function with an 11-byte prologue). Each version's code is mapped with mmap, so the
+  versions are near each other and a 32-bit jump reaches; one that doesn't goes through a
+  stub. Whether a name follows is decided once a reload, so a call through old code is one
+  jump however old it is. At 3000 generated modules (about 12,000 functions) this adds
+  about 15 ms to a reload.
 - **Order of a reload:** build and compile the new version; check its state can move (or
   refuse); the old version's `@before_reload`; switch; move the state; reset what is
   `@reset_on_reload` or has an edited initial value; refill vtables, re-point function
-  pointers; the new version's `@after_reload`.
+  pointers; forward old functions; the new version's `@after_reload`.
 
 ## Reference
 

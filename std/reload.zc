@@ -77,8 +77,12 @@ raw {
     #include <sys/stat.h>
     #include <time.h>
     #include <unistd.h>
+    #include <sys/mman.h>
     #ifdef __linux__
     #include <sys/inotify.h>
+    #endif
+    #if defined(__x86_64__) && !defined(_WIN32)
+    #define ZR_FORWARD 1 // old functions can be made to jump to new ones (zr_forward)
     #endif
 
     enum { ZR_MAX_INCLUDES = 32, ZR_MAX_REQUIRED = 32 };
@@ -142,6 +146,16 @@ raw {
         int ino_fd;     // inotify on the watched directory and those under it (Linux), or -1
         int ino_failed; // it couldn't be set up for ino_root: poll() scans every time
         char *ino_root; // the directory ino_fd watches
+        // Old functions made to jump to the new code (zr_forward): where, the bytes the jump
+        // replaced, the name, and whether it still follows the newest version of that name.
+        // (its page is left writable once made so: a later jump there needs no mprotect)
+        struct ZrFwd { unsigned char *at; unsigned char orig[5]; int next; unsigned char *stub; } *fwd;
+        unsigned nfwd, fwd_cap;
+        // The names followed: each with its followers (fwd entries, linked by `next`).
+        struct ZrFwdName { char *name; int head; } *fwd_names;
+        unsigned fwd_names_cap, fwd_names_used;
+        struct ZrStubs { unsigned char *page; size_t used, size; } *stubs; // far jumps
+        unsigned nstubs;
     } ZrReloader;
 
     static char *zr_strdup(const char *s)
@@ -227,7 +241,11 @@ raw {
         if (size < 0) return -1;
         long page = sysconf(_SC_PAGESIZE);
         v->mem_size = ((size_t)size + (size_t)page - 1) / (size_t)page * (size_t)page;
-        if (posix_memalign(&v->mem, (size_t)page, v->mem_size) != 0)
+        // Mapped, not malloc'd: every version then sits in the mmap region, near the others,
+        // so an old function's jump to a new one fits in 32 bits (zr_forward). (malloc puts
+        // a block this size in the mmap region or the heap, depending on what was freed.)
+        v->mem = mmap(NULL, v->mem_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (v->mem == MAP_FAILED)
         {
             v->mem = NULL;
             v->mem_size = 0;
@@ -239,9 +257,8 @@ raw {
     #endif
     }
 
-    // Deletes a version. With libtcc 0.9.27 its memory is first filled with 0xCC (x86's
-    // breakpoint instruction), so anything still using it fails at once instead of reading
-    // what happens to be left in freed memory.
+    // Deletes a version. With libtcc 0.9.27 its memory is unmapped, so anything still using
+    // it fails at once instead of reading what happens to be left there.
     // Runs a version's _zc_module_init or _zc_module_fini (from zc --reload), if it has one.
     static void zr_version_call(ZrVersion *v, const char *name)
     {
@@ -255,8 +272,7 @@ raw {
         if (v->tcc) tcc_delete(v->tcc);
         if (v->mem)
         {
-            memset(v->mem, 0xCC, v->mem_size);
-            free(v->mem);
+            munmap(v->mem, v->mem_size);
         }
         memset(v, 0, sizeof(*v));
     }
@@ -1787,6 +1803,309 @@ raw {
         }
     }
 
+    // ---- Old code that runs the new code -------------------------------------------------
+    //
+    // A function of an old version can still be called after a reload: through a pointer in
+    // the heap, one handed to a library, a closure, or an old vtable. Each one is made to run
+    // the new version's function of the same name instead: its first five bytes become a jump
+    // there (tcc starts every function with an 11-byte prologue, so there is room). A
+    // function follows its name from one version to the next only while the call means the
+    // same: the same signature, and no type it takes or returns changed. Once a step doesn't,
+    // it stays where it was (that version stays loaded), and the reload says so. Each reload
+    // moves everything still following to the newest version, so a call is one jump.
+    //
+    // Only while old versions are kept (the default): keep_old(false) deletes them, so the
+    // jumps are undone. x86-64 only; elsewhere old code runs as it did.
+
+    // A name -> function table of a manifest's functions, for one reload.
+    typedef struct { const ZcMfFunc **slot; unsigned cap; } ZrFnTable;
+
+    static void zr_fntab_init(ZrFnTable *t, const ZcManifest *m)
+    {
+        t->cap = 64;
+        while (m && t->cap < m->nfuncs * 2) t->cap *= 2;
+        t->slot = (const ZcMfFunc **)calloc(t->cap, sizeof(*t->slot));
+        for (unsigned i = 0; t->slot && m && i < m->nfuncs; i++)
+        {
+            const char *name = zr_s(m->funcs[i].name);
+            unsigned k = zr_hash(name) & (t->cap - 1);
+            while (t->slot[k] && strcmp(zr_s(t->slot[k]->name), name) != 0) k = (k + 1) & (t->cap - 1);
+            if (!t->slot[k]) t->slot[k] = &m->funcs[i]; // the first of a name
+        }
+    }
+
+    static const ZcMfFunc *zr_fntab_get(const ZrFnTable *t, const char *name)
+    {
+        if (!t->slot) return NULL;
+        unsigned k = zr_hash(name) & (t->cap - 1);
+        for (; t->slot[k]; k = (k + 1) & (t->cap - 1))
+            if (strcmp(zr_s(t->slot[k]->name), name) == 0) return t->slot[k];
+        return NULL;
+    }
+
+    // The type named in C type `ctype` without qualifiers, pointers or array bounds ("const
+    // struct Rock *" -> "Rock"), into `out`; "" for a function pointer.
+    static void zr_base_type(const char *ctype, char *out, size_t n)
+    {
+        out[0] = 0;
+        if (!ctype || strstr(ctype, "(*")) return;
+        char buf[256];
+        snprintf(buf, sizeof buf, "%s", ctype);
+        char *b = strchr(buf, '[');
+        if (b) *b = 0;
+        size_t len = 0;
+        for (char *w = strtok(buf, " *&\t"); w; w = strtok(NULL, " *&\t"))
+        {
+            if (!strcmp(w, "const") || !strcmp(w, "volatile") || !strcmp(w, "struct") ||
+                !strcmp(w, "union") || !strcmp(w, "enum") || !strcmp(w, "restrict"))
+                continue;
+            len = (size_t)snprintf(out, n, "%s", w);
+        }
+        (void)len;
+    }
+
+    // Why `was` (of the previous version) can't be followed by `now` (the new one), or NULL if
+    // it can. `why` holds the reason when there is one.
+    static const char *zr_fwd_why(ZrReloader *r, const ZcMfFunc *was, const ZcMfFunc *now,
+                                  char *why, size_t n)
+    {
+        if (!now) return "it's gone";
+        char *a = zr_fn_sig(was), *b = zr_fn_sig(now);
+        int same = a && b && !strcmp(a, b);
+        free(a);
+        free(b);
+        if (!same) return "its signature changed";
+        // The host's block is moved to the new layout in place: a pointer to it is right for
+        // the new code. Any other changed type, or one passed by value, isn't.
+        int amb = 0;
+        const char *st = r->state ? zr_state_type(r, r->types_now, &amb) : NULL;
+        char base[256];
+        for (unsigned j = 0; j <= now->nparams; j++)
+        {
+            const char *ctype = j < now->nparams ? now->params[j] : now->ret;
+            zr_base_type(ctype, base, sizeof base);
+            if (st && !amb && !strcmp(base, st) && strchr(zr_s(ctype), '*')) continue;
+            if (base[0] && zr_mf_find(r->types_now, base) &&
+                zr_mf_changed(r->types_prev, r->types_now, base, 0, NULL))
+            {
+                snprintf(why, n, "it takes or returns a %s, which changed", base);
+                return why;
+            }
+        }
+        return NULL;
+    }
+
+    #ifdef ZR_FORWARD
+    // Room for a 14-byte absolute jump within 2 GB of `near`, or NULL.
+    static unsigned char *zr_stub(ZrReloader *r, unsigned char *near)
+    {
+        for (unsigned i = 0; i < r->nstubs; i++)
+        {
+            struct ZrStubs *s = &r->stubs[i];
+            long long d = (long long)(s->page - near);
+            if (s->used + 16 <= s->size && d < (1LL << 30) && d > -(1LL << 30))
+            {
+                s->used += 16;
+                return s->page + s->used - 16;
+            }
+        }
+        long page = sysconf(_SC_PAGESIZE);
+        static const long long tries[] = {1LL << 20, -(1LL << 20), 1LL << 26, -(1LL << 26), 1LL << 29, -(1LL << 29)};
+        for (unsigned t = 0; t < sizeof tries / sizeof tries[0]; t++)
+        {
+            uintptr_t hint = ((uintptr_t)near + (uintptr_t)tries[t]) & ~(uintptr_t)(page - 1);
+            void *p = mmap((void *)hint, (size_t)page, PROT_READ | PROT_WRITE | PROT_EXEC,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED) continue;
+            long long d = (long long)((unsigned char *)p - near);
+            if (d >= (1LL << 30) || d <= -(1LL << 30))
+            {
+                munmap(p, (size_t)page);
+                continue;
+            }
+            struct ZrStubs *grown = (struct ZrStubs *)realloc(r->stubs, (r->nstubs + 1) * sizeof(*grown));
+            if (!grown)
+            {
+                munmap(p, (size_t)page);
+                return NULL;
+            }
+            r->stubs = grown;
+            r->stubs[r->nstubs++] = (struct ZrStubs){(unsigned char *)p, 16, (size_t)page};
+            return (unsigned char *)p;
+        }
+        return NULL;
+    }
+
+    // Writes `bytes` (n of them) at `at`, in code memory: its pages made writable (and left
+    // so: they can hold the module's data too, and this is a development build).
+    static int zr_code_write(unsigned char *at, const unsigned char *bytes, size_t n, int writable)
+    {
+        if (writable)
+        {
+            memcpy(at, bytes, n);
+            return 1;
+        }
+        long page = sysconf(_SC_PAGESIZE);
+        uintptr_t start = (uintptr_t)at & ~(uintptr_t)(page - 1);
+        uintptr_t end = ((uintptr_t)at + n + (uintptr_t)page - 1) & ~(uintptr_t)(page - 1);
+        if (mprotect((void *)start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) return 0;
+        memcpy(at, bytes, n);
+        return 1;
+    }
+
+    // `at` jumps to `to`: directly if it's within reach of a 32-bit offset, else through a
+    // stub near `at`.
+    // A far jump goes through `*stub`, made the first time one is needed and reused after.
+    static int zr_jump(ZrReloader *r, unsigned char *at, unsigned char *to, int writable,
+                       unsigned char **stub_of)
+    {
+        long long rel = (long long)(to - (at + 5));
+        if (rel >= (1LL << 31) || rel < -(1LL << 31))
+        {
+            unsigned char *stub = *stub_of ? *stub_of : zr_stub(r, at);
+            if (!stub) return 0;
+            *stub_of = stub;
+            unsigned char far[14] = {0xFF, 0x25, 0, 0, 0, 0}; // jmp *0(%rip), then the address
+            memcpy(far + 6, &to, 8);
+            memcpy(stub, far, sizeof far);
+            rel = (long long)(stub - (at + 5));
+        }
+        int32_t rel32 = (int32_t)rel;
+        unsigned char jmp[5] = {0xE9};
+        memcpy(jmp + 1, &rel32, 4);
+        return zr_code_write(at, jmp, 5, writable);
+    }
+    #endif
+
+    static void zr_fwd_free(ZrReloader *r)
+    {
+        for (unsigned i = 0; i < r->fwd_names_cap; i++) free(r->fwd_names[i].name);
+        free(r->fwd_names);
+        r->fwd_names = NULL;
+        r->fwd_names_cap = r->fwd_names_used = 0;
+        free(r->fwd);
+        r->fwd = NULL;
+        r->nfwd = r->fwd_cap = 0;
+    }
+
+    static void zr_fwd_undo(ZrReloader *r)
+    {
+    #ifdef ZR_FORWARD
+        for (unsigned i = 0; i < r->nfwd; i++) zr_code_write(r->fwd[i].at, r->fwd[i].orig, 5, 1);
+    #endif
+        zr_fwd_free(r);
+    }
+
+    // The followers of `name` (created empty if `make`), or NULL.
+    static struct ZrFwdName *zr_fwd_name(ZrReloader *r, const char *name, int make)
+    {
+        if (make && (r->fwd_names_used + 1) * 2 > r->fwd_names_cap)
+        {
+            unsigned cap = r->fwd_names_cap ? r->fwd_names_cap * 2 : 256;
+            struct ZrFwdName *t = (struct ZrFwdName *)calloc(cap, sizeof(*t));
+            if (!t) return NULL;
+            for (unsigned i = 0; i < r->fwd_names_cap; i++)
+            {
+                if (!r->fwd_names[i].name) continue;
+                unsigned k = zr_hash(r->fwd_names[i].name) & (cap - 1);
+                while (t[k].name) k = (k + 1) & (cap - 1);
+                t[k] = r->fwd_names[i];
+            }
+            free(r->fwd_names);
+            r->fwd_names = t;
+            r->fwd_names_cap = cap;
+        }
+        if (!r->fwd_names_cap) return NULL;
+        unsigned k = zr_hash(name) & (r->fwd_names_cap - 1);
+        for (; r->fwd_names[k].name; k = (k + 1) & (r->fwd_names_cap - 1))
+            if (!strcmp(r->fwd_names[k].name, name)) return &r->fwd_names[k];
+        if (!make) return NULL;
+        r->fwd_names[k].name = zr_strdup(name);
+        r->fwd_names[k].head = -1;
+        r->fwd_names_used++;
+        return &r->fwd_names[k];
+    }
+
+    // After a reload: old functions to the new version's. `prev` is the version just
+    // replaced, if it is still loaded (so its functions can be made to follow too).
+    static void zr_forward(ZrReloader *r, ZrVersion *prev, FILE *log)
+    {
+        if (!r->keep_old)
+        {
+            zr_fwd_undo(r);
+            return;
+        }
+    #ifdef ZR_FORWARD
+        if (!r->types_prev || !r->types_now) return;
+        ZrFnTable was, now;
+        zr_fntab_init(&was, r->types_prev);
+        zr_fntab_init(&now, r->types_now);
+        // The previous version's code memory made writable at once (0.9.27, where it's
+        // known), else page by page.
+        int writable = 0;
+        if (prev && prev->mem && prev->mem_size)
+            writable = mprotect(prev->mem, prev->mem_size, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+        int n_kept = 0;
+        char why_buf[320];
+        // Each name of the previous version, decided once: its followers, and its own
+        // function, go to the new version's, or stay where they are.
+        for (unsigned i = 0; i < r->types_prev->nfuncs; i++)
+        {
+            const ZcMfFunc *a = &r->types_prev->funcs[i];
+            const char *name = zr_s(a->name);
+            if (!a->addr || zr_fntab_get(&was, name) != a) continue;
+            const ZcMfFunc *b = zr_fntab_get(&now, name);
+            const char *why = zr_fwd_why(r, a, b, why_buf, sizeof why_buf);
+            struct ZrFwdName *fn = zr_fwd_name(r, name, !why && prev);
+            if (why)
+            {
+                if (b || strncmp(name, "_zc_", 4) != 0)
+                    fprintf(log, "%s%s (%s)", n_kept++ ? ", " : "reload: old code still runs for: ",
+                            name, why);
+                if (fn) fn->head = -1; // its followers stay with the previous version's
+                continue;
+            }
+            if (b->addr == a->addr) continue;
+            int kept = -1; // the followers still following, relinked
+            for (int e = fn ? fn->head : -1; e >= 0;)
+            {
+                int next = r->fwd[e].next;
+                if (zr_jump(r, r->fwd[e].at, (unsigned char *)b->addr, 1, &r->fwd[e].stub))
+                {
+                    r->fwd[e].next = kept;
+                    kept = e;
+                }
+                e = next;
+            }
+            if (fn) fn->head = kept;
+            if (!prev || !fn) continue;
+            if (r->nfwd == r->fwd_cap)
+            {
+                unsigned cap = r->fwd_cap ? r->fwd_cap * 2 : 256;
+                struct ZrFwd *grown = (struct ZrFwd *)realloc(r->fwd, cap * sizeof(*grown));
+                if (!grown) break;
+                r->fwd = grown;
+                r->fwd_cap = cap;
+            }
+            struct ZrFwd *f = &r->fwd[r->nfwd];
+            f->at = (unsigned char *)a->addr;
+            memcpy(f->orig, f->at, 5);
+            f->stub = NULL;
+            if (!zr_jump(r, f->at, (unsigned char *)b->addr, writable, &f->stub)) continue;
+            f->next = fn->head;
+            fn->head = (int)r->nfwd++;
+        }
+        if (n_kept) fputc('\n', log);
+        // Names the new version doesn't have at all were reported above; a name only older
+        // versions had keeps its followers where they are.
+        free(was.slot);
+        free(now.slot);
+    #else
+        (void)prev;
+        (void)log;
+    #endif
+    }
+
     // After a reload: the function pointers in the host's block and the globals.
     static void zr_repoint_state(ZrReloader *r, FILE *log)
     {
@@ -1998,6 +2317,8 @@ raw {
         if (r->types_prev && r->types_now && log) zr_reset_globals(r, log);
         zr_note_fns(r, r->types_now);
         if (r->types_prev && r->types_now && log) zr_repoint_state(r, log);
+        if (r->types_prev && r->types_now && log)
+            zr_forward(r, keep_current ? &r->old[r->old_count - 1] : NULL, log);
         if (log) fclose(log);
         if (r->current.owns_globals) zr_store_set(r, zr_version_manifest(&r->current));
 
@@ -2089,6 +2410,12 @@ raw {
     #ifdef __linux__
         zr_ino_close(r);
     #endif
+        zr_fwd_free(r); // the code they're in is gone
+
+    #ifdef ZR_FORWARD
+        for (unsigned i = 0; i < r->nstubs; i++) munmap(r->stubs[i].page, r->stubs[i].size);
+    #endif
+        free(r->stubs);
         for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
         for (int i = 0; i < r->required_count; i++) free(r->required[i]);
         for (int i = 0; i < r->fetched_count; i++) free(r->fetched[i]);

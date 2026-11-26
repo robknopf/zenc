@@ -1,0 +1,21 @@
+// A method kept as a callback (in the heap, as a library would keep it) runs the new
+// version's method after a reload, as a function does.
+struct Counter { n: int; }
+impl Counter {
+    fn bump(self) -> int {
+        return self.n + 100;
+    }
+}
+struct Box { cb: fn*(Counter*) -> int; }
+struct State { kept: void*; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.kept == NULL {
+        let b = (Box*)malloc(sizeof(Box));
+        b.cb = Counter::bump;
+        state.kept = (void*)b;
+    }
+    let b = (Box*)state.kept;
+    let c = Counter { n: 5 };
+    println "version 2: bump gives {b.cb(&c)}";
+}

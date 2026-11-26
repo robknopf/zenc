@@ -7,4 +7,5 @@ greet version 2
 greet version 2
 --- step 3
 reload: function pointers in the state: state.hook still calls the old greet (its signature changed), hooks.on still calls the old greet (its signature changed)
+reload: old code still runs for: greet (its signature changed)
 greet version 2
