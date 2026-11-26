@@ -32,7 +32,17 @@ raw {
     {
         snprintf(out, n, "@link_name(\"poll_value\")\nfn poll_value() -> int {\n    return %d;\n}\n", value);
     }
+
+    #include <dlfcn.h>
+    // The file the code at `p` was loaded from, or "" (a version compiled into memory).
+    static const char *loaded_from(void *p)
+    {
+        Dl_info info;
+        if (p && dladdr(p, &info) && info.dli_fname) return info.dli_fname;
+        return "";
+    }
 }
+extern fn loaded_from(p: void*) -> const char*;
 extern fn put(path: const char*, text: const char*);
 extern fn module_src(out: char*, n: usize, value: int);
 
@@ -75,6 +85,13 @@ fn main(argc: int, argv: char**) -> int {
     code.verbose(false);
     if !code.build() { println "FAIL the module does not build"; return 1; }
     let value: fn*() -> int = code.symbol("poll_value");
+
+    // Each version is a shared library (for debuggers) unless ZC_RELOAD_MEMORY is set.
+    let from: const char* = loaded_from((void*)value);
+    let mem = getenv("ZC_RELOAD_MEMORY");
+    let in_memory = mem != NULL && mem[0] != 0;
+    let is_library = strstr(from, "module.c.") != NULL && strstr(from, ".so") != NULL;
+    check("loaded as a shared library beside the C file", is_library, !in_memory);
 
     check("nothing changed (first poll)", poll_now(&code), false);
     check("nothing changed", poll_now(&code), false);

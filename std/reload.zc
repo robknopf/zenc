@@ -80,6 +80,7 @@ raw {
     #include <setjmp.h>
     #include <signal.h>
     #include <sys/mman.h>
+    #include <dlfcn.h>
     #ifdef __linux__
     #include <sys/inotify.h>
     #endif
@@ -108,6 +109,8 @@ raw {
         void *mem;       // the code's memory, ours with libtcc 0.9.27; NULL with 0.9.28
         size_t mem_size; // 0 when not known (0.9.28)
         int owns_globals; // compiled with ZC_RELOAD_OWN_GLOBALS: the globals' storage is here
+        void *dl;         // the version as a shared library (dlopen), for debuggers; or NULL
+        char *so_path;    // that library's file
     } ZrVersion;
 
     typedef struct
@@ -153,6 +156,9 @@ raw {
         int ino_failed; // it couldn't be set up for ino_root: poll() scans instead
         int force_scan; // ZC_RELOAD_SCAN set: scan, never inotify (to test the scanning)
         double last_scan; // when poll() last scanned the files (without inotify), or 0
+        int in_memory;    // compile into memory, not to a shared library (ZC_RELOAD_MEMORY, or
+                          // writing or loading one failed)
+        unsigned so_serial; // names each library file
         char *ino_root; // the directory ino_fd watches
         // Old functions made to jump to the new code (zr_forward): where, the bytes the jump
         // replaced, the name, and whether it still follows the newest version of that name.
@@ -275,15 +281,28 @@ raw {
     // Deletes a version. With libtcc 0.9.27 its memory is unmapped, so anything still using
     // it fails at once instead of reading what happens to be left there.
     // Runs a version's _zc_module_init or _zc_module_fini (from zc --reload), if it has one.
+    // The address of `name` in a version: from its shared library, or from tcc's memory.
+    static void *zr_sym(ZrVersion *v, const char *name)
+    {
+        if (v->dl) return dlsym(v->dl, name);
+        return v->tcc ? tcc_get_symbol(v->tcc, name) : NULL;
+    }
+
     static void zr_version_call(ZrVersion *v, const char *name)
     {
         if (!v->tcc) return;
-        void (*fn)(void) = (void (*)(void))tcc_get_symbol(v->tcc, name);
+        void (*fn)(void) = (void (*)(void))zr_sym(v, name);
         if (fn) fn();
     }
 
     static void zr_version_delete(ZrVersion *v)
     {
+        if (v->dl) dlclose(v->dl);
+        if (v->so_path)
+        {
+            remove(v->so_path);
+            free(v->so_path);
+        }
         if (v->tcc) tcc_delete(v->tcc);
         if (v->mem)
         {
@@ -305,6 +324,8 @@ raw {
         r->ino_fd = -1;
         const char *scan = getenv("ZC_RELOAD_SCAN");
         r->force_scan = scan && *scan && strcmp(scan, "0") != 0;
+        const char *mem = getenv("ZC_RELOAD_MEMORY");
+        r->in_memory = mem && *mem && strcmp(mem, "0") != 0;
         return r;
     }
 
@@ -1650,7 +1671,7 @@ raw {
     static const ZcManifest *zr_version_manifest(ZrVersion *v)
     {
         const ZcManifest *(*get)(void) =
-            (const ZcManifest *(*)(void))tcc_get_symbol(v->tcc, "_zc_manifest");
+            (const ZcManifest *(*)(void))zr_sym(v, "_zc_manifest");
         const ZcManifest *m = get ? get() : NULL;
         return m && m->format >= 5 ? m : NULL; // the layout this file reads
     }
@@ -1796,7 +1817,100 @@ raw {
     // Compile the module's C into `v`, defining its globals (`own`) or using the ones in the
     // store. Errors are printed only for a version that defines them: a failure to use the
     // store is retried that way.
+    // Each version is a shared library, written beside the C file with debug information and
+    // loaded with dlopen, so a debugger sees it as it sees any library: breakpoints by .zc
+    // file and line (the C's #line directives) bind in every version as it loads, and
+    // backtraces and variables read through it. DWARF with libtcc 0.9.28 (-gdwarf); 0.9.27
+    // writes stabs, which gdb no longer binds breakpoints in. If writing or loading the
+    // library fails, or with ZC_RELOAD_MEMORY=1, the code is compiled into memory instead,
+    // where a debugger sees no symbols.
+    static int zr_compile_memory(ZrReloader *r, ZrVersion *v, int own);
+
+    // Library files left by a process that ended without free() (killed, or crashed outside
+    // call()): <c_file>.<pid>.<n>.so of a pid no longer running. (A file can't go as soon as
+    // it's loaded: a debugger reads the debug information from it.)
+    static void zr_remove_stale_libraries(ZrReloader *r)
+    {
+        char *dir_path = zr_strdup(r->c_file);
+        if (!dir_path) return;
+        char *slash = strrchr(dir_path, '/');
+        const char *base = slash ? slash + 1 : r->c_file;
+        if (slash) *slash = 0;
+        DIR *dir = opendir(slash ? dir_path : ".");
+        size_t blen = strlen(base);
+        struct dirent *e;
+        while (dir && (e = readdir(dir)) != NULL)
+        {
+            const char *n = e->d_name;
+            int pid = 0;
+            unsigned serial = 0;
+            char tail[8];
+            if (strncmp(n, base, blen) != 0 || n[blen] != '.') continue;
+            if (sscanf(n + blen + 1, "%d.%u.%3s", &pid, &serial, tail) != 3 || strcmp(tail, "so")) continue;
+            if (pid <= 0 || pid == (int)getpid() || kill(pid, 0) == 0) continue;
+            size_t len = strlen(dir_path) + strlen(n) + 2;
+            char *path = (char *)malloc(len);
+            if (!path) break;
+            snprintf(path, len, "%s/%s", slash ? dir_path : ".", n);
+            remove(path);
+            free(path);
+        }
+        if (dir) closedir(dir);
+        free(dir_path);
+    }
+
     static int zr_compile(ZrReloader *r, ZrVersion *v, int own)
+    {
+        if (r->in_memory) return zr_compile_memory(r, v, own);
+        if (r->so_serial == 0) zr_remove_stale_libraries(r);
+        memset(v, 0, sizeof(*v));
+        v->tcc = tcc_new();
+        if (!v->tcc) return -1;
+        tcc_set_error_func(v->tcc, NULL, own ? zr_on_tcc_error : zr_on_tcc_quiet);
+    #ifdef TCC_RELOCATE_AUTO
+        tcc_set_options(v->tcc, "-g");
+    #else
+        tcc_set_options(v->tcc, "-gdwarf");
+    #endif
+        // The module's names bind to its own definitions first: without it the dynamic
+        // linker would take a global or function of the same name in the host or libc
+        // (opterr, or a host's `update`) for the module's own.
+        tcc_set_options(v->tcc, "-Wl,-Bsymbolic");
+        tcc_set_output_type(v->tcc, TCC_OUTPUT_DLL);
+        for (int i = 0; i < r->include_count; i++) tcc_add_include_path(v->tcc, r->includes[i]);
+        tcc_define_symbol(v->tcc, "_Thread_local", "");
+        tcc_define_symbol(v->tcc, "__thread", "");
+        if (own) tcc_define_symbol(v->tcc, "ZC_RELOAD_OWN_GLOBALS", "1");
+        else
+            for (unsigned i = 0; i < r->nstore; i++)
+                tcc_add_symbol(v->tcc, r->store[i].name, r->store[i].addr);
+        if (tcc_add_file(v->tcc, r->c_file) == -1)
+        {
+            zr_version_delete(v);
+            return -1; // the C doesn't compile: not a reason to change how it's loaded
+        }
+        size_t len = strlen(r->c_file) + 64;
+        v->so_path = (char *)malloc(len);
+        if (v->so_path)
+            snprintf(v->so_path, len, "%s.%d.%u.so", r->c_file, (int)getpid(), r->so_serial++);
+        if (v->so_path && tcc_output_file(v->tcc, v->so_path) == 0)
+            v->dl = dlopen(v->so_path, RTLD_NOW | RTLD_LOCAL);
+        if (!v->dl)
+        {
+            if (r->verbose)
+                fprintf(stderr, "reload: the module can't be loaded as a shared library (%s); "
+                                "compiling it into memory, where a debugger sees no symbols\n",
+                        v->so_path ? dlerror() : "out of memory");
+            zr_version_delete(v);
+            r->in_memory = 1;
+            return zr_compile_memory(r, v, own);
+        }
+        const ZcManifest *m = own ? zr_version_manifest(v) : NULL;
+        v->owns_globals = m && m->nglobals > 0;
+        return 0;
+    }
+
+    static int zr_compile_memory(ZrReloader *r, ZrVersion *v, int own)
     {
         memset(v, 0, sizeof(*v));
         v->tcc = tcc_new();
@@ -2714,15 +2828,20 @@ raw {
             strcat(incs, "\" ");
         }
         size_t len = strlen(r->zc) + strlen(r->source) + strlen(r->c_file) + incs_len +
-                     (r->zc_flags ? strlen(r->zc_flags) : 0) + 64;
+                     (r->zc_flags ? strlen(r->zc_flags) : 0) + 64 + 4096; // + an absolute path
         char *cmd = (char *)malloc(len);
         if (!cmd)
         {
             free(incs);
             return 0;
         }
-        snprintf(cmd, len, "\"%s\" transpile --reload -q %s%s \"%s\" -o \"%s\" 1>&2", r->zc,
-                 incs, r->zc_flags ? r->zc_flags : "", r->source, r->c_file);
+        // The source by its absolute path: zc then writes the C's #line directives with
+        // absolute paths, which a debugger finds the .zc files by wherever it runs.
+        char *abs_source = realpath(r->source, NULL);
+        snprintf(cmd, len,
+                 "\"%s\" transpile --reload -q %s%s \"%s\" -o \"%s\" 1>&2", r->zc, incs,
+                 r->zc_flags ? r->zc_flags : "", abs_source ? abs_source : r->source, r->c_file);
+        free(abs_source);
         free(incs);
         int rc = system(cmd);
         free(cmd);
@@ -2938,14 +3057,14 @@ raw {
         }
         if (!known && r->fetched_count < r->fetched_cap) r->fetched[r->fetched_count++] = zr_strdup(name);
         if (!r->current.tcc) return NULL;
-        return tcc_get_symbol(r->current.tcc, name);
+        return zr_sym(&r->current, name);
     }
 
     static const void *zr_manifest(void *h)
     {
         ZrReloader *r = (ZrReloader *)h;
         const ZcManifest *(*get)(void) =
-            r->current.tcc ? (const ZcManifest *(*)(void))tcc_get_symbol(r->current.tcc, "_zc_manifest") : NULL;
+            r->current.tcc ? (const ZcManifest *(*)(void))zr_sym(&r->current, "_zc_manifest") : NULL;
         return get ? get() : NULL;
     }
 

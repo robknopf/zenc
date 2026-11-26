@@ -294,6 +294,41 @@ for that.
 - Types are matched by their C name. Two structs of the same name under different `@cfg`
   are one entry (only one is compiled).
 
+## Debugging
+
+Each version is a shared library with debug information, so a debugger (gdb, and VS Code's
+C/C++ debugger, which drives gdb) sees the module's code as it sees any library's:
+
+- **Breakpoints by `.zc` file and line** bind when a version loads, in every version that
+  has that line: set one in `src/game/rock.zc` before the program starts, or while it runs,
+  and it stops there in the version running now and in the next one after a save.
+- **Backtraces** go from the module's functions, at their `.zc` lines, into the host's.
+- **Variables, stepping** by `.zc` line, and `list` (the C's `#line` directives give the
+  `.zc` files by their absolute path).
+
+It needs libtcc 0.9.28, which writes DWARF (`-gdwarf`). With 0.9.27 the libraries are written
+with stabs, which gdb no longer binds breakpoints in; everything else works the same.
+
+The libraries are written beside the module's C file (`build/game.c.<pid>.<n>.so`), and
+removed by `free()`; those of a process that ended without it are removed at the next start.
+`ZC_RELOAD_MEMORY=1` compiles into memory instead, as it was before, where a debugger sees no
+symbols; it is also what happens if a library can't be written or loaded (the reload says
+so). Writing the debug information costs a little per reload: about 50 ms at 1000 generated
+modules, 230 ms at 3000.
+
+Each library is linked so that its names bind to its own definitions (`-Bsymbolic`): a
+module's global or function of the same name as one in the host or libc stays the module's
+[`global_name_taken`].
+
+In VS Code, a `cppdbg` launch configuration for the host is enough; breakpoints in `.zc`
+files show as unbound until the module loads. For gdb on the command line, `set breakpoint
+pending on` lets a breakpoint wait for the library.
+
+One thing to keep apart: forwarding (above) writes a jump over the first 5 bytes of an old
+function. A breakpoint set on a function's name or a line is past its prologue (11 bytes
+from tcc), so the two don't meet; one set on the exact address of an old function's entry
+(`break *0x...`) would.
+
 ## Writing code that reloads well
 
 - **Keep state in globals, or in one struct the host keeps.** Both survive, and follow
@@ -318,6 +353,10 @@ for that.
   out: they are `sizeof`, `__alignof__` and `offsetof` expressions)
   [`manifest_describes_types`], every global with its type, address and initial value,
   every function with its address and C signature.
+- **Loading.** Each version is compiled by libtcc into a shared library (`-gdwarf`,
+  `-Bsymbolic`) beside the C file and loaded with `dlopen`; its globals that the store
+  holds are given to it with `tcc_add_symbol`, which writes them into the library as
+  absolute symbols at the store's addresses. Symbols are looked up with `dlsym`.
 - **Storage.** Each mutable global, `static` local and vtable is emitted twice, behind
   `ZC_RELOAD_OWN_GLOBALS`: defined, and `extern`. The `Reloader` compiles the first
   version to define them, and every later version with them `extern`, pointed at the
