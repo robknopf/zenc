@@ -2253,7 +2253,8 @@ static void append(char **out, size_t *used, size_t *capacity, const char *text,
 
 char *lsp_c_headers_hover(const CHeaderSymbol *symbol, const CHeaderOrigin *via)
 {
-    HeaderFile *header = symbol ? find_cached_header(symbol->path) : NULL;
+    // (read if it isn't yet: lsp_c_decls.c finds declarations in headers of its own)
+    HeaderFile *header = symbol ? get_header(symbol->path) : NULL;
     if (!header || !header->text || symbol->end_line >= header->line_count)
     {
         return NULL;

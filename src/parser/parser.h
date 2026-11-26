@@ -528,7 +528,8 @@ struct ParserContext
     char **c_names;
     unsigned c_names_cap, c_names_count;
     int c_names_ready;
-    int is_comptime;         // Flag for comptime execution context
+    void *c_decls;   ///< What the program's C declares, by name (c_decls.h); NULL if not read.
+    int is_comptime; // Flag for comptime execution context
     char **extern_symbols;   ///< Explicitly declared extern symbols.
     int extern_symbol_count; ///< Count of external symbols.
 
@@ -1025,6 +1026,24 @@ int should_suppress_undef_warning(ParserContext *ctx, const char *name);
 void c_names_scan(ParserContext *ctx, ASTNode *root);
 /** @brief `name` is declared by the program's C (after c_names_scan). */
 int c_name_known(ParserContext *ctx, const char *name);
+/** @brief The names and declarations of one program's C, kept apart from the context (the
+ * LSP keeps one for each open document; c_names_load() makes it the context's). */
+typedef struct CNamesState
+{
+    char **names;
+    unsigned cap, count;
+    int ready;
+    void *decls;
+    unsigned long long unit_key; ///< What it was read from (its reader's to set)
+} CNamesState;
+/** @brief The context's C names into `s`. */
+void c_names_save(ParserContext *ctx, CNamesState *s);
+/** @brief `s` (or none, with NULL) as the context's C names. */
+void c_names_load(ParserContext *ctx, const CNamesState *s);
+/** @brief Reads `root`'s C into `s` (also in LSP mode), and makes it the context's. */
+void c_names_scan_into(ParserContext *ctx, ASTNode *root, CNamesState *s);
+/** @brief Adds `name` (n bytes) to the names the program's C declares. */
+void c_name_note(ParserContext *ctx, const char *name, size_t n);
 /** @brief The C name closest to `name` (two edits at most), or NULL. */
 const char *c_name_closest(ParserContext *ctx, const char *name);
 void init_builtins(void);

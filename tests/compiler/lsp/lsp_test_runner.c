@@ -534,10 +534,9 @@ static void test_completion_prefix(void)
         close(fd);
     }
 
-    send_request(
-        "{\"jsonrpc\": \"2.0\", \"method\": \"textDocument/didOpen\", \"params\": "
-        "{\"textDocument\": {\"uri\": \"file:///tmp/test_prefix.zc\", \"languageId\": "
-        "\"zenc\", \"version\": 1, \"text\": \"fn main() { pr }\"}}}");
+    send_request("{\"jsonrpc\": \"2.0\", \"method\": \"textDocument/didOpen\", \"params\": "
+                 "{\"textDocument\": {\"uri\": \"file:///tmp/test_prefix.zc\", \"languageId\": "
+                 "\"zenc\", \"version\": 1, \"text\": \"fn main() { pr }\"}}}");
     usleep(100000);
 
     // Request completion at line 0, character 14 (cursor after 'pr', before ' }')
@@ -1046,6 +1045,10 @@ static void expect_completion(int id, const char *path, int line, int character,
 {
     cJSON *response = position_request(id, "textDocument/completion", path, line, character);
     cJSON *items = cJSON_GetObjectItem(response, "result");
+    if (cJSON_IsObject(items))
+    {
+        items = cJSON_GetObjectItem(items, "items"); // a CompletionList (isIncomplete)
+    }
     int found = 0;
     int keywords = 0;
     for (int i = 0; i < cJSON_GetArraySize(items); i++)
@@ -1091,6 +1094,84 @@ static void test_c_header_completion(void)
     // A header re-exported by an imported module (use_a.zc, from test_c_header_reexports).
     expect_completion(834, C_TEST_DIR "/use_a.zc", 3, 11, "mod_function", 3);
     printf("PASS: test_c_header_completion\n");
+}
+
+// The C a document includes, read as a build reads it (the preprocessor, then tree-sitter):
+// what only that sees (a function a macro declares), the C declaration in hover, C calls
+// checked as you type, C names and a C struct's fields completed.
+static void test_c_decls(void)
+{
+    printf("Running test_c_decls...\n");
+    mkdir(C_TEST_DIR, 0755);
+    mkdir(C_TEST_DIR "/include", 0755);
+    write_file(C_TEST_DIR "/include/decls.h", "#define DECLARE(name) int name(void);\n"
+                                              "DECLARE(made_by_macro)\n"
+                                              "typedef struct { float x, y; } dvec2;\n"
+                                              "dvec2 dvec2_make(float x, float y);\n"
+                                              "typedef enum { D_RED, D_GREEN } dcolor;\n"
+                                              "typedef enum { D_SMALL, D_LARGE } dsize;\n"
+                                              "void dpaint(dcolor c);\n"
+                                              "int dadd3(int a, int b, int c);\n");
+    const char *path = C_TEST_DIR "/decls.zc";
+    const char *text = "//> include: " C_TEST_DIR "/include\n"
+                       "include \"decls.h\"\n"
+                       "\n"
+                       "fn main() {\n"
+                       "    let v = dvec2_make(1.0, 2.0);\n"
+                       "    let k = made_by_macro();\n"
+                       "    dadd3(1, 2);\n"
+                       "    dpaint(D_LARGE);\n"
+                       "    println \"{v.x} {k}\";\n"
+                       "}\n";
+    open_document(path, text);
+
+    int arguments = 0, enums = 0;
+    for (int i = 0; i < 20 && !(arguments && enums); i++)
+    {
+        char *message = read_message();
+        if (!message)
+        {
+            break;
+        }
+        if (strstr(message, "publishDiagnostics") && strstr(message, "decls.zc"))
+        {
+            arguments = strstr(message, "'dadd3' takes 3 arguments, but 2 were given") != NULL;
+            enums = strstr(message, "Argument 1 of 'dpaint' is a 'dsize', but the parameter "
+                                    "is a 'dcolor'") != NULL;
+            if (!(arguments && enums))
+            {
+                printf("Diagnostics: %s\n", message);
+            }
+            free(message);
+            break;
+        }
+        free(message);
+    }
+    if (!arguments || !enums)
+    {
+        fail("No diagnostic for a C call with the wrong arguments");
+    }
+
+    expect_definition(840, "a function a macro declares", path, 5, 14, "/include/decls.h", 1);
+    expect_definition(841, "a C function", path, 4, 14, "/include/decls.h", 3);
+    expect_hover(842, "a C function", path, 4, 14, "dvec2 dvec2_make(float x, float y);");
+    expect_hover(843, "a C enum constant", path, 7, 13, "D_LARGE");
+
+    // Completing: the document as it is while typing (it doesn't parse), its C read before.
+    open_document(path, "//> include: " C_TEST_DIR "/include\n"
+                        "include \"decls.h\"\n"
+                        "\n"
+                        "fn main() {\n"
+                        "    let v = dvec2_make(1.0, 2.0);\n"
+                        "    v.\n"
+                        "    dvec2_\n"
+                        "    made_\n"
+                        "}\n");
+    expect_completion(844, path, 5, 6, "x", 5);
+    expect_completion(845, path, 5, 6, "y", 5);
+    expect_completion(846, path, 6, 10, "dvec2_make", 3);
+    expect_completion(847, path, 7, 9, "made_by_macro", 3);
+    printf("PASS: test_c_decls\n");
 }
 
 static void write_index_fixture(const char *path, const char *content)
@@ -1780,8 +1861,7 @@ static void test_std_import_in_other_project(void)
     mkdir("/tmp/zc_lsp_std", 0755);
     write_config_fixture("/tmp/zc_lsp_std/main.zc",
                          "import \"std/vec.zc\"\nfn main() { let v = Vec<int>::new(); }\n");
-    const char *main_src =
-        "import \\\"std/vec.zc\\\"\\nfn main() { let v = Vec<int>::new(); }\\n";
+    const char *main_src = "import \\\"std/vec.zc\\\"\\nfn main() { let v = Vec<int>::new(); }\\n";
 
     // An editor starts the server in the workspace, where "./std" does not exist.
     global_len = 0;
@@ -2008,6 +2088,7 @@ int main(void)
     test_c_header_symbols();
     test_c_header_reexports();
     test_c_header_completion();
+    test_c_decls();
     test_shutdown();
     send_request("{\"jsonrpc\": \"2.0\", \"method\": \"exit\", \"params\": {}}");
     waitpid(child_pid, NULL, 0);

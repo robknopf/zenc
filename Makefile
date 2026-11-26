@@ -58,7 +58,7 @@ endif
 # -Wreturn-local-addr, older clang only -Wreturn-stack-address. An unknown warning
 # option is an error under -Werror, so use the name the compiler accepts.
 RETURN_ADDR_WARN := $(shell echo "int x;" | $(CC) -Werror -Wreturn-local-addr -x c - -c -o /dev/null 2>/dev/null && echo -Wreturn-local-addr || (echo "int x;" | $(CC) -Werror -Wreturn-stack-address -x c - -c -o /dev/null 2>/dev/null && echo -Wreturn-stack-address))
-CFLAGS = -std=$(C_STD) -g -Wall -Wextra -Wshadow -Wformat=2 -Wmissing-prototypes -Wstrict-prototypes -Wnull-dereference -Wundef -Wfloat-equal -Wmissing-field-initializers -Wsign-compare -Wtype-limits -Wuninitialized -Wdouble-promotion -Wtautological-compare -Wshift-negative-value -Wdangling-else $(RETURN_ADDR_WARN) -Wconversion -Wno-float-conversion -Wswitch-default -Wvla -Wimplicit-fallthrough -Wredundant-decls -Wcast-align -Wpacked -Wdisabled-optimization -fstack-protector-strong $(DEPFLAGS) $(TCC_EXTRA) $(if $(filter 1,$(WERROR)),-Werror -Wno-error=sign-conversion,) -I./src -I./src/ast -I./src/parser -I./src/codegen -I./plugins -I./src/zen -I./src/utils -I./src/lexer -I./src/analysis -I./src/lsp -I./src/diagnostics $(DEFINES)
+CFLAGS = -std=$(C_STD) -g -Wall -Wextra -Wshadow -Wformat=2 -Wmissing-prototypes -Wstrict-prototypes -Wnull-dereference -Wundef -Wfloat-equal -Wmissing-field-initializers -Wsign-compare -Wtype-limits -Wuninitialized -Wdouble-promotion -Wtautological-compare -Wshift-negative-value -Wdangling-else $(RETURN_ADDR_WARN) -Wconversion -Wno-float-conversion -Wswitch-default -Wvla -Wimplicit-fallthrough -Wredundant-decls -Wcast-align -Wpacked -Wdisabled-optimization -fstack-protector-strong $(DEPFLAGS) $(TCC_EXTRA) $(if $(filter 1,$(WERROR)),-Werror -Wno-error=sign-conversion,) -I./src -I./src/ast -I./src/parser -I./src/codegen -I./plugins -I./src/zen -I./src/utils -I./src/lexer -I./src/analysis -I./src/lsp -I./src/diagnostics -I./vendor/tree-sitter/include $(DEFINES)
 
 # Detect Clang by macro (works even when CC=cc on macOS, or CC=clang on Linux)
 # Uses recursive = so it re-evaluates with target-specific CC overrides (e.g. msan: CC=clang)
@@ -145,7 +145,7 @@ DEFINES += -DZC_HAS_ASTDUMP_BACKEND=$(ZC_BACKENDS)
 
 # Source files read from src-sources.txt, filtered by feature selection.
 ALL_SRCS := $(shell cat src-sources.txt)
-ZC_FILTER_LSP = $(if $(filter-out 1,$(ZC_LSP)),src/lsp/lsp_main.c src/lsp/lsp_analysis.c src/lsp/lsp_semantic.c src/lsp/lsp_index.c src/lsp/lsp_locals.c src/lsp/lsp_formatter.c src/lsp/lsp_project.c src/lsp/lsp_c_headers.c src/lsp/lsp_config.c src/lsp/json_rpc.c)
+ZC_FILTER_LSP = $(if $(filter-out 1,$(ZC_LSP)),src/lsp/lsp_main.c src/lsp/lsp_analysis.c src/lsp/lsp_semantic.c src/lsp/lsp_index.c src/lsp/lsp_locals.c src/lsp/lsp_formatter.c src/lsp/lsp_project.c src/lsp/lsp_c_headers.c src/lsp/lsp_c_decls.c src/lsp/lsp_config.c src/lsp/json_rpc.c)
 ZC_FILTER_REPL = $(if $(filter-out 1,$(ZC_REPL)),src/repl/% src/platform/console.c)
 ZC_FILTER_PLUGINS = $(if $(filter-out 1,$(ZC_PLUGINS)),src/plugins/% src/parser/utils/utils_plugins.c)
 ZC_FILTER_BACKENDS = $(if $(filter-out 1,$(ZC_BACKENDS)),src/codegen/codegen_backend_cpp.c src/codegen/codegen_backend_cuda.c src/codegen/codegen_backend_objc.c src/codegen/codegen_backend_json.c src/codegen/codegen_backend_lisp.c src/codegen/codegen_backend_dot.c src/codegen/codegen_backend_astdump.c)
@@ -221,9 +221,19 @@ TOOLS_COMMON = $(OBJ_DIR)/src/tools/tool_common.o
 
 # Objects shared by zc and the standalone tools, excluding the tool-specific
 # lsp/repl/zen sources (those only ship in their respective binaries).
+# Vendored C (vendor/, see vendor/README.md): tree-sitter and its C grammar, which read the
+# declarations of the C headers a program includes. Built with their own flags: they are
+# not this project's code, and are kept as released.
+VENDOR_OBJS = $(OBJ_DIR)/vendor/tree-sitter/src/lib.o $(OBJ_DIR)/vendor/tree-sitter-c/src/parser.o
+VENDOR_CFLAGS = -std=gnu11 -O2 -w -fno-strict-aliasing -Ivendor/tree-sitter/include -Ivendor/tree-sitter/src
+
+$(OBJ_DIR)/vendor/%.o: vendor/%.c
+	@$(MKDIR) $(dir $@)
+	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
 TOOL_BASE_OBJS = $(CORE_OBJS) $(ANALYSIS_OBJS) $(CODEGEN_OBJS) $(MISRA_OBJS) \
-                 $(PLATFORM_OBJS) $(UTILS_OBJS) $(DIAG_OBJS) $(PLUGIN_OBJS)
-ZC_BASE_OBJS   = $(filter-out $(LSP_OBJS) $(REPL_OBJS) $(ZEN_OBJS), $(OBJS))
+                 $(PLATFORM_OBJS) $(UTILS_OBJS) $(DIAG_OBJS) $(PLUGIN_OBJS) $(VENDOR_OBJS)
+ZC_BASE_OBJS   = $(filter-out $(LSP_OBJS) $(REPL_OBJS) $(ZEN_OBJS), $(OBJS)) $(VENDOR_OBJS)
 
 
 ALL_LIBS = libzc-core.a libzc-analysis.a libzc-codegen.a libzc-misra.a \

@@ -38,6 +38,7 @@ src/parser/utils/utils_template_inst.c
 src/parser/utils/utils_rewrite.c
 src/parser/utils/utils_validation.c
 src/parser/utils/utils_c_names.c
+src/parser/utils/utils_c_decls.c
 src/parser/utils/utils_audit.c
 src/parser/utils/utils_plugins.c
 src/parser/expr/expr_helpers.c
@@ -98,6 +99,7 @@ src/lsp/lsp_locals.c
 src/lsp/lsp_formatter.c
 src/lsp/lsp_project.c
 src/lsp/lsp_c_headers.c
+src/lsp/lsp_c_decls.c
 src/lsp/lsp_config.c
 src/utils/cJSON.c
 src/tools/tool_common.c

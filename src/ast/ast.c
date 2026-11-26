@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ast.h"
+#include "../parser/utils/c_decls.h"
 #include "../parser/parser.h"
 #include "../constants.h"
 #include "../arena.h"
@@ -1388,6 +1389,15 @@ char *infer_type(ParserContext *ctx, ASTNode *node)
                 return type_to_c_string(sym->type_info, ctx->config->misra_mode);
             }
         }
+        else if (!find_symbol_in_all(ctx, node->var_ref.name))
+        {
+            // A variable, enum constant or numeric macro of the program's C.
+            const char *c_type = c_decl_value_type(ctx, node->var_ref.name);
+            if (c_type)
+            {
+                return (char *)c_type;
+            }
+        }
     }
 
     if (node->kind == NODE_EXPR_CALL)
@@ -1400,6 +1410,18 @@ char *infer_type(ParserContext *ctx, ASTNode *node)
                 if (sig->ret_type)
                 {
                     return type_to_c_string(sig->ret_type, ctx->config->misra_mode);
+                }
+            }
+
+            // A function of the program's C (a Zen C declaration of the name comes first).
+            const char *callee_name = node->call.callee->var_ref.name;
+            if (!sig && !find_struct_def(ctx, callee_name) &&
+                !find_enum_variant(ctx, callee_name) && !find_symbol_entry(ctx, callee_name))
+            {
+                const char *c_ret = c_decl_return_type(ctx, callee_name);
+                if (c_ret)
+                {
+                    return (char *)c_ret;
                 }
             }
 
@@ -1767,7 +1789,9 @@ char *get_field_type_str(ParserContext *ctx, const char *struct_name, const char
     ASTNode *def = find_struct_def(ctx, clean_name);
     if (!def)
     {
-        return NULL;
+        // A struct or union of the program's C.
+        const CDeclField *cf = c_decl_field(c_decl_aggregate(ctx, clean_name), field_name);
+        return cf ? (char *)c_decl_writable(cf->type) : NULL;
     }
 
     ASTNode *f = def->strct.fields;

@@ -51,9 +51,16 @@ for /f "usebackq delims=" %%i in ("src-sources.txt") do (
     if not "%%i"=="" set "SRCS=!SRCS! %%i"
 )
 
+rem Vendored C (vendor\README.md): tree-sitter and its C grammar, with their own flags
+echo Building vendored tree-sitter...
+%CC% -std=gnu11 -O2 -w -Ivendor/tree-sitter/include -Ivendor/tree-sitter/src -c vendor/tree-sitter/src/lib.c -o zc_vendor_ts.o
+if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+%CC% -std=gnu11 -O2 -w -c vendor/tree-sitter-c/src/parser.c -o zc_vendor_tsc.o
+if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+
 rem Build
 echo Building Zen C (%ZEN_VERSION%)...
-%CC% %CFLAGS% %SRCS% -o zc.exe %LIBS%
+%CC% %CFLAGS% -Ivendor/tree-sitter/include %SRCS% zc_vendor_ts.o zc_vendor_tsc.o -o zc.exe %LIBS%
 if %ERRORLEVEL% NEQ 0 (
     echo Build failed!
     exit /b %ERRORLEVEL%
