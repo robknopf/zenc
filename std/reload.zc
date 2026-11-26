@@ -131,6 +131,10 @@ raw {
         ZcManifest *types_now;  // a copy of the current version's manifest, or NULL
         ZcManifest *types_prev; // the same for the version before it
         ZcMfGlobal *store;      // the module's globals: in the version that owns them
+        ZcMfGlobal *store_prev; // the store before this reload's zr_store_extend, or NULL
+        unsigned nstore_prev;
+        void **blocks;          // storage made by zr_store_extend, freed at free()
+        unsigned nblocks;
         int refused;            // builds not loaded: require_same(), or state that can't move
         char **fetched;         // the names the host looked up with symbol()
         int fetched_count;
@@ -1454,11 +1458,14 @@ raw {
     //
     // The module's globals (those `zc transpile --reload` lists in the manifest) are defined
     // when it is compiled with ZC_RELOAD_OWN_GLOBALS and declared extern otherwise. The first
-    // version defines them; every later one is compiled to use that version's storage, so
-    // the values, and pointers to them, survive the reload. When the globals change (one is
-    // added or retyped), the new version defines them again, and the values whose name and
-    // type are the same are copied into it. A version that owns globals is never deleted
-    // before free(): something may still point into its storage.
+    // version defines them; every later one is compiled to use the store: storage that
+    // outlives the code, so the values, and pointers to them, survive the reload. When the
+    // globals change (one is added, retyped, or holds a type whose layout changed), a
+    // version that defines them shows what they are now; the ones that changed get storage
+    // of their own, holding their initial value (zr_store_extend), and the new version is
+    // compiled against the store again. Every other global keeps its storage, and pointers
+    // to it stay good. A version that owns globals is never deleted before free():
+    // something may still point into its storage.
 
     static const ZcManifest *zr_version_manifest(ZrVersion *v)
     {
@@ -1468,17 +1475,125 @@ raw {
         return m && m->format >= 5 ? m : NULL; // the layout this file reads
     }
 
+    enum { ZR_FRESH = 0x100 }; // a store entry given storage of its own by this reload
+
+    static void zr_globals_free(ZcMfGlobal *g, unsigned n)
+    {
+        for (unsigned i = 0; i < n; i++)
+        {
+            free((void *)g[i].name);
+            free((void *)g[i].type);
+        }
+        zr_gidx_forget(g);
+        free(g);
+    }
+
+    // A copy of n globals, with their names and types, holding room for `extra` more.
+    static ZcMfGlobal *zr_globals_dup(const ZcMfGlobal *g, unsigned n, unsigned extra)
+    {
+        ZcMfGlobal *d = (ZcMfGlobal *)calloc(n + extra ? n + extra : 1, sizeof(ZcMfGlobal));
+        for (unsigned i = 0; d && i < n; i++)
+        {
+            d[i] = g[i];
+            d[i].name = zr_strdup(g[i].name);
+            d[i].type = zr_strdup(g[i].type);
+            d[i].init = NULL; // the store only needs names, types and addresses
+        }
+        return d;
+    }
+
     static void zr_store_free(ZrReloader *r)
     {
-        for (unsigned i = 0; i < r->nstore; i++)
-        {
-            free((void *)r->store[i].name);
-            free((void *)r->store[i].type);
-        }
-        zr_gidx_forget(r->store);
-        free(r->store);
+        zr_globals_free(r->store, r->nstore);
         r->store = NULL;
         r->nstore = 0;
+    }
+
+    // The store as it was before zr_store_extend: dropped (`keep`), or put back.
+    static void zr_store_settle(ZrReloader *r, int keep)
+    {
+        if (!r->store_prev) return;
+        if (keep)
+        {
+            zr_globals_free(r->store_prev, r->nstore_prev);
+            for (unsigned i = 0; i < r->nstore; i++) r->store[i].flags &= ~(unsigned)ZR_FRESH;
+        }
+        else
+        {
+            zr_store_free(r);
+            r->store = r->store_prev;
+            r->nstore = r->nstore_prev;
+        }
+        r->store_prev = NULL;
+        r->nstore_prev = 0;
+    }
+
+    // `probe` is the new version compiled to define its globals: what they are now. Each one
+    // the store has, of the same type and layout, keeps its storage. The others (added,
+    // retyped, or holding a type whose layout changed) get storage of their own, holding
+    // the probe's initial value, marked ZR_FRESH; values are moved into it like into a new
+    // version's (zr_move_state). Globals gone stay in the store: something may point there.
+    // The store as it was is kept in store_prev until zr_store_settle.
+    static int zr_store_extend(ZrReloader *r, ZrVersion *probe)
+    {
+        ZcManifest *m = zr_mf_copy(zr_version_manifest(probe));
+        if (!m || !r->store) { zr_mf_free(m); return 0; }
+        ZcMfGlobal *st = zr_globals_dup(r->store, r->nstore, m->nglobals);
+        void **blocks = (void **)realloc(r->blocks, (r->nblocks + m->nglobals + 1) * sizeof(void *));
+        if (!st || !blocks)
+        {
+            if (blocks) r->blocks = blocks;
+            zr_globals_free(st, r->nstore);
+            zr_mf_free(m);
+            return 0;
+        }
+        r->blocks = blocks;
+        unsigned n = r->nstore;
+        for (unsigned i = 0; i < m->nglobals; i++)
+        {
+            const ZcMfGlobal *g = &m->globals[i];
+            const ZcMfGlobal *old = zr_global_find(r->store, r->nstore, g->name);
+            if (old && !strcmp(zr_s(old->type), zr_s(g->type)) && old->size == g->size &&
+                !zr_global_type_changed(r->types_now, m, g, NULL))
+                continue;
+            size_t size = ((size_t)g->size + 63) & ~(size_t)63;
+            void *mem = aligned_alloc(64, size ? size : 64); // aligned for any type
+            if (!mem) continue;
+            memset(mem, 0, size ? size : 64);
+            if (g->addr && g->size) memcpy(mem, g->addr, g->size);
+            r->blocks[r->nblocks++] = mem;
+            ZcMfGlobal *e = old ? &st[old - r->store] : &st[n++];
+            if (old)
+            {
+                if (old->flags & 2) // an old vtable still read by old trait objects
+                {
+                    ZcMfGlobal *grown = (ZcMfGlobal *)realloc(r->old_vtables, (r->nold_vtables + 1) * sizeof(ZcMfGlobal));
+                    if (grown)
+                    {
+                        r->old_vtables = grown;
+                        ZcMfGlobal *o = &r->old_vtables[r->nold_vtables++];
+                        memset(o, 0, sizeof(*o));
+                        o->name = zr_strdup(old->name);
+                        o->type = zr_strdup(old->type);
+                        o->size = old->size;
+                        o->addr = old->addr;
+                    }
+                }
+                free((void *)e->type);
+            }
+            else
+                e->name = zr_strdup(g->name);
+            e->type = zr_strdup(g->type);
+            e->size = g->size;
+            e->addr = mem;
+            e->flags = g->flags | ZR_FRESH;
+        }
+        zr_mf_free(m);
+        r->store_prev = r->store;
+        r->nstore_prev = r->nstore;
+        r->store = st;
+        r->nstore = n;
+        return 1;
     }
 
     // The globals of `m`, from the version that owns them, as the ones to share from now on.
@@ -1545,7 +1660,8 @@ raw {
             const ZcMfGlobal *g = &m->globals[i];
             const ZcMfGlobal *s = zr_global_find(r->store, r->nstore, g->name);
             if (!s || strcmp(zr_s(s->type), zr_s(g->type)) || s->size != g->size ||
-                s->addr != g->addr || zr_global_type_changed(r->types_now, m, g, NULL))
+                s->addr != g->addr ||
+                (!(s->flags & ZR_FRESH) && zr_global_type_changed(r->types_now, m, g, NULL)))
                 shared = 0;
         }
         zr_mf_free(m);
@@ -1595,10 +1711,13 @@ raw {
             }
         }
 
-        // The globals, into the new storage the version defines.
+        // The globals whose storage changed (all of them, in a version that defines its own;
+        // those given storage of their own by zr_store_extend otherwise), from where they were.
         char *text = NULL;
         size_t len = 0;
-        if (next->owns_globals && r->store)
+        const ZcMfGlobal *was = r->store_prev ? r->store_prev : r->store;
+        unsigned nwas = r->store_prev ? r->nstore_prev : r->nstore;
+        if ((next->owns_globals || r->store_prev) && was)
         {
             const ZcManifest *live = zr_version_manifest(next);
             mv.notes = dry ? NULL : open_memstream(&text, &len);
@@ -1606,8 +1725,8 @@ raw {
             for (unsigned i = 0; live && i < live->nglobals; i++)
             {
                 const ZcMfGlobal *g = &live->globals[i];
-                const ZcMfGlobal *s = zr_global_find(r->store, r->nstore, g->name);
-                if (!s || (g->flags & 2)) continue;
+                const ZcMfGlobal *s = zr_global_find(was, nwas, g->name);
+                if (!s || (g->flags & 2) || s->addr == g->addr) continue;
                 zr_move_value(&mv, zr_s(g->name), zr_s(s->type), s->size,
                               (const unsigned char *)s->addr, zr_s(g->type), g->size,
                               (unsigned char *)g->addr, 0);
@@ -2204,6 +2323,24 @@ raw {
             }
         }
         if (compiled != 0) compiled = zr_compile(r, &next, 1);
+        // The globals changed: those that did get storage of their own, the others keep theirs
+        // (and pointers to them stay good), and the version is compiled against the store
+        // again. If that fails, it keeps the storage it defines, as all of them used to.
+        if (compiled == 0 && next.owns_globals && r->current.tcc && r->store &&
+            zr_store_extend(r, &next))
+        {
+            ZrVersion ext;
+            if (zr_compile(r, &ext, 0) == 0 && zr_globals_shared(r, &ext))
+            {
+                zr_version_delete(&next);
+                next = ext;
+            }
+            else
+            {
+                if (ext.tcc) zr_version_delete(&ext);
+                zr_store_settle(r, 0);
+            }
+        }
         double t2 = zr_now_ms();
         if (compiled != 0)
         {
@@ -2234,6 +2371,7 @@ raw {
             if (refused >= 0)
             {
                 zr_version_delete(&next);
+                zr_store_settle(r, 0);
                 return 0;
             }
         }
@@ -2258,6 +2396,7 @@ raw {
                 free(why);
                 zr_mf_free(nm);
                 zr_version_delete(&next);
+                zr_store_settle(r, 0);
                 r->refused++;
                 return 0;
             }
@@ -2272,6 +2411,7 @@ raw {
             if (!grown)
             {
                 zr_version_delete(&next);
+                zr_store_settle(r, 0);
                 fprintf(stderr, "reload: out of memory; still running the previous version\n");
                 return 0;
             }
@@ -2313,6 +2453,7 @@ raw {
         FILE *log = open_memstream(&r->moved, &moved_len);
         if (r->types_prev && r->types_now)
             zr_move_state(r, &r->current, r->types_prev, r->types_now, 0, NULL, log);
+        zr_store_settle(r, 1); // the values are in the storage they keep from now on
         if (r->current.owns_globals && r->store) zr_keep_old_vtables(r);
         if (r->types_prev && r->types_now && log) zr_reset_globals(r, log);
         zr_note_fns(r, r->types_now);
@@ -2406,7 +2547,10 @@ raw {
         zr_version_delete(&r->current);
         zr_mf_free(r->types_now);
         zr_mf_free(r->types_prev);
+        zr_store_settle(r, 1);
         zr_store_free(r);
+        for (unsigned i = 0; i < r->nblocks; i++) free(r->blocks[i]);
+        free(r->blocks);
     #ifdef __linux__
         zr_ino_close(r);
     #endif

@@ -73,10 +73,11 @@ Not yet: Windows, `--misra` (an error with `--reload`), and C++ output.
   [`global_kept_old_deleted`], **and its address**: a pointer to a global, kept anywhere,
   still points at it [`global_pointer_stable`]. Every version uses the storage of the
   version that defined the globals.
-- **Globals added, retyped or removed.** The new version gets new storage, with the
-  values of those whose name and type are the same; one retyped to another numeric type
-  is converted [`globals_change`]. A pointer to an old global then points at the old
-  storage, which stays loaded.
+- **Globals added, retyped or removed.** Each global keeps its storage, and a pointer to
+  it stays good, kept anywhere [`global_storage_kept`]. Only a global that itself changes
+  (retyped, or holding a type whose layout changed) gets new storage, with its value
+  moved there; one retyped to another numeric type is converted [`globals_change`]. A
+  pointer to its old storage still reads the old value.
 - **A global whose initial value you edit takes the new value**: that is taken to be
   what you meant. The others keep theirs [`initial_value_edited`].
 - **`@reset_on_reload`** on a global puts it back to its initial value on every reload,
@@ -249,7 +250,6 @@ for that.
   checked.
 - Types are matched by their C name. Two structs of the same name under different `@cfg`
   are one entry (only one is compiled).
-- Globals added change the storage's address (see above).
 
 ## Writing code that reloads well
 
@@ -276,10 +276,13 @@ for that.
   every function with its address and C signature.
 - **Storage.** Each mutable global, `static` local and vtable is emitted twice, behind
   `ZC_RELOAD_OWN_GLOBALS`: defined, and `extern`. The `Reloader` compiles the first
-  version to define them, and every later version with them `extern`, pointed at that
-  version's storage (`tcc_add_symbol`), and checks by address that each one is. When the
-  globals change, the new version defines them again, and the values are moved into it.
-  A version that owns storage is never deleted before `free()`.
+  version to define them, and every later version with them `extern`, pointed at the
+  storage kept (`tcc_add_symbol`), and checks by address that each one is. When the
+  globals change, the new version is first compiled to define them, which shows what they
+  are now; each one that changed gets storage of its own (allocated by the `Reloader`,
+  holding its initial value), and the version is compiled against the kept storage again,
+  so a reload that changes the globals compiles three times. The first version, which
+  holds the original storage, is never deleted before `free()`.
 - **Moving.** The `Reloader` keeps a copy of each version's manifest. On a reload it
   compares the two, checks everything that would have to move (a dry run), and only then
   moves it: globals into their new storage, the host's block in place through a copy.

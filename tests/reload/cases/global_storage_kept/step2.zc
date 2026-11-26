@@ -1,0 +1,20 @@
+// A global keeps its storage when other globals are added, removed or retyped, so a
+// pointer to it kept from an earlier version (here in the heap, behind a void*) still
+// reaches the one the new code uses. Only a global that itself changes gets new storage.
+// c is added.
+let a: int = 0;
+let b: int = 5;
+let c: int = 7;
+struct State { kept: void*; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.kept == NULL {
+        let p = (int**)malloc(sizeof(int*));
+        *p = &a;
+        state.kept = (void*)p;
+    }
+    let p = *(int**)state.kept;
+    *p = *p + 1;   // through the pointer kept from version 1
+    a = a + 10;    // and directly
+    println "a {a} through the kept pointer {*p} c {c}";
+}

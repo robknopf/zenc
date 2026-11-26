@@ -1,0 +1,13 @@
+--- step 1
+a 11 through the kept pointer 11
+--- step 2
+reload: changes in version 2:
+reload:   globals: c added
+a 22 through the kept pointer 22 c 7
+--- step 3
+reload: changes in version 3:
+reload:   globals: b retyped from int32_t to int64_t, c removed
+reload: moved the globals: b converted from int32_t to int64_t
+a 33 through the kept pointer 33 b 5
+--- step 4
+a 44 through the kept pointer 44 (v4)
