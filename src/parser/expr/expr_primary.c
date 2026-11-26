@@ -1759,7 +1759,7 @@ ASTNode *parse_primary_impl(ParserContext *ctx, Lexer *l)
             }
             for (int i = args_provided; sig->arg_types && i < sig->total_args; i++)
             {
-                if (sig->defaults[i])
+                if (sig->defaults && sig->defaults[i]) // an enum variant's has none
                 {
                     Lexer def_l;
                     lexer_init(&def_l, sig->defaults[i], ctx->config, ctx->current_filename);
