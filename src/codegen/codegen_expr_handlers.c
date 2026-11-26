@@ -26,50 +26,31 @@ void handle_expr_struct_init(ParserContext *ctx, ASTNode *node)
     const char *c_name = struct_name;
     int is_zen_struct = 0;
     int is_union = 0;
-    StructRef *sr = ctx->parsed_structs_list;
+    ASTNode *sdef = find_parsed_struct(ctx, struct_name);
     int is_vector = 0;
-    while (sr)
+    if (sdef)
     {
-        if (sr->node && sr->node->kind == NODE_STRUCT &&
-            strcmp(sr->node->strct.name, struct_name) == 0)
+        is_zen_struct = 1;
+        if (sdef->link_name)
         {
-            is_zen_struct = 1;
-            if (sr->node->link_name)
-            {
-                c_name = sr->node->link_name;
-            }
-            if (sr->node->strct.is_union)
-            {
-                is_union = 1;
-            }
-            if (sr->node->type_info && sr->node->type_info->kind == TYPE_VECTOR)
-            {
-                is_vector = 1;
-            }
-            break;
+            c_name = sdef->link_name;
         }
-        sr = sr->next;
+        if (sdef->strct.is_union)
+        {
+            is_union = 1;
+        }
+        if (sdef->type_info && sdef->type_info->kind == TYPE_VECTOR)
+        {
+            is_vector = 1;
+        }
     }
 
     int in_func = (ctx->cg.current_func_ret_type != NULL || ctx->cg.current_lambda != NULL);
 
     int vec_size = 0;
-    if (is_vector)
+    if (is_vector && sdef->type_info)
     {
-        StructRef *v_chk = ctx->parsed_structs_list;
-        while (v_chk)
-        {
-            if (v_chk->node && v_chk->node->kind == NODE_STRUCT &&
-                strcmp(v_chk->node->strct.name, struct_name) == 0)
-            {
-                if (v_chk->node->type_info)
-                {
-                    vec_size = v_chk->node->type_info->array_size;
-                }
-                break;
-            }
-            v_chk = v_chk->next;
-        }
+        vec_size = sdef->type_info->array_size; // the struct found above
     }
 
     if (ctx->config->use_cpp)

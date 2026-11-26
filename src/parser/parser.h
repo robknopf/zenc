@@ -11,6 +11,7 @@
 #include "compiler.h"
 #include "../diagnostics/diagnostics.h"
 #include "../utils/emitter.h"
+#include "../utils/list_index.h"
 
 // Operator precedence for expression parsing
 
@@ -131,6 +132,7 @@ typedef struct GenericTemplate
     char *name;           ///< Template name.
     ASTNode *struct_node; ///< The struct AST node (containing generic params).
     struct GenericTemplate *next;
+    unsigned seq; ///< Registration order: a later one is nearer the list's head.
 } GenericTemplate;
 
 /**
@@ -416,9 +418,10 @@ struct ParserContext
                             ///< global_scope).
 
     // Lambdas
-    LambdaRef *global_lambdas; ///< All lambdas generated during parsing, in creation order.
-    int lambda_counter;        ///< Counter for generating unique lambda IDs.
-    int fstring_counter;       ///< Counter for generating unique f-string IDs.
+    LambdaRef *global_lambdas;      ///< All lambdas generated during parsing, in creation order.
+    LambdaRef *global_lambdas_last; ///< Its last entry, so adding one doesn't walk it.
+    int lambda_counter;             ///< Counter for generating unique lambda IDs.
+    int fstring_counter;            ///< Counter for generating unique f-string IDs.
 
 // Generics
 #define MAX_KNOWN_GENERICS 1024
@@ -428,6 +431,9 @@ struct ParserContext
     GenericTemplate *templates;              ///< Struct generic templates.
     GenericFuncTemplate *func_templates;     ///< Function generic templates.
     GenericImplTemplate *impl_templates;     ///< Implementation block templates.
+    // Indexes by name of the three lists above and parsed_structs_list (list_index.h): a
+    // lookup finds what a walk from the head would.
+    ListIndex templates_index, func_templates_index, impl_templates_index, parsed_structs_index;
 
     // Instantiations
     Instantiation *instantiations; ///< Cache of instantiated generic types.
@@ -805,6 +811,13 @@ void register_func_template(ParserContext *ctx, const char *name, const char *pa
  * @brief Finds a function template.
  */
 GenericFuncTemplate *find_func_template(ParserContext *ctx, const char *name);
+/** @brief The struct template named `name` (the newest, as a walk of ctx->templates finds). */
+GenericTemplate *find_template(ParserContext *ctx, const char *name);
+/** @brief The impl templates for struct `name`, oldest first: *count of them. Take the count
+ * before instantiating anything: instantiating can register more. */
+GenericImplTemplate **find_impl_templates(ParserContext *ctx, const char *name, unsigned *count);
+/** @brief The parsed (not instantiated) struct named `name`, the newest of that name. */
+ASTNode *find_parsed_struct(ParserContext *ctx, const char *name);
 
 // Generic/template helpers
 /**

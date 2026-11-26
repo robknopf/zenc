@@ -1139,17 +1139,7 @@ ASTNode *parse_primary_impl(ParserContext *ctx, Lexer *l)
                     }
                     lexer_next(l); // eat >
 
-                    int is_struct = 0;
-                    GenericTemplate *st = ctx->templates;
-                    while (st)
-                    {
-                        if (strcmp(st->name, acc) == 0)
-                        {
-                            is_struct = 1;
-                            break;
-                        }
-                        st = st->next;
-                    }
+                    int is_struct = find_template(ctx, acc) != NULL;
                     if (!is_struct && (strcmp(acc, "Result") == 0 || strcmp(acc, "Option") == 0))
                     {
                         is_struct = 1;
@@ -1552,14 +1542,12 @@ ASTNode *parse_primary_impl(ParserContext *ctx, Lexer *l)
                 }
                 node->struct_init.fields = head;
 
-                GenericTemplate *gtpl = ctx->templates;
-                while (gtpl)
+                // The newer of the templates named either way, as a walk finds first.
+                GenericTemplate *gtpl = find_template(ctx, acc);
+                GenericTemplate *by_struct = find_template(ctx, struct_name);
+                if (by_struct && (!gtpl || by_struct->seq > gtpl->seq))
                 {
-                    if (strcmp(gtpl->name, acc) == 0 || strcmp(gtpl->name, struct_name) == 0)
-                    {
-                        break;
-                    }
-                    gtpl = gtpl->next;
+                    gtpl = by_struct;
                 }
                 if (gtpl && gtpl->struct_node && gtpl->struct_node->kind == NODE_STRUCT)
                 {
