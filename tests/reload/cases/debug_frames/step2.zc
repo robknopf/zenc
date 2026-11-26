@@ -1,0 +1,19 @@
+// Version 2. Also what tests/scripts/run_debugger_tests.sh debugs: a breakpoint in inner
+// (by this file's line) in each version, a backtrace from it through big (a frame over
+// 4 KB, which tcc starts differently on Windows) to reload_step, an argument and a local.
+fn inner(x: int) -> int {
+    let doubled = x * 2;
+    println "inner version 2: {doubled}";
+    return doubled;
+}
+fn big(x: int) -> int {
+    let buf: char[8192];
+    buf[0] = (char)2;
+    let r = inner(x) + (int)buf[0];
+    return r;
+}
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    let r = big(10);
+    println "returned {r}";
+}

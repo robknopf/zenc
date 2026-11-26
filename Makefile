@@ -562,6 +562,10 @@ test-reload: $(TARGET)
 	./tests/scripts/run_reload_tests.sh
 	./tests/scripts/run_loader_tests.sh
 
+# gdb on reloaded code; needs gdb and libtcc 0.9.28 (TCC_DIR=..., as for test-reload).
+test-debugger: $(TARGET)
+	./tests/scripts/run_debugger_tests.sh
+
 # Files that the full typechecker (`zc check`) must accept with no errors.
 test-check: $(TARGET)
 	./tests/scripts/run_check_clean.sh
