@@ -2074,6 +2074,7 @@ ASTNode *parse_primary_impl(ParserContext *ctx, Lexer *l)
                 node = ast_create(NODE_EXPR_VAR);
                 node->token = t;
                 node->var_ref.name = acc;
+                node->var_ref.bound = sym != NULL;
                 node->type_info = find_symbol_type_info(ctx, acc);
 
                 if (sym)

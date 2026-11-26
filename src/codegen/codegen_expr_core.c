@@ -191,15 +191,30 @@ static int name_is_constant_like(const char *name)
 // With the names the program's C declares known: a name in capitals that neither the Zen C
 // nor its C declares. (Only capitals: the parser leaves some locals unresolved too, so a
 // lower-case name can't be told from an undefined one.)
-int c_names_name_unknown(ParserContext *ctx, const char *name)
+// A name in capitals neither the Zen C nor its C declares, but for the symbols in scope.
+static int c_names_name_unknown_globally(ParserContext *ctx, const char *name)
 {
     return name_is_constant_like(name) && !should_suppress_undef_warning(ctx, name) &&
-           !find_func(ctx, name) && !find_symbol_in_all(ctx, name) &&
-           !find_symbol_entry(ctx, name) && !strstr(name, "::") && !strstr(name, "__");
+           !find_func(ctx, name) && !find_symbol_in_all(ctx, name) && !strstr(name, "::") &&
+           !strstr(name, "__");
+}
+
+int c_names_name_unknown(ParserContext *ctx, const char *name)
+{
+    return c_names_name_unknown_globally(ctx, name) && !find_symbol_entry(ctx, name);
+}
+
+int c_names_name_unknown_parsed(ParserContext *ctx, ASTNode *node)
+{
+    return !node->var_ref.bound && c_names_name_unknown_globally(ctx, node->var_ref.name);
 }
 
 void c_names_report_name(ParserContext *ctx, ASTNode *node)
 {
+    if (ctx->config->mode_lsp)
+    {
+        return; // the LSP reports these itself (lsp_c_decls.c)
+    }
     const char *close = c_name_closest(ctx, node->var_ref.name);
     char msg[MAX_SHORT_MSG_LEN], help[MAX_SHORT_MSG_LEN];
     snprintf(msg, sizeof(msg), "Undefined name '%s'", node->var_ref.name);
@@ -260,7 +275,8 @@ static void c_names_check_expr(ParserContext *ctx, ASTNode *node, int depth)
 
 void c_names_check_raw(ParserContext *ctx, ASTNode *node)
 {
-    if (ctx->c_names_ready && !ctx->silent_warnings && node->kind == NODE_RAW_STMT)
+    if (ctx->c_names_ready && !ctx->config->mode_lsp && !ctx->silent_warnings &&
+        node->kind == NODE_RAW_STMT)
     {
         c_names_check_expr(ctx, node, 0);
     }

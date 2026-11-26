@@ -42,6 +42,11 @@ void codegen_c_program(ParserContext *ctx, ASTNode *node);
  * to learn the names C declares (c_names_scan). NULL in MISRA mode.
  */
 char *codegen_c_names_unit(ParserContext *ctx, ASTNode *root);
+/// After the parse, without scopes (the LSP): a call to `callee` (a name) is to something the
+/// Zen C or its C declares; a name in capitals is one neither declares (node->var_ref.bound
+/// says what was in scope where it was parsed).
+int c_names_call_known_parsed(ParserContext *ctx, ASTNode *callee);
+int c_names_name_unknown_parsed(ParserContext *ctx, ASTNode *node);
 
 /**
  * @brief Generates code for a single AST node (non-recursive for siblings).

@@ -774,15 +774,14 @@ static int zen_name_declared(ParserContext *ctx, const char *name)
     return 0;
 }
 
-// With the names the program's C declares known: whether a call to `callee` (a name) is to
-// something the Zen C or its C declares.
-int c_names_call_known(ParserContext *ctx, ASTNode *callee)
+// Whether a call to `callee` (a name) is to something the Zen C or its C declares, but for
+// the symbols in scope: the part of the check that needs no scopes.
+static int c_names_call_known_globally(ParserContext *ctx, ASTNode *callee)
 {
     const char *name = callee->var_ref.name;
-    if (find_func(ctx, name) || find_struct_def(ctx, name) || c_name_known(ctx, name) ||
-        find_symbol_entry(ctx, name) || find_symbol_in_all(ctx, name) ||
-        zen_name_declared(ctx, name) || is_extern_symbol(ctx, name) ||
-        strncmp(name, "_z_", 3) == 0 || strncmp(name, "_Z", 2) == 0)
+    if (find_func(ctx, name) || find_func_template(ctx, name) || find_struct_def(ctx, name) ||
+        c_name_known(ctx, name) || find_symbol_in_all(ctx, name) || zen_name_declared(ctx, name) ||
+        is_extern_symbol(ctx, name) || strncmp(name, "_z_", 3) == 0 || strncmp(name, "_Z", 2) == 0)
     {
         return 1;
     }
@@ -796,8 +795,27 @@ int c_names_call_known(ParserContext *ctx, ASTNode *callee)
     return callee->type_info && get_inner_type(callee->type_info)->kind == TYPE_FUNCTION;
 }
 
+// With the names the program's C declares known: whether a call to `callee` (a name) is to
+// something the Zen C or its C declares (during codegen, with its scopes).
+int c_names_call_known(ParserContext *ctx, ASTNode *callee)
+{
+    return c_names_call_known_globally(ctx, callee) || find_symbol_entry(ctx, callee->var_ref.name);
+}
+
+int c_names_call_known_parsed(ParserContext *ctx, ASTNode *callee)
+{
+    // A name with "__" is the Zen C's own (Type::method, module::name): zc resolves those
+    // after the parse (an alias's or a module's methods), and C names don't look so.
+    return callee->var_ref.bound || strstr(callee->var_ref.name, "__") ||
+           c_names_call_known_globally(ctx, callee);
+}
+
 void c_names_report_call(ParserContext *ctx, ASTNode *callee)
 {
+    if (ctx->config->mode_lsp)
+    {
+        return; // the LSP reports these itself (lsp_c_decls.c)
+    }
     char msg[MAX_SHORT_MSG_LEN], mean[MAX_SHORT_MSG_LEN];
     snprintf(msg, sizeof(msg), "Undefined function '%s'", callee->var_ref.name);
     const char *close = c_name_closest(ctx, callee->var_ref.name);
@@ -828,7 +846,7 @@ static const char *c_decls_where(const CDecl *d, char *buf, size_t n)
 void c_decls_check_call(ParserContext *ctx, ASTNode *node)
 {
     ASTNode *callee = node->call.callee;
-    if (!ctx->c_names_ready || !callee || callee->kind != NODE_EXPR_VAR)
+    if (!ctx->c_names_ready || ctx->config->mode_lsp || !callee || callee->kind != NODE_EXPR_VAR)
     {
         return;
     }
@@ -880,7 +898,7 @@ void c_decls_check_call(ParserContext *ctx, ASTNode *node)
 // fields are known names one of them.
 void c_decls_check_member(ParserContext *ctx, ASTNode *node, const char *target_type)
 {
-    if (!ctx->c_names_ready || !target_type || !node->member.field)
+    if (!ctx->c_names_ready || ctx->config->mode_lsp || !target_type || !node->member.field)
     {
         return;
     }
@@ -1451,16 +1469,18 @@ skip_callee_gen:
                 const char *name = node->call.callee->var_ref.name;
                 c_decls_check_call(ctx, node);
 
+                // (the LSP checks C names itself, after the parse: lsp_c_decls.c)
+                int c_names_on = ctx->c_names_ready && !ctx->config->mode_lsp;
                 int has_c_interop = ctx->has_external_includes;
                 // With the names the program's C declares known, only those are C's; a
                 // symbol (a local holding a function, say) is the Zen C's.
-                if (ctx->c_names_ready)
+                if (c_names_on)
                 {
                     has_c_interop = c_name_known(ctx, name) || find_symbol_entry(ctx, name) ||
                                     find_symbol_in_all(ctx, name) || zen_name_declared(ctx, name);
                 }
 
-                if (!has_c_interop && !ctx->c_names_ready)
+                if (!has_c_interop && !c_names_on)
                 {
                     zmap_iter_ModMap it = zmap_iter_init(ModMap, &ctx->imports.modules);
                     const char *alias;
@@ -1475,7 +1495,7 @@ skip_callee_gen:
                     }
                 }
 
-                if (!has_c_interop && !ctx->c_names_ready)
+                if (!has_c_interop && !c_names_on)
                 {
                     zmap_iter_FileSet it = zmap_iter_init(FileSet, &ctx->imports.imported_files);
                     const char *key;
@@ -1516,13 +1536,13 @@ skip_callee_gen:
                     snprintf(msg, sizeof(msg), "Undefined function '%s'", name);
                     const char *hint = get_missing_function_hint(ctx, name);
                     char mean[MAX_SHORT_MSG_LEN];
-                    const char *close = ctx->c_names_ready ? c_name_closest(ctx, name) : NULL;
+                    const char *close = c_names_on ? c_name_closest(ctx, name) : NULL;
                     if (close)
                     {
                         snprintf(mean, sizeof(mean), "Did you mean '%s'?", close);
                         hint = mean;
                     }
-                    if (ctx->c_names_ready)
+                    if (c_names_on)
                     {
                         // Checked against what C declares: not a guess, so an error (the C
                         // compiler or the linker would stop on it too, less clearly).
