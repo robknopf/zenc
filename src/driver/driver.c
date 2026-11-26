@@ -259,6 +259,7 @@ static int compile_program(ZenCompiler *compiler)
         propagate_vector_inner_types(&ctx);
         propagate_drop_traits(&ctx);
         fix_type_refs_has_drop(&ctx);
+        c_names_scan(&ctx, root);
 
         if (!validate_types(&ctx))
         {

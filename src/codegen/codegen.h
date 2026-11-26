@@ -37,6 +37,13 @@ void codegen_node(ParserContext *ctx, ASTNode *node);
 void codegen_c_program(ParserContext *ctx, ASTNode *node);
 
 /**
+ * @brief What the generated C starts with: the preamble, the @cfg defines, every #include
+ * (under its @cfg) and the raw blocks at the top of each module. Fed to the C preprocessor
+ * to learn the names C declares (c_names_scan). NULL in MISRA mode.
+ */
+char *codegen_c_names_unit(ParserContext *ctx, ASTNode *root);
+
+/**
  * @brief Generates code for a single AST node (non-recursive for siblings).
  */
 void codegen_node_single(ParserContext *ctx, ASTNode *node);

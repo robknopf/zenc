@@ -172,6 +172,22 @@ static int is_instance_enum_variant(ParserContext *ctx, const char *name)
 }
 
 // Emit variable reference expression
+// A name in capitals, digits and underscores, with at least one letter: how C writes its
+// constants and macros (WGF_KEY_SPACE, BUFSIZ).
+static int name_is_constant_like(const char *name)
+{
+    int letter = 0;
+    for (const char *p = name; *p; p++)
+    {
+        if (islower((unsigned char)*p))
+        {
+            return 0;
+        }
+        letter |= isupper((unsigned char)*p);
+    }
+    return letter;
+}
+
 static void codegen_var_expr(ParserContext *ctx, ASTNode *node)
 {
     if (ctx->cg.current_lambda)
@@ -215,6 +231,24 @@ static void codegen_var_expr(ParserContext *ctx, ASTNode *node)
             snprintf(msg, sizeof(msg), "Undefined variable '%s'", node->var_ref.name);
             snprintf(help, sizeof(help), "Did you mean '%s'?", node->var_ref.suggestion);
             zwarn_at(node->token, "%s\n   = help: %s", msg, help);
+        }
+        else if (ctx->c_names_ready && !ctx->silent_warnings &&
+                 name_is_constant_like(node->var_ref.name) &&
+                 !should_suppress_undef_warning(ctx, node->var_ref.name) &&
+                 !find_func(ctx, node->var_ref.name) &&
+                 !find_symbol_in_all(ctx, node->var_ref.name) &&
+                 !find_symbol_entry(ctx, node->var_ref.name) && !strstr(node->var_ref.name, "::") &&
+                 !strstr(node->var_ref.name, "__") && strcmp(node->var_ref.name, "self") != 0)
+        {
+            // Nothing in the Zen C declares it, and nor does the program's C. Only for a name
+            // in capitals (a C constant or macro, as written): the parser leaves some locals
+            // unresolved too, so a lower-case name isn't checked.
+            const char *close = c_name_closest(ctx, node->var_ref.name);
+            char msg[MAX_SHORT_MSG_LEN], help[MAX_SHORT_MSG_LEN];
+            snprintf(msg, sizeof(msg), "Undefined name '%s'", node->var_ref.name);
+            snprintf(help, sizeof(help), close ? "Did you mean '%s'?" : "%s",
+                     close ? close : "Not declared here, nor by an included C header");
+            zwarn_with_suggestion(node->token, msg, help);
         }
     }
 

@@ -743,6 +743,12 @@ int should_suppress_undef_warning(ParserContext *ctx, const char *name)
         return 1;
     }
 
+    // With the names the program's C declares known, only those are taken on trust.
+    if (ctx->c_names_ready)
+    {
+        return c_name_known(ctx, name);
+    }
+
     int is_all_caps = 1;
     for (const char *p = name; *p; p++)
     {

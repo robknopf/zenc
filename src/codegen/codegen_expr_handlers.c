@@ -718,6 +718,61 @@ static int emit_call_dropping_temporaries(ParserContext *ctx, ASTNode *node)
     return 1;
 }
 
+// A call's name that is the Zen C's, though no function of that name is: an enum variant
+// (Mode__default, Result_Ok), or a function reached through a module's alias
+// (ws2__WSAStringToAddressA, an extern fn of the module imported as ws2).
+static int zen_name_declared(ParserContext *ctx, const char *name)
+{
+    if (strcmp(name, "panic") == 0)
+    {
+        return 1; // a builtin (__zenc_panic)
+    }
+    static const char *const seps[] = {"__", "_"};
+    for (int k = 0; k < 2; k++)
+    {
+        const char *at = NULL;
+        for (const char *p = strstr(name, seps[k]); p; p = strstr(p + 1, seps[k]))
+        {
+            at = p;
+        }
+        if (!at || at == name)
+        {
+            continue;
+        }
+        char prefix[MAX_SHORT_MSG_LEN];
+        size_t n = (size_t)(at - name);
+        if (n >= sizeof(prefix))
+        {
+            continue;
+        }
+        memcpy(prefix, name, n);
+        prefix[n] = 0;
+        ASTNode *def = find_struct_def(ctx, prefix);
+        if (def && def->kind == NODE_ENUM)
+        {
+            return 1;
+        }
+    }
+    const char *sep = strstr(name, "__");
+    if (sep && sep > name)
+    {
+        char alias[MAX_SHORT_MSG_LEN];
+        size_t n = (size_t)(sep - name);
+        if (n < sizeof(alias))
+        {
+            memcpy(alias, name, n);
+            alias[n] = 0;
+            const char *rest = sep + 2;
+            if (zmap_get(&ctx->imports.modules, alias) &&
+                (is_extern_symbol(ctx, rest) || c_name_known(ctx, rest) || find_func(ctx, rest)))
+            {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 void handle_expr_call(ParserContext *ctx, ASTNode *node)
 {
     if (emit_call_dropping_temporaries(ctx, node))
@@ -1234,8 +1289,15 @@ skip_callee_gen:
                 const char *name = node->call.callee->var_ref.name;
 
                 int has_c_interop = ctx->has_external_includes;
+                // With the names the program's C declares known, only those are C's; a
+                // symbol (a local holding a function, say) is the Zen C's.
+                if (ctx->c_names_ready)
+                {
+                    has_c_interop = c_name_known(ctx, name) || find_symbol_entry(ctx, name) ||
+                                    find_symbol_in_all(ctx, name) || zen_name_declared(ctx, name);
+                }
 
-                if (!has_c_interop)
+                if (!has_c_interop && !ctx->c_names_ready)
                 {
                     zmap_iter_ModMap it = zmap_iter_init(ModMap, &ctx->imports.modules);
                     const char *alias;
@@ -1250,7 +1312,7 @@ skip_callee_gen:
                     }
                 }
 
-                if (!has_c_interop)
+                if (!has_c_interop && !ctx->c_names_ready)
                 {
                     zmap_iter_FileSet it = zmap_iter_init(FileSet, &ctx->imports.imported_files);
                     const char *key;
@@ -1290,7 +1352,25 @@ skip_callee_gen:
                     char msg[MAX_SHORT_MSG_LEN];
                     snprintf(msg, sizeof(msg), "Undefined function '%s'", name);
                     const char *hint = get_missing_function_hint(ctx, name);
-                    zwarn_diag(DIAG_INTEROP_UNDEF_FUNC, t, msg, hint);
+                    char mean[MAX_SHORT_MSG_LEN];
+                    const char *close = ctx->c_names_ready ? c_name_closest(ctx, name) : NULL;
+                    if (close)
+                    {
+                        snprintf(mean, sizeof(mean), "Did you mean '%s'?", close);
+                        hint = mean;
+                    }
+                    if (ctx->c_names_ready)
+                    {
+                        // Checked against what C declares: not a guess, so always said.
+                        zwarn_with_suggestion_diag((int)DIAG_INTEROP_UNDEF_FUNC, t, msg,
+                                                   hint ? hint
+                                                        : "Not declared here, nor by an "
+                                                          "included C header");
+                    }
+                    else
+                    {
+                        zwarn_diag(DIAG_INTEROP_UNDEF_FUNC, t, msg, hint);
+                    }
                 }
             }
         }

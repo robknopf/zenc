@@ -524,6 +524,10 @@ struct ParserContext
 
     // External C interop: suppress undefined warnings for external symbols
     int has_external_includes;
+    // The names the program's C declares (utils_c_names.c): a set, and whether it was read.
+    char **c_names;
+    unsigned c_names_cap, c_names_count;
+    int c_names_ready;
     int is_comptime;         // Flag for comptime execution context
     char **extern_symbols;   ///< Explicitly declared extern symbols.
     int extern_symbol_count; ///< Count of external symbols.
@@ -1015,6 +1019,14 @@ int is_extern_symbol(ParserContext *ctx, const char *name);
 int is_file_imported(ParserContext *ctx, const char *path);
 void mark_file_imported(ParserContext *ctx, const char *path);
 int should_suppress_undef_warning(ParserContext *ctx, const char *name);
+
+/** @brief Reads the names the program's C declares (its #includes and raw blocks, through
+ * the C preprocessor); sets c_names_ready if it could. */
+void c_names_scan(ParserContext *ctx, ASTNode *root);
+/** @brief `name` is declared by the program's C (after c_names_scan). */
+int c_name_known(ParserContext *ctx, const char *name);
+/** @brief The C name closest to `name` (two edits at most), or NULL. */
+const char *c_name_closest(ParserContext *ctx, const char *name);
 void init_builtins(void);
 void register_extern_symbol(ParserContext *ctx, const char *name);
 void register_impl(ParserContext *ctx, const char *trait, const char *type);

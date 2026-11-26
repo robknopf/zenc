@@ -1836,3 +1836,43 @@ void codegen_c_program(ParserContext *ctx, ASTNode *node)
         free_visited_modules(visited);
     }
 }
+
+char *codegen_c_names_unit(ParserContext *ctx, ASTNode *root)
+{
+    if (!ctx || !root || ctx->config->misra_mode)
+    {
+        return NULL; // the MISRA preamble is written to the file directly
+    }
+    ASTNode *kids = root->kind == NODE_ROOT ? root->root.children : root;
+    while (kids && kids->kind == NODE_ROOT)
+    {
+        kids = kids->root.children;
+    }
+    // What the C file starts with, into a buffer, then back to where the emitter was.
+    Emitter *e = &ctx->cg.emitter;
+    emitter_push(e);
+    e->mode = EMITTER_BUFFER;
+    e->buffer.buf = NULL;
+    e->buffer.len = 0;
+    e->buffer.cap = 0;
+    e->indent_level = 0;
+    e->pending_indent = 0;
+    emit_preamble(ctx);
+    for (size_t i = 0; i < ctx->config->cfg_defines.length; i++)
+    {
+        EMIT(ctx, "#ifndef ZC_CFG_%s\n#define ZC_CFG_%s 1\n#endif\n",
+             ctx->config->cfg_defines.data[i], ctx->config->cfg_defines.data[i]);
+    }
+    VisitedModules *visited = NULL;
+    emit_includes_and_aliases(ctx, kids, &visited);
+    EmittedContent *emitted_raw = NULL;
+    VisitedModules *raw_visited_1 = NULL, *raw_visited_2 = NULL;
+    emit_raw_statements_internal(ctx, kids, &raw_visited_1, 0, 1, &emitted_raw);
+    emit_raw_statements_internal(ctx, kids, &raw_visited_2, 0, 0, &emitted_raw);
+    free_emitted_list(emitted_raw);
+    char *text = emitter_take_string(e);
+    emitter_pop(e);
+    char *copy = text ? xstrdup(text) : NULL;
+    zfree(text);
+    return copy;
+}
