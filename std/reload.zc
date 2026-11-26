@@ -83,6 +83,9 @@ raw {
     #include <dlfcn.h>
     #ifdef __linux__
     #include <sys/inotify.h>
+    #include <elf.h>
+    #include <link.h>
+    #include <sys/sysmacros.h>
     #endif
     #if defined(__x86_64__) && !defined(_WIN32)
     #define ZR_FORWARD 1 // old functions can be made to jump to new ones (zr_forward)
@@ -111,6 +114,8 @@ raw {
         int owns_globals; // compiled with ZC_RELOAD_OWN_GLOBALS: the globals' storage is here
         void *dl;         // the version as a shared library (dlopen), for debuggers; or NULL
         char *so_path;    // that library's file
+        int loaded;       // compiled and loaded (tcc is freed once the library is)
+        int tomb;         // shrunk to what old pointers can reach (zr_tombstone)
     } ZrVersion;
 
     typedef struct
@@ -149,8 +154,14 @@ raw {
         char *moved;            // what the last reload did to move state, for print_changes()
         ZcMfGlobal *old_vtables; // vtables in storage no longer the current one (old owners)
         unsigned nold_vtables;
-        struct ZrFn { void *addr; char *name; char *sig; } *fns; // every version's functions
+        // Every version's functions: names and signatures shared (strs: one copy of each, as
+        // most are the same from one version to the next), found by address (fn_slot).
+        struct ZrFn { void *addr; const char *name; const char *sig; } *fns;
         unsigned nfns, fns_cap;
+        char **strs;
+        unsigned strs_cap, strs_used;
+        unsigned *fn_slot; // index + 1 into fns, by address; 0: empty
+        unsigned fn_slot_cap;
         unsigned nstore;
         int ino_fd;     // inotify on the watched directory and those under it (Linux), or -1
         int ino_failed; // it couldn't be set up for ino_root: poll() scans instead
@@ -290,7 +301,7 @@ raw {
 
     static void zr_version_call(ZrVersion *v, const char *name)
     {
-        if (!v->tcc) return;
+        if (!v->loaded) return;
         void (*fn)(void) = (void (*)(void))zr_sym(v, name);
         if (fn) fn();
     }
@@ -310,6 +321,176 @@ raw {
         }
         memset(v, 0, sizeof(*v));
     }
+
+    // ---- Old versions, shrunk -------------------------------------------------------------
+    //
+    // An old version stays loaded: a pointer kept in the heap or by a library can still reach
+    // its functions (std's and generic ones aren't forwarded), its data (string literals, the
+    // first version's globals, vtables) and its exit code (glibc runs its fini). What nothing
+    // can reach after loading goes: the library's file (its disk space, with the symbol
+    // table and debug information) and, in memory, the relocations, the dynamic symbol and
+    // hash tables (loaded with RTLD_NOW and RTLD_LOCAL: nothing is looked up in it again) and
+    // the manifest (the Reloader keeps a copy). Each of the file's mappings becomes anonymous
+    // memory holding the same bytes, in place (mremap: nothing is unmapped, not even for a
+    // moment), the dropped pages are released, and the file is emptied. Linux, shared
+    // libraries only (not ZC_RELOAD_MEMORY). The two newest versions stay whole: the current
+    // one and the one a crash goes back to.
+
+    #ifdef __linux__
+    typedef struct { uintptr_t start, end; } ZrRange;
+
+    // The address ranges (from the library's base) to drop: sections named in `drop`, and the
+    // manifest's objects. Into `out` (at most `max`); their count.
+    static unsigned zr_drop_ranges(const char *path, ZrRange *out, unsigned max)
+    {
+        FILE *f = fopen(path, "rb");
+        if (!f) return 0;
+        unsigned n = 0;
+        Elf64_Ehdr eh;
+        Elf64_Shdr *sh = NULL;
+        char *names = NULL;
+        Elf64_Sym *syms = NULL;
+        char *strs = NULL;
+        if (fread(&eh, sizeof eh, 1, f) != 1 || memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
+            eh.e_ident[EI_CLASS] != ELFCLASS64 || eh.e_shentsize != sizeof(Elf64_Shdr) ||
+            eh.e_shstrndx >= eh.e_shnum)
+            goto done;
+        sh = (Elf64_Shdr *)calloc(eh.e_shnum, sizeof(Elf64_Shdr));
+        if (!sh || fseek(f, (long)eh.e_shoff, SEEK_SET) != 0 ||
+            fread(sh, sizeof(Elf64_Shdr), eh.e_shnum, f) != eh.e_shnum)
+            goto done;
+        names = (char *)malloc(sh[eh.e_shstrndx].sh_size + 1);
+        if (!names || fseek(f, (long)sh[eh.e_shstrndx].sh_offset, SEEK_SET) != 0 ||
+            fread(names, 1, sh[eh.e_shstrndx].sh_size, f) != sh[eh.e_shstrndx].sh_size)
+            goto done;
+        names[sh[eh.e_shstrndx].sh_size] = 0;
+        static const char *const drop[] = {".dynsym", ".dynstr", ".hash", ".gnu.hash",
+                                           ".gnu.version", ".gnu.version_r", ".gnu.version_d", NULL};
+        for (unsigned i = 0; i < eh.e_shnum && n < max; i++)
+        {
+            const char *nm = sh[i].sh_name < sh[eh.e_shstrndx].sh_size ? names + sh[i].sh_name : "";
+            int hit = !strncmp(nm, ".rela", 5) || !strncmp(nm, ".rel.", 5);
+            for (int k = 0; drop[k] && !hit; k++) hit = !strcmp(nm, drop[k]);
+            if (hit && (sh[i].sh_flags & SHF_ALLOC) && !(sh[i].sh_flags & (SHF_WRITE | SHF_EXECINSTR)))
+                out[n++] = (ZrRange){(uintptr_t)sh[i].sh_addr, (uintptr_t)(sh[i].sh_addr + sh[i].sh_size)};
+        }
+        // The manifest: the objects named _zc_mf* (its tables), from the symbol table.
+        for (unsigned i = 0; i < eh.e_shnum; i++)
+        {
+            if (sh[i].sh_type != SHT_SYMTAB || sh[i].sh_link >= eh.e_shnum) continue;
+            Elf64_Shdr *ss = &sh[sh[i].sh_link];
+            syms = (Elf64_Sym *)malloc(sh[i].sh_size ? sh[i].sh_size : 1);
+            strs = (char *)malloc(ss->sh_size + 1);
+            if (!syms || !strs || fseek(f, (long)sh[i].sh_offset, SEEK_SET) != 0 ||
+                fread(syms, 1, sh[i].sh_size, f) != sh[i].sh_size ||
+                fseek(f, (long)ss->sh_offset, SEEK_SET) != 0 ||
+                fread(strs, 1, ss->sh_size, f) != ss->sh_size)
+                break;
+            strs[ss->sh_size] = 0;
+            // Adjacent objects as one range: a page between two of them can go too.
+            uintptr_t lo = 0, hi = 0;
+            size_t count = sh[i].sh_size / sizeof(Elf64_Sym);
+            int (*cmp)(const void *, const void *) = NULL;
+            (void)cmp;
+            for (size_t k = 0; k < count && n < max; k++)
+            {
+                Elf64_Sym *s = &syms[k];
+                if (ELF64_ST_TYPE(s->st_info) != STT_OBJECT || !s->st_size || s->st_name >= ss->sh_size ||
+                    strncmp(strs + s->st_name, "_zc_mf", 6) != 0)
+                    continue;
+                uintptr_t a = (uintptr_t)s->st_value, b = a + (uintptr_t)s->st_size;
+                if (hi && a <= hi + 64 && b + 64 >= lo)
+                {
+                    if (a < lo) lo = a;
+                    if (b > hi) hi = b;
+                    continue;
+                }
+                if (hi) out[n++] = (ZrRange){lo, hi};
+                lo = a;
+                hi = b;
+            }
+            if (hi && n < max) out[n++] = (ZrRange){lo, hi};
+            break;
+        }
+    done:
+        free(syms);
+        free(strs);
+        free(names);
+        free(sh);
+        fclose(f);
+        return n;
+    }
+
+    // Every mapping of the file (`dev`, `ino`) made anonymous memory with the same bytes and
+    // protection, in place. 0 if one couldn't be (it is then as it was).
+    static int zr_unmap_file(unsigned long dev_major, unsigned long dev_minor, unsigned long ino)
+    {
+        FILE *maps = fopen("/proc/self/maps", "r");
+        if (!maps) return 0;
+        ZrRange spans[64];
+        char perms[64][5];
+        unsigned n = 0;
+        char line[1024];
+        while (n < 64 && fgets(line, sizeof line, maps))
+        {
+            unsigned long s, e, off, maj, min, in;
+            char p[5];
+            if (sscanf(line, "%lx-%lx %4s %lx %lx:%lx %lu", &s, &e, p, &off, &maj, &min, &in) != 7) continue;
+            if (in != ino || maj != dev_major || min != dev_minor) continue;
+            spans[n] = (ZrRange){s, e};
+            memcpy(perms[n], p, 5);
+            n++;
+        }
+        fclose(maps);
+        int ok = n > 0;
+        for (unsigned i = 0; i < n; i++)
+        {
+            size_t len = spans[i].end - spans[i].start;
+            int prot = (perms[i][0] == 'r' ? PROT_READ : 0) | (perms[i][1] == 'w' ? PROT_WRITE : 0) |
+                       (perms[i][2] == 'x' ? PROT_EXEC : 0);
+            void *tmp = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (tmp == MAP_FAILED) { ok = 0; continue; }
+            if (prot & PROT_READ) memcpy(tmp, (void *)spans[i].start, len);
+            if (mprotect(tmp, len, prot) != 0 ||
+                mremap(tmp, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)spans[i].start) == MAP_FAILED)
+            {
+                munmap(tmp, len);
+                ok = 0;
+            }
+        }
+        return ok;
+    }
+
+    static void zr_tombstone(ZrVersion *v)
+    {
+        if (v->tomb || !v->dl || !v->so_path) return;
+        struct link_map *lm = NULL;
+        struct stat st;
+        if (dlinfo(v->dl, RTLD_DI_LINKMAP, &lm) != 0 || !lm || stat(v->so_path, &st) != 0) return;
+        ZrRange drop[4096];
+        unsigned nd = zr_drop_ranges(v->so_path, drop, 4096);
+        if (!zr_unmap_file(major(st.st_dev), minor(st.st_dev), (unsigned long)st.st_ino)) return;
+        long page = sysconf(_SC_PAGESIZE);
+        uintptr_t base = (uintptr_t)lm->l_addr;
+        for (unsigned i = 0; i < nd; i++)
+        {
+            // Whole pages only, and never the first (the ELF and program headers, which
+            // dl_iterate_phdr and unwinders read).
+            uintptr_t a = (base + drop[i].start + (uintptr_t)page - 1) & ~(uintptr_t)(page - 1);
+            uintptr_t b = (base + drop[i].end) & ~(uintptr_t)(page - 1);
+            if (a < base + (uintptr_t)page) a = base + (uintptr_t)page;
+            if (b > a) madvise((void *)a, b - a, MADV_DONTNEED);
+        }
+        // Emptied, not removed: its disk space is freed, but its inode stays taken. glibc
+        // knows a loaded library by its device and inode, so a later version's file given
+        // a removed one's inode would be taken for this library, still loaded, and dlopen
+        // would return this handle. It is removed when the version is deleted (free()).
+        if (truncate(v->so_path, 0) != 0) remove(v->so_path);
+        v->tomb = 1;
+    }
+    #else
+    static void zr_tombstone(ZrVersion *v) { (void)v; }
+    #endif
 
     static void *zr_new(const char *source, const char *c_file)
     {
@@ -487,15 +668,20 @@ raw {
             bytes += r->old[i].mem_size;
         }
         if (r->old_count == 0) return;
+        int shrunk = 0;
+        for (int i = 0; i < r->old_count; i++) shrunk += r->old[i].tomb;
+        char tail[64] = "";
+        if (shrunk) snprintf(tail, sizeof tail, ", %d of them shrunk", shrunk);
         if (known)
         {
-            fprintf(stderr, "reload: %d old version%s kept loaded (%zu KB)\n", r->old_count,
-                    r->old_count == 1 ? "" : "s", bytes / 1024);
+            fprintf(stderr, "reload: %d old version%s kept loaded (%zu KB%s)\n", r->old_count,
+                    r->old_count == 1 ? "" : "s", bytes / 1024, tail);
         }
         else
         {
-            fprintf(stderr, "reload: %d old version%s kept loaded\n", r->old_count,
-                    r->old_count == 1 ? "" : "s");
+            fprintf(stderr, "reload: %d old version%s kept loaded%s%s%s\n", r->old_count,
+                    r->old_count == 1 ? "" : "s", shrunk ? " (" : "", shrunk ? tail + 2 : "",
+                    shrunk ? ")" : "");
         }
     }
 
@@ -1895,6 +2081,9 @@ raw {
             snprintf(v->so_path, len, "%s.%d.%u.so", r->c_file, (int)getpid(), r->so_serial++);
         if (v->so_path && tcc_output_file(v->tcc, v->so_path) == 0)
             v->dl = dlopen(v->so_path, RTLD_NOW | RTLD_LOCAL);
+        // (glibc returns a loaded library's handle for a file it takes to be that library)
+        for (int i = 0; v->dl && i < r->old_count; i++)
+            if (r->old[i].dl == v->dl || r->current.dl == v->dl) v->dl = NULL;
         if (!v->dl)
         {
             if (r->verbose)
@@ -1905,6 +2094,11 @@ raw {
             r->in_memory = 1;
             return zr_compile_memory(r, v, own);
         }
+        // libtcc's state (every section, symbol and relocation of the module, several times
+        // the code's size) isn't needed once the library is loaded: symbols come from dlsym.
+        tcc_delete(v->tcc);
+        v->tcc = NULL;
+        v->loaded = 1;
         const ZcManifest *m = own ? zr_version_manifest(v) : NULL;
         v->owns_globals = m && m->nglobals > 0;
         return 0;
@@ -1933,6 +2127,7 @@ raw {
             return -1;
         }
         // A version owns globals only if it has some.
+        v->loaded = 1;
         const ZcManifest *m = own ? zr_version_manifest(v) : NULL;
         v->owns_globals = m && m->nglobals > 0;
         return 0;
@@ -2125,6 +2320,50 @@ raw {
         return sig;
     }
 
+    // The one copy of `s` (taken: freed if there is one already), or NULL.
+    static const char *zr_intern(ZrReloader *r, char *s)
+    {
+        if (!s) return NULL;
+        if ((r->strs_used + 1) * 2 > r->strs_cap)
+        {
+            unsigned cap = r->strs_cap ? r->strs_cap * 2 : 4096;
+            char **t = (char **)calloc(cap, sizeof(char *));
+            if (!t) { free(s); return NULL; }
+            for (unsigned i = 0; i < r->strs_cap; i++)
+            {
+                if (!r->strs[i]) continue;
+                unsigned k = zr_hash(r->strs[i]) & (cap - 1);
+                while (t[k]) k = (k + 1) & (cap - 1);
+                t[k] = r->strs[i];
+            }
+            free(r->strs);
+            r->strs = t;
+            r->strs_cap = cap;
+        }
+        unsigned k = zr_hash(s) & (r->strs_cap - 1);
+        for (; r->strs[k]; k = (k + 1) & (r->strs_cap - 1))
+            if (!strcmp(r->strs[k], s)) { free(s); return r->strs[k]; }
+        r->strs[k] = s;
+        r->strs_used++;
+        return s;
+    }
+
+    static unsigned zr_addr_hash(void *addr)
+    {
+        uintptr_t a = (uintptr_t)addr;
+        a ^= a >> 33;
+        a *= 0xff51afd7ed558ccdULL;
+        a ^= a >> 33;
+        return (unsigned)a;
+    }
+
+    static void zr_fn_index(ZrReloader *r, unsigned i)
+    {
+        unsigned k = zr_addr_hash(r->fns[i].addr) & (r->fn_slot_cap - 1);
+        while (r->fn_slot[k]) k = (k + 1) & (r->fn_slot_cap - 1);
+        r->fn_slot[k] = i + 1;
+    }
+
     static void zr_note_fns(ZrReloader *r, const ZcManifest *m)
     {
         for (unsigned i = 0; m && i < m->nfuncs; i++)
@@ -2138,18 +2377,36 @@ raw {
                 r->fns = grown;
                 r->fns_cap = cap;
             }
+            if ((r->nfns + 1) * 2 > r->fn_slot_cap)
+            {
+                unsigned cap = r->fn_slot_cap ? r->fn_slot_cap * 2 : 1024;
+                unsigned *t = (unsigned *)calloc(cap, sizeof(unsigned));
+                if (!t) return;
+                free(r->fn_slot);
+                r->fn_slot = t;
+                r->fn_slot_cap = cap;
+                for (unsigned k = 0; k < r->nfns; k++) zr_fn_index(r, k);
+            }
             r->fns[r->nfns].addr = m->funcs[i].addr;
-            r->fns[r->nfns].name = zr_strdup(m->funcs[i].name);
-            r->fns[r->nfns].sig = zr_fn_sig(&m->funcs[i]);
+            r->fns[r->nfns].name = zr_intern(r, zr_strdup(m->funcs[i].name));
+            r->fns[r->nfns].sig = zr_intern(r, zr_fn_sig(&m->funcs[i]));
+            zr_fn_index(r, r->nfns);
             r->nfns++;
         }
     }
 
+    // The function at `addr` (the first noted there), or NULL.
     static const struct ZrFn *zr_fn_at(ZrReloader *r, void *addr)
     {
-        for (unsigned i = 0; i < r->nfns; i++)
-            if (r->fns[i].addr == addr) return &r->fns[i];
-        return NULL;
+        if (!r->fn_slot_cap) return NULL;
+        const struct ZrFn *found = NULL;
+        unsigned k = zr_addr_hash(addr) & (r->fn_slot_cap - 1);
+        for (; r->fn_slot[k]; k = (k + 1) & (r->fn_slot_cap - 1))
+        {
+            const struct ZrFn *f = &r->fns[r->fn_slot[k] - 1];
+            if (f->addr == addr && (!found || f < found)) found = f;
+        }
+        return found;
     }
 
     // Through the value of C type `type` at `p`, every function pointer to an old function,
@@ -2848,7 +3105,7 @@ raw {
         if (rc != 0)
         {
             fprintf(stderr, "reload: %s did not build%s\n", r->source,
-                    r->current.tcc ? "; still running the previous version" : "");
+                    r->current.loaded ? "; still running the previous version" : "");
             return 0;
         }
         double t1 = zr_now_ms();
@@ -2856,7 +3113,7 @@ raw {
         // Using the globals already there if it can; defining them again if they changed.
         ZrVersion next;
         int compiled = -1;
-        if (r->current.tcc && r->store)
+        if (r->current.loaded && r->store)
         {
             compiled = zr_compile(r, &next, 0);
             if (compiled == 0 && !zr_globals_shared(r, &next))
@@ -2869,7 +3126,7 @@ raw {
         // The globals changed: those that did get storage of their own, the others keep theirs
         // (and pointers to them stay good), and the version is compiled against the store
         // again. If that fails, it keeps the storage it defines, as all of them used to.
-        if (compiled == 0 && next.owns_globals && r->current.tcc && r->store &&
+        if (compiled == 0 && next.owns_globals && r->current.loaded && r->store &&
             zr_store_extend(r, &next))
         {
             ZrVersion ext;
@@ -2880,7 +3137,7 @@ raw {
             }
             else
             {
-                if (ext.tcc) zr_version_delete(&ext);
+                if (ext.loaded) zr_version_delete(&ext);
                 zr_store_settle(r, 0);
             }
         }
@@ -2888,13 +3145,13 @@ raw {
         if (compiled != 0)
         {
             fprintf(stderr, "reload: %s did not compile%s\n", r->c_file,
-                    r->current.tcc ? "; still running the previous version" : "");
+                    r->current.loaded ? "; still running the previous version" : "");
             return 0;
         }
 
         // Room to keep the version being replaced, before anything about it changes.
         // A version that changes a type the host requires the same is not loaded.
-        if (r->current.tcc && r->required_count && r->types_now)
+        if (r->current.loaded && r->required_count && r->types_now)
         {
             ZcManifest *m = zr_mf_copy(zr_version_manifest(&next));
             int refused = -1;
@@ -2922,7 +3179,7 @@ raw {
         // State the new version would have to move: everything must be movable, or it isn't
         // loaded.
         ZcManifest *nm = zr_mf_copy(zr_version_manifest(&next));
-        if (r->current.tcc && nm && r->types_now)
+        if (r->current.loaded && nm && r->types_now)
         {
             char *why = NULL;
             size_t why_len = 0;
@@ -2946,7 +3203,7 @@ raw {
             free(why);
         }
 
-        int keep_current = r->current.tcc && (r->keep_old || r->current.owns_globals);
+        int keep_current = r->current.loaded && (r->keep_old || r->current.owns_globals);
         if (keep_current && r->old_count == r->old_cap)
         {
             int cap = r->old_cap ? r->old_cap * 2 : 8;
@@ -2967,7 +3224,7 @@ raw {
         // at free(), on the version current then), and the new version's constructors don't
         // either (they ran when the first version loaded): a reload doesn't start the program
         // again. The new version's @after_reload functions run once the state has moved.
-        int first = !r->current.tcc;
+        int first = !r->current.loaded;
         // What undoing this reload would need (zr_call, after a crash in the new code).
         r->broken = 0;
         r->can_roll_back = !first && keep_current;
@@ -2983,7 +3240,7 @@ raw {
             else
                 r->can_roll_back = 0;
         }
-        if (r->current.tcc)
+        if (r->current.loaded)
         {
             zr_version_call(&r->current, "_zc_module_before_reload");
             if (keep_current)
@@ -3022,6 +3279,8 @@ raw {
         if (r->current.owns_globals) zr_store_set(r, zr_version_manifest(&r->current));
 
         zr_version_call(&r->current, first ? "_zc_module_init" : "_zc_module_after_reload");
+        // Old versions but the one a crash goes back to, shrunk (zr_tombstone).
+        for (int i = 0; i + 1 < r->old_count; i++) zr_tombstone(&r->old[i]);
         if (r->verbose)
         {
             fprintf(stderr, "reload: version %d of %s loaded (zc %.0f ms, tcc %.0f ms, reload %.1f ms)\n",
@@ -3056,7 +3315,7 @@ raw {
             if (grown) { r->fetched = grown; r->fetched_cap = cap; }
         }
         if (!known && r->fetched_count < r->fetched_cap) r->fetched[r->fetched_count++] = zr_strdup(name);
-        if (!r->current.tcc) return NULL;
+        if (!r->current.loaded) return NULL;
         return zr_sym(&r->current, name);
     }
 
@@ -3064,7 +3323,7 @@ raw {
     {
         ZrReloader *r = (ZrReloader *)h;
         const ZcManifest *(*get)(void) =
-            r->current.tcc ? (const ZcManifest *(*)(void))zr_sym(&r->current, "_zc_manifest") : NULL;
+            r->current.loaded ? (const ZcManifest *(*)(void))zr_sym(&r->current, "_zc_manifest") : NULL;
         return get ? get() : NULL;
     }
 
@@ -3130,11 +3389,9 @@ raw {
             free((void *)r->old_vtables[i].type);
         }
         free(r->old_vtables);
-        for (unsigned i = 0; i < r->nfns; i++)
-        {
-            free(r->fns[i].name);
-            free(r->fns[i].sig);
-        }
+        for (unsigned i = 0; i < r->strs_cap; i++) free(r->strs[i]);
+        free(r->strs);
+        free(r->fn_slot);
         free(r->fns);
         free(r->zc);
         free(r->zc_flags);

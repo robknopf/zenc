@@ -1,0 +1,25 @@
+// Version 3. Pointers from version 1 kept where the Reloader can't see them (void* in the
+// host's block): a string literal, a module function (forwarded to the newest version's)
+// and a C static function (not forwarded: it runs version 1's code). From version 3 on,
+// version 1 is shrunk (zr_tombstone): its file emptied, its tables dropped; all three
+// still work.
+raw {
+    static void legacy_v3(void) { printf("legacy, version 3\n"); }
+    static void *legacy_addr(void) { return (void *)legacy_v3; }
+    static void call0(void *f) { ((void (*)(void))f)(); }
+}
+fn greet() {
+    println "greet version 3";
+}
+struct State { msg: string; cb: void*; legacy: void*; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.msg == NULL {
+        state.msg = "hello from version 3";
+        state.cb = (void*)greet;
+        state.legacy = legacy_addr();
+    }
+    println "{state.msg}";
+    call0(state.cb);
+    call0(state.legacy);
+}

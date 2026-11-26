@@ -258,8 +258,21 @@ These don't stop a reload. They are what to keep in mind.
 
 `keep_old(false)` deletes each old version when the next one loads, and old functions
 then don't run the new code. Use it only when nothing like that is kept: a call through
-one of them then crashes. Each old version costs its code's memory (printed: "N old
-versions kept loaded (K KB)" with libtcc 0.9.27).
+one of them then crashes.
+
+**What an old version costs.** Every version but the two newest (the one running, and the
+one a crash goes back to) is shrunk to what a pointer kept from before can still reach: its
+code and its data (string literals, the first version's globals, vtables) stay where they
+were, and the rest goes: its library's file is emptied (its disk space, with the debug
+information, is freed), and the relocations, the dynamic symbol and hash tables and the
+manifest are released from memory [`old_versions_shrunk`]. libtcc's own copy of each version
+is freed as soon as its library is loaded. At 1000 generated modules a reload used to cost
+about 28 MB of memory and 12.5 MB of disk; it now costs about 2.3 MB of memory (that
+version's code and data) and no disk beyond the two newest versions. The reload prints how
+many: "N old versions kept loaded (M of them shrunk)". Shrinking is Linux-only for now
+(elsewhere old versions are kept whole); the code itself can't go yet, because most
+functions (std's, generics') aren't forwarded, so a pointer to one runs that version's
+code.
 
 **Values that are not carried** when a type's layout changes, and are left at zero (or a
 global's initial value); each is in the "moved" line [`state_converted`]. Zero is a real
@@ -311,6 +324,9 @@ with stabs, which gdb no longer binds breakpoints in; everything else works the 
 
 The libraries are written beside the module's C file (`build/game.c.<pid>.<n>.so`), and
 removed by `free()`; those of a process that ended without it are removed at the next start.
+An old version that is shrunk (above) has its file emptied: the debugger keeps what it read
+from it when it loaded (breakpoints, backtraces through it), but a debugger attached later
+sees no symbols for it.
 `ZC_RELOAD_MEMORY=1` compiles into memory instead, as it was before, where a debugger sees no
 symbols; it is also what happens if a library can't be written or loaded (the reload says
 so). Writing the debug information costs a little per reload: about 50 ms at 1000 generated
