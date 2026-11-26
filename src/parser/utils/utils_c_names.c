@@ -732,9 +732,14 @@ static char *c_read_file(const char *path)
     }
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
+    if (n < 0)
+    {
+        fclose(f);
+        return NULL;
+    }
     fseek(f, 0, SEEK_SET);
-    char *buf = n >= 0 ? xmalloc((size_t)n + 1) : NULL;
-    size_t got = buf ? fread(buf, 1, (size_t)n, f) : 0;
+    char *buf = xmalloc((size_t)n + 1);
+    size_t got = fread(buf, 1, (size_t)n, f);
     fclose(f);
     if (buf)
     {
