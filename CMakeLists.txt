@@ -79,6 +79,7 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/src/analysis
     ${PROJECT_SOURCE_DIR}/src/lsp
     ${PROJECT_SOURCE_DIR}/src/diagnostics
+    ${PROJECT_SOURCE_DIR}/vendor/tree-sitter/include
 )
 
 # Source files
@@ -150,9 +151,23 @@ else()
     set(PLUGIN_EXT ".so")
 endif()
 
+# Vendored C (vendor/README.md): tree-sitter and its C grammar, with their own flags.
+add_library(zc_vendor STATIC
+    vendor/tree-sitter/src/lib.c
+    vendor/tree-sitter-c/src/parser.c)
+target_include_directories(zc_vendor PRIVATE
+    ${PROJECT_SOURCE_DIR}/vendor/tree-sitter/include
+    ${PROJECT_SOURCE_DIR}/vendor/tree-sitter/src)
+set_target_properties(zc_vendor PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
+if(MSVC)
+    target_compile_options(zc_vendor PRIVATE /w)
+else()
+    target_compile_options(zc_vendor PRIVATE -w -O2)
+endif()
+
 # Add executable
 add_executable(zc ${SRCS})
-target_link_libraries(zc PRIVATE ${PLATFORM_LIBS})
+target_link_libraries(zc PRIVATE zc_vendor ${PLATFORM_LIBS})
 if(NOT "${ZC_COMPILE_FLAGS}" STREQUAL "")
     target_compile_options(zc PRIVATE ${ZC_COMPILE_FLAGS})
 endif()
