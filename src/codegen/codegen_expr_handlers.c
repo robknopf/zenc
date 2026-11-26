@@ -1361,11 +1361,14 @@ skip_callee_gen:
                     }
                     if (ctx->c_names_ready)
                     {
-                        // Checked against what C declares: not a guess, so always said.
-                        zwarn_with_suggestion_diag((int)DIAG_INTEROP_UNDEF_FUNC, t, msg,
-                                                   hint ? hint
-                                                        : "Not declared here, nor by an "
-                                                          "included C header");
+                        // Checked against what C declares: not a guess, so an error (the C
+                        // compiler or the linker would stop on it too, less clearly).
+                        const char *hints[] = {hint ? hint
+                                                    : "Not declared here, nor by an included "
+                                                      "C header (ZC_NO_C_NAMES=1 skips this "
+                                                      "check)",
+                                               NULL};
+                        zerror_with_hints(t, msg, hints);
                     }
                     else
                     {

@@ -247,8 +247,11 @@ static void codegen_var_expr(ParserContext *ctx, ASTNode *node)
             char msg[MAX_SHORT_MSG_LEN], help[MAX_SHORT_MSG_LEN];
             snprintf(msg, sizeof(msg), "Undefined name '%s'", node->var_ref.name);
             snprintf(help, sizeof(help), close ? "Did you mean '%s'?" : "%s",
-                     close ? close : "Not declared here, nor by an included C header");
-            zwarn_with_suggestion(node->token, msg, help);
+                     close ? close
+                           : "Not declared here, nor by an included C header (ZC_NO_C_NAMES=1 "
+                             "skips this check)");
+            const char *hints[] = {help, NULL};
+            zerror_with_hints(node->token, msg, hints);
         }
     }
 
