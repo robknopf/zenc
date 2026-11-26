@@ -2,10 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    # fork: its feature branches too (feat/reload-harness)
+    branches: [ "main", "feat/**" ]
     tags: [ "v*" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "feat/**" ]
 
 permissions:
   contents: read

@@ -12,6 +12,9 @@ jobs:
   fuzz:
     name: LibFuzzer
     runs-on: ubuntu-latest
+    # fork: a hang (a run on 2026-11-25 kept the runner busy until it was lost) fails
+    # the job instead
+    timeout-minutes: 40
     steps:
     - uses: actions/checkout@v4
 
@@ -37,7 +40,9 @@ jobs:
 
     - name: Run Fuzzer
       run: |
-        ./zc-fuzz-libfuzzer fuzz/corpus -max_total_time=900 -timeout=30 -rss_limit_mb=2048 || true
+        # fork: a crash fails the run (with `|| true` the job passed while uploading
+        # crash files); the upload step below runs either way
+        ./zc-fuzz-libfuzzer fuzz/corpus -max_total_time=900 -timeout=30 -rss_limit_mb=2048
 
     - name: Upload Crashes and Timeouts
       if: always()

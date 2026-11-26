@@ -25,7 +25,9 @@ jobs:
     - name: Checkout awesome-zenc
       uses: actions/checkout@v4
       with:
-        repository: zenc-lang/awesome-zenc
+        # fork: the examples with zc's removed syntax replaced, until upstream has them
+        repository: robknopf/awesome-zenc
+        ref: fix/removed-syntax
         path: awesome-zenc
 
     - name: Install Dependencies
