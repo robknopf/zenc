@@ -58,17 +58,21 @@
 // The module's thread-locals are ordinary globals, shared by its threads (a release build
 // keeps them per thread).
 //
-// Needs libtcc (0.9.27 or 0.9.28). `zc build` and `zc run` link it, from the line below; a
-// C compiler given the generated C needs `-ltcc -ldl -lpthread -lm`, and either needs `-L`
-// for a libtcc outside the system's library path (on Windows, `-ltcc -lpthread -lm`, and
-// the host linked with -Wl,--export-all-symbols where Linux's has -rdynamic). The Reloader
+// Needs libtcc: zc's own (vendor/tinycc, built into the tcc/ beside zc's std.zc, which
+// `zc --tcc-dir` names), which `zc build` and `zc run` link from the lines below. A C
+// compiler given the generated C needs `-I` and `-L` for that directory and `-ltcc -ldl
+// -lpthread -lm` (on Windows, `-ltcc -lpthread -lm`, and the host linked with
+// -Wl,--export-all-symbols where Linux's has -rdynamic). Another libtcc (0.9.27 or 0.9.28)
+// works too, with ZC_TCC_DIR naming its directory. The Reloader
 // loads versions itself on x86-64 Linux and Windows; elsewhere libtcc loads them, old
 // versions stay loaded and a debugger sees none of them. It is for development hosts, and
 // not written for --misra builds.
 
+//> include: ${ZC_TCC_DIR}
+//> lib: ${ZC_TCC_DIR}
 //> linux: link: -ltcc -ldl -lpthread -lm
 //> macos: link: -ltcc -ldl -lpthread -lm
-//> windows: link: -Wl,-Bdynamic -ltcc -Wl,-Bstatic -lpthread -lm
+//> windows: link: -ltcc -lpthread -lm
 
 include <libtcc.h>
 
@@ -368,9 +372,56 @@ raw {
         return newest;
     }
 
-    // tcc's directory (its include/ and lib/), if not where libtcc looks: beside libtcc
-    // itself, or where it was built for. set_tcc_dir(), or ZC_TCC_DIR in the environment.
+    // tcc's directory, its headers and runtime (libtcc1.a): zc's own (`zc --tcc-dir`, the
+    // tcc/ beside its std.zc, whose libtcc `zc build` linked this program with), asked the
+    // first time a version is compiled. set_tcc_dir(), or ZC_TCC_DIR in the environment,
+    // says another. Without any, libtcc looks where it was built for.
     static char *zr_tcc_dir;
+
+    // (zc_tcc.h is in zc's tcc/ only: a program built with another libtcc leaves it where it
+    // was built for)
+    #if defined(__has_include)
+    #if __has_include("zc_tcc.h")
+    #include "zc_tcc.h"
+    #endif
+    #endif
+
+    static void zr_find_tcc_dir(const char *zc)
+    {
+        static int asked;
+        if (zr_tcc_dir || asked) return;
+        asked = 1;
+        const char *env = getenv("ZC_TCC_DIR");
+        if (env && *env)
+        {
+            zr_tcc_dir = zr_strdup(env);
+            return;
+        }
+    #ifndef ZC_OWN_LIBTCC
+        (void)zc;
+        return;
+    #endif
+        char cmd[4200], line[4096];
+        if (strlen(zc) > 4000) return;
+    #ifdef _WIN32
+        snprintf(cmd, sizeof cmd, "\"\"%s\" --tcc-dir\"", zc); // (cmd.exe drops the outer quotes)
+        FILE *p = _popen(cmd, "r");
+    #else
+        snprintf(cmd, sizeof cmd, "\"%s\" --tcc-dir", zc);
+        FILE *p = popen(cmd, "r");
+    #endif
+        if (!p) return;
+        if (fgets(line, sizeof line, p))
+        {
+            line[strcspn(line, "\r\n")] = 0;
+            if (line[0]) zr_tcc_dir = zr_strdup(line);
+        }
+    #ifdef _WIN32
+        _pclose(p);
+    #else
+        pclose(p);
+    #endif
+    }
 
     static TCCState *zr_tcc_new(void)
     {
@@ -5011,6 +5062,7 @@ raw {
     #endif
         int rc = system(cmd);
         free(cmd);
+        zr_find_tcc_dir(r->zc);
         if (rc != 0)
         {
             fprintf(stderr, "reload: %s did not build%s\n", r->source,

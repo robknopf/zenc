@@ -25,6 +25,12 @@ WORK="$(mktemp -d)"
 cd "$ROOT" || exit 1
 trap 'rm -rf "$WORK"' EXIT
 
+ZC_TCC="$("$ZC" --tcc-dir 2> /dev/null)"
+if [ -z "$TCC" ] && [ -n "$ZC_TCC" ]; then  # zc's own (vendor/tinycc)
+    for t in "$ZC_TCC/tcc" "$ZC_TCC/tcc.exe"; do [ -x "$t" ] && TCC="$t"; done
+    # (load_host compiles as the Reloader does, without asking zc where tcc's headers are)
+    [ -n "$TCC" ] && export ZC_TCC_DIR="$ZC_TCC"
+fi
 TCC="${TCC:-$(command -v tcc)}"
 if [ -z "$TCC" ]; then
     echo "Loader tests skipped: no tcc"

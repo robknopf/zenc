@@ -25,6 +25,16 @@ typedef struct
 void print_search_paths(CompilerConfig *cfg);
 
 /**
+ * @brief zc's own tcc directory (libtcc, its headers and runtime), or NULL
+ */
+const char *zc_tcc_dir(CompilerConfig *cfg);
+
+/**
+ * @brief Export zc_tcc_dir() as ZC_TCC_DIR, for `${ZC_TCC_DIR}` in directives
+ */
+void zc_export_tcc_dir(CompilerConfig *cfg);
+
+/**
  * @brief Print compiler version
  */
 void print_version(void);

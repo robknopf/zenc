@@ -28,8 +28,11 @@ cd "$ROOT" || exit 1
 trap 'rm -rf "$WORK"' EXIT
 
 TCC_DIRS=""
+ZC_TCC="$("$ZC" --tcc-dir 2> /dev/null)"
 if [ -n "$TCC_DIR" ]; then
     TCC_DIRS="-I$TCC_DIR/include -L$TCC_DIR/lib"
+elif [ -n "$ZC_TCC" ]; then  # zc's own (vendor/tinycc)
+    TCC_DIRS="-I$ZC_TCC -L$ZC_TCC"
 elif [ -f /usr/local/lib/libtcc.a ]; then
     TCC_DIRS="-I/usr/local/include -L/usr/local/lib"
 fi

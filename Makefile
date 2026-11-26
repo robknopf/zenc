@@ -91,20 +91,19 @@ else
     LIBS = -lm -lpthread -ldl
 endif
 
-# The REPL's JIT needs libtcc. Unless ZC_HAS_JIT is given (1 forces it, 0 turns
-# it off), it is enabled only when a small program using libtcc compiles and links.
-ifeq ($(origin ZC_HAS_JIT),undefined)
-    ifeq ($(findstring tcc,$(CC)),tcc)
-        ZC_HAS_JIT := 1
-    else
-        TCC_PROBE_HASH := \#
-        TCC_PROBE_DIRS := $(if $(wildcard /usr/local/lib/libtcc.a),-I/usr/local/include -L/usr/local/lib)
-        ZC_HAS_JIT := $(shell printf '$(TCC_PROBE_HASH)include <libtcc.h>\nint main(void) { tcc_delete(tcc_new()); return 0; }\n' | $(CC) -x c - -o /dev/null $(TCC_PROBE_DIRS) -ltcc >/dev/null 2>&1 && echo 1 || echo 0)
-    endif
-endif
+# zc's own tcc (vendor/tinycc, see vendor/README.md): libtcc and tcc's runtime, its C
+# headers and libtcc1.a, built by tinycc's own build in obj/tinycc and gathered in tcc/,
+# beside std.zc, where zc finds them (`make install` puts them in SHAREDIR/tcc). The REPL's
+# JIT links that libtcc, and std/reload.zc's Reloader links it into the programs that
+# reload. ZC_HAS_JIT=0 builds zc without it (and without tcc/).
+ZC_HAS_JIT ?= 1
+TCC_OUT = tcc
+TCC_LIB = $(TCC_OUT)/libtcc.a
+TCC_BUILD = $(OBJ_DIR)/tinycc
+TCC_CC ?= $(CC)
 ZC_RUN ?= ./zc
 ifeq ($(ZC_HAS_JIT), 1)
-    CFLAGS += -DZC_HAS_JIT
+    CFLAGS += -DZC_HAS_JIT -I$(TCC_OUT)
 endif
 
 TARGET = zc$(EXE)
@@ -114,17 +113,9 @@ ALL_TOOLS = zc-lsp zc-repl zc-doc zc-format
 TOOLS = $(if $(filter 1,$(ZC_LSP)),zc-lsp zc-format) $(if $(filter 1,$(ZC_REPL)),zc-repl) zc-doc
 ifeq ($(OS),Windows_NT)
     LIBS = -lws2_32
-    ifeq ($(ZC_HAS_JIT), 1)
-        LIBS += -ltcc
-    endif
-else
-    ifeq ($(ZC_HAS_JIT), 1)
-        LIBS += -ltcc
-        # afl-clang-fast/lld don't search /usr/local/lib by default
-        ifneq ($(wildcard /usr/local/lib/libtcc.a),)
-            LIBS += -L/usr/local/lib
-        endif
-    endif
+endif
+ifeq ($(ZC_HAS_JIT), 1)
+    LIBS := $(TCC_LIB) $(LIBS)
 endif
 
  # Feature selection (default: all enabled)
@@ -230,6 +221,46 @@ VENDOR_CFLAGS = -std=gnu11 -O2 -w -fno-strict-aliasing -Ivendor/tree-sitter/incl
 $(OBJ_DIR)/vendor/%.o: vendor/%.c
 	@$(MKDIR) $(dir $@)
 	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+# tcc/ (see ZC_HAS_JIT above), laid out as tcc's lib path (tcc_set_lib_path) is on each
+# OS: its headers in include/ (on Windows with tcc's own Windows headers), libtcc1.a beside
+# them (on Windows in lib/, with the DLLs' .def files); and libtcc.a, libtcc.h and the tcc
+# program at the top. Built static on Windows too, so nothing there is a DLL to find.
+TCC_SRC = vendor/tinycc
+# (configure, run in TCC_BUILD, by a relative path: on Windows, MSYS mangles absolute ones)
+TCC_UP = $(subst $(eval) ,,$(foreach d,$(subst /, ,$(TCC_BUILD)),../))
+TCC_RT_O = runmain.o bt-exe.o bt-log.o bcheck.o bcheck_run.o
+ifeq ($(OS),Windows_NT)
+    TCC_CONFIGURE = --enable-static --config-mingw32
+    TCC_RT_LIB = $(TCC_OUT)/lib
+    TCC_RT_O += bt-dll.o
+else
+    TCC_CONFIGURE =
+    TCC_RT_LIB = $(TCC_OUT)
+endif
+$(TCC_LIB): $(wildcard vendor/tinycc/*.c vendor/tinycc/*.h vendor/tinycc/lib/* vendor/tinycc/include/*)
+	$(RM) $(TCC_BUILD) $(TCC_OUT)
+	$(MKDIR) $(TCC_BUILD) $(TCC_OUT)/include $(TCC_RT_LIB)
+	cd $(TCC_BUILD) && $(TCC_UP)$(TCC_SRC)/configure --cc="$(TCC_CC)" --tccdir="$(abspath $(TCC_OUT))" $(TCC_CONFIGURE) > configure.log
+	$(MAKE) -C $(TCC_BUILD) tcc$(EXE) libtcc.a libtcc1.a > $(TCC_BUILD)/make.log
+	cp $(TCC_SRC)/include/*.h $(TCC_SRC)/tcclib.h $(TCC_OUT)/include/
+ifeq ($(OS),Windows_NT)
+	cp -r $(TCC_SRC)/win32/include/. $(TCC_OUT)/include/
+	cp $(TCC_SRC)/win32/lib/*.def $(TCC_RT_LIB)/
+endif
+	cp $(TCC_BUILD)/libtcc1.a $(TCC_RT_LIB)/
+	for o in $(TCC_RT_O); do if [ -f $(TCC_BUILD)/$$o ]; then cp $(TCC_BUILD)/$$o $(TCC_RT_LIB)/; fi; done
+	cp $(TCC_BUILD)/tcc$(EXE) $(TCC_SRC)/libtcc.h $(TCC_OUT)/
+	printf '// zc'"'"'s own libtcc (vendor/tinycc): std/reload.zc asks zc for its directory.\n#define ZC_OWN_LIBTCC 1\n' > $(TCC_OUT)/zc_tcc.h
+	cp $(TCC_BUILD)/libtcc.a $(TCC_LIB)
+	@echo "=> Built tcc: $(TCC_OUT)/"
+
+ifeq ($(ZC_HAS_JIT), 1)
+$(OBJ_DIR)/src/repl/repl_jit.o: | $(TCC_LIB)
+$(TARGET): $(TCC_LIB)
+$(ALL_TOOLS): | $(TCC_LIB)
+endif
+tcc: $(TCC_LIB)
 
 TOOL_BASE_OBJS = $(CORE_OBJS) $(ANALYSIS_OBJS) $(CODEGEN_OBJS) $(MISRA_OBJS) \
                  $(PLATFORM_OBJS) $(UTILS_OBJS) $(DIAG_OBJS) $(PLUGIN_OBJS) $(VENDOR_OBJS)
@@ -454,6 +485,9 @@ install: $(TARGET) install-tools
 	$(INSTALL) -m 644 src/token.h src/arena.h $(INCLUDEDIR)/
 	$(INSTALL) -m 644 src/utils/emitter.h src/utils/zvec.h src/utils/zalloc.h $(INCLUDEDIR)/
 
+	# Install zc's tcc, built for where it goes (the directory it looks in is built in)
+	$(if $(filter 1,$(ZC_HAS_JIT)),$(MAKE) TCC_OUT="$(SHAREDIR)/tcc" TCC_BUILD="$(OBJ_DIR)/tinycc-install" "$(SHAREDIR)/tcc/libtcc.a")
+
 	# Install compiled plugins
 	$(INSTALL) -d $(SHAREDIR)/plugins
 	$(CP) plugins/*.so $(SHAREDIR)/plugins/
@@ -507,7 +541,7 @@ uninstall-ape:
 
 # Clean
 clean:
-	$(RM) $(OBJ_DIR) obj-ape obj-fuzz obj-fuzz-cmplog $(TARGET) $(ALL_TOOLS) libzc-*.a
+	$(RM) $(OBJ_DIR) obj-ape obj-fuzz obj-fuzz-cmplog $(TARGET) $(ALL_TOOLS) libzc-*.a $(TCC_OUT)
 	$(RM) out.c out.cpp out.m out.cu plugins/*.so a.out* out test_out_* rule_*
 	$(RM) *.gcda *.gcno *.gcov coverage.info
 	$(RM) -r coverage-report/
@@ -777,4 +811,4 @@ fuzz-clean:
 	rm -f $(FUZZ_TARGET) $(FUZZ_CMPLOG_TARGET) $(FUZZ_HARNESS)
 	rm -rf obj-fuzz obj-fuzz-cmplog
 
-.PHONY: all clean install uninstall install-ape uninstall-ape install-tools format format-check lint bench test test-misra test-tcc test-filcc test-lsp test-unit test-asan test-plugins zig clang filcc ape windows asan tsan msan lsan analyzer coverage coverage-report core lite minimal fuzz-build fuzz-run fuzz-clean test-fuzz-regression zc-lsp zc-repl zc-doc zc-format FORCE
+.PHONY: all clean install tcc uninstall install-ape uninstall-ape install-tools format format-check lint bench test test-misra test-tcc test-filcc test-lsp test-unit test-asan test-plugins zig clang filcc ape windows asan tsan msan lsan analyzer coverage coverage-report core lite minimal fuzz-build fuzz-run fuzz-clean test-fuzz-regression zc-lsp zc-repl zc-doc zc-format FORCE

@@ -97,6 +97,7 @@ int main(int argc, char **argv)
     ZenCompiler compiler = {0};
     CompilerConfig *cfg = &compiler.config;
     z_compiler_setup(&compiler);
+    zc_export_tcc_dir(cfg);
 
     int i;
     const char *optimization_level = NULL;
@@ -621,6 +622,16 @@ int main(int argc, char **argv)
         {
             print_search_paths(cfg);
             return 0;
+        }
+        else if (strcmp(arg, "--tcc-dir") == 0)
+        {
+            // (std/reload.zc's Reloader asks, to give its libtcc the headers and runtime)
+            const char *dir = zc_tcc_dir(cfg);
+            if (dir)
+            {
+                printf("%s\n", dir);
+            }
+            return dir ? 0 : 1;
         }
     }
 

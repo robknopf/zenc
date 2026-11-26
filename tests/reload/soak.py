@@ -171,6 +171,9 @@ def main():
     seed = a.seed if a.seed is not None else random.randrange(1 << 30)
     rnd = random.Random(seed)
     zc = os.path.abspath(a.zc)
+    if not a.tcc_dir:  # zc's own (vendor/tinycc)
+        r = subprocess.run([zc, "--tcc-dir"], capture_output=True, text=True)
+        a.tcc_dir = r.stdout.strip() or None
     work = tempfile.mkdtemp(prefix="reload_soak_")
     windows = os.name == "nt" or sys.platform.startswith(("msys", "cygwin")) or "MINGW" in os.environ.get("MSYSTEM", "")
     exe = os.path.join(work, "soak_host" + (".exe" if windows else ""))

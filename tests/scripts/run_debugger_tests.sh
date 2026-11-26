@@ -7,7 +7,8 @@
 # local read right.
 #
 # Usage: tests/scripts/run_debugger_tests.sh [ZC]   (default ./zc)
-# Env:   TCC_DIR=dir   the libtcc to link the host with, as for run_reload_tests.sh. It must
+# Env:   TCC_DIR=dir   the libtcc to link the host with (default zc's own), as for
+#                      run_reload_tests.sh. It must
 #                      be 0.9.28 or later: 0.9.27 writes stabs, which gdb doesn't bind
 #                      breakpoints in (then this is skipped).
 #        CC=...        the compiler for the host (default cc)
@@ -25,6 +26,8 @@ if ! command -v gdb > /dev/null; then
     exit 0
 fi
 TCC_DIRS=""
+ZC_TCC="$("$ZC" --tcc-dir 2> /dev/null)"
+[ -z "$TCC_DIR" ] && TCC_DIR="$ZC_TCC"  # zc's own (vendor/tinycc)
 # (an installed tree: include/ and lib/; Windows': libtcc.h and libtcc.dll at the top, where
 # include/ is tcc's own C headers)
 if [ -n "$TCC_DIR" ] && [ -f "$TCC_DIR/libtcc.h" ]; then

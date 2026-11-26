@@ -52,9 +52,14 @@ fn main() -> int {
   constant is an error at the `.zc` line, not tcc's "undefined symbol".
 - `symbol(name)` gives the address of a function (or anything else) in the version loaded
   now. Look it up again after a `build()` or `poll()` that returned true.
-- The host needs libtcc (0.9.27 or 0.9.28). `std/reload.zc` asks for it (`//> link:`), so
-  `zc build host.zc` links it; a C compiler given the generated C needs `-ltcc -ldl
-  -lpthread -lm`. Either needs `-L` for a libtcc outside the system's library path.
+- The host needs libtcc: zc's own, built with zc from `vendor/tinycc` into the `tcc/`
+  beside its `std.zc` (`zc --tcc-dir` names it; `make install` puts it in
+  `share/zenc/tcc`), so no tcc need be installed. `std/reload.zc` asks for it (`//>
+  include:`, `lib:`, `link:`), so `zc build host.zc` links it, and the Reloader gives it
+  that directory's headers and runtime (it asks zc). A C compiler given the generated C
+  needs `-I` and `-L` for that directory and `-ltcc -ldl -lpthread -lm`. Another libtcc
+  (0.9.27 or 0.9.28) works too: link it instead, and the Reloader leaves it looking where
+  it was built for (or `ZC_TCC_DIR`).
 - The module's code can call the host's functions and any library linked into the host
   if the host exports its symbols (link it with `-rdynamic`).
 - Call `poll()` only when none of the module's code is running: between frames, between
@@ -68,11 +73,11 @@ globals and functions (the *manifest*), and the functions below in place of C's
 constructor and destructor attributes. Without `--reload`, the output is the same as
 before.
 
-**Platforms.** x86-64 Linux and Windows. On Windows the host is built with MinGW-w64's
-gcc (its C runtime, msvcrt, is the one tcc's code uses) against a libtcc built for it
-(tcc's `win32/build-tcc.bat -c gcc`), linked with `-ltcc -lpthread -lm` and, where Linux
-has `-rdynamic`, `-Wl,--export-all-symbols` (`zc build`, which links statically there,
-links `libtcc.dll` dynamically: tcc builds no static library for Windows); MinGW's gdb debugs it (below). `poll()` scans
+**Platforms.** x86-64 Linux and Windows. On Windows zc and the host are built with
+MinGW-w64's gcc (its C runtime, msvcrt, is the one tcc's code uses), the host linked with
+`-ltcc -lpthread -lm` and, where Linux has `-rdynamic`, `-Wl,--export-all-symbols`. zc's
+libtcc is static there too, so a host has no `libtcc.dll` to find. MinGW's gdb debugs it
+(below). `poll()` scans
 the files there (no inotify yet: up to 200 ms to see a save). Elsewhere (macOS, arm64)
 libtcc loads each version, without the Reloader's own loading: old versions stay loaded,
 and a debugger sees none of them. Where the Reloader loads versions itself, a version it
@@ -348,7 +353,7 @@ breakpoints there: the Zen C extension does (or `"debug.allowBreakpointsEverywhe
 - **Variables** (arguments, locals, globals), **stepping** by `.zc` line, and `list` (the
   C's `#line` directives give the `.zc` files by their absolute path).
 
-It needs libtcc 0.9.28, which writes DWARF (`-gdwarf`). With 0.9.27 the versions are
+It needs libtcc 0.9.28 (zc's is), which writes DWARF (`-gdwarf`). With 0.9.27 the versions are
 compiled with stabs, which gdb no longer binds breakpoints in; everything else works the
 same.
 
@@ -466,7 +471,7 @@ pending on` lets a breakpoint wait for the module. lldb reads the same interface
 |---|---|
 | `Reloader::new(source, c_file)` | a reloader for the module whose root file is `source`; its C goes to `c_file` |
 | `set_zc(path)`, `set_zc_flags(flags)`, `set_source(source)`, `watch(dir)`, `add_include(dir)` | where things are |
-| `set_tcc_dir(dir)` | tcc's directory (its `include/` and `lib/`), if libtcc doesn't find it (it looks beside libtcc: on Windows, beside `libtcc.dll`); or `ZC_TCC_DIR` in the environment |
+| `set_tcc_dir(dir)` | tcc's directory (its headers and runtime), for a libtcc other than zc's that doesn't find it; or `ZC_TCC_DIR` in the environment |
 | `keep_old(bool)` | keep the version replaced loaded, for a crash to go back to (the default); or release it too |
 | `verbose(bool)` | print a line for each reload and what it changed (the default) |
 | `keep_state(ptr, size)` | the block the host passes to the module's functions |

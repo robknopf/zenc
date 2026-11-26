@@ -29,6 +29,44 @@ void print_search_paths(CompilerConfig *cfg)
     }
 }
 
+// zc's own tcc (vendor/tinycc, built into tcc/ beside std.zc): its libtcc, headers and
+// runtime, where std/reload.zc's Reloader and the programs it's in find them. ZC_TCC_DIR in
+// the environment says another; NULL when there's none (zc built with ZC_HAS_JIT=0).
+const char *zc_tcc_dir(CompilerConfig *cfg)
+{
+    static char dir[MAX_PATH_SIZE];
+    const char *env = getenv("ZC_TCC_DIR");
+    if (env && *env)
+    {
+        return env;
+    }
+    if (!cfg->root_path)
+    {
+        return NULL;
+    }
+    char check[MAX_PATH_SIZE + 16];
+    snprintf(dir, sizeof(dir), "%s/tcc", cfg->root_path);
+    snprintf(check, sizeof(check), "%s/libtcc.h", dir);
+    return access(check, F_OK) == 0 ? dir : NULL;
+}
+
+// Puts zc_tcc_dir() in the environment as ZC_TCC_DIR, for `${ZC_TCC_DIR}` in `//>`
+// directives (std/reload.zc's) and for what zc runs.
+void zc_export_tcc_dir(CompilerConfig *cfg)
+{
+    const char *dir = zc_tcc_dir(cfg);
+    const char *env = getenv("ZC_TCC_DIR");
+    if (!dir || (env && *env))
+    {
+        return;
+    }
+#if ZC_OS_WINDOWS
+    _putenv_s("ZC_TCC_DIR", dir); // (the C runtime's getenv sees it; SetEnvironmentVariable's, not)
+#else
+    setenv("ZC_TCC_DIR", dir, 1);
+#endif
+}
+
 void print_version(void)
 {
     printf(COLOR_BOLD "zc" COLOR_RESET " %s\n", ZEN_VERSION);
