@@ -1051,7 +1051,7 @@ ASTNode *parse_import(ParserContext *ctx, Lexer *l, int is_re_export)
     // can say what it links (`//> link: -lz`). Not in the LSP, which doesn't build.
     if (ctx->compiler && !ctx->config->mode_lsp)
     {
-        scan_build_directives(ctx, src, fn);
+        scan_build_directives_at(ctx, src, fn);
     }
 
     Lexer i;
