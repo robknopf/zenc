@@ -68,7 +68,7 @@
 
 //> linux: link: -ltcc -ldl -lpthread -lm
 //> macos: link: -ltcc -ldl -lpthread -lm
-//> windows: link: -ltcc -lpthread -lm
+//> windows: link: -Wl,-Bdynamic -ltcc -Wl,-Bstatic -lpthread -lm
 
 include <libtcc.h>
 
@@ -368,6 +368,22 @@ raw {
         return newest;
     }
 
+    // tcc's directory (its include/ and lib/), if not where libtcc looks: beside libtcc
+    // itself, or where it was built for. set_tcc_dir(), or ZC_TCC_DIR in the environment.
+    static char *zr_tcc_dir;
+
+    static TCCState *zr_tcc_new(void)
+    {
+        if (!zr_tcc_dir)
+        {
+            const char *env = getenv("ZC_TCC_DIR");
+            if (env && *env) zr_tcc_dir = zr_strdup(env);
+        }
+        TCCState *s = tcc_new();
+        if (s && zr_tcc_dir) tcc_set_lib_path(s, zr_tcc_dir);
+        return s;
+    }
+
     static void zr_on_tcc_error(void *opaque, const char *msg)
     {
         (void)opaque;
@@ -658,7 +674,7 @@ raw {
         for (int declared = 1; declared >= 0; declared--)
         {
             memset(&v, 0, sizeof v);
-            v.tcc = h->tcc = tcc_new();
+            v.tcc = h->tcc = zr_tcc_new();
             if (!h->tcc) return NULL;
             tcc_set_error_func(h->tcc, NULL, zr_on_tcc_quiet);
             tcc_set_output_type(h->tcc, TCC_OUTPUT_MEMORY);
@@ -1654,6 +1670,7 @@ raw {
     static void zr_set_watch(void *h, const char *d) { zr_set(&((ZrReloader *)h)->watch_dir, d); }
     static void zr_set_keep_old(void *h, int keep) { ((ZrReloader *)h)->keep_old = keep; }
     static void zr_set_verbose(void *h, int verbose) { ((ZrReloader *)h)->verbose = verbose; }
+    static void zr_set_tcc_dir(void *h, const char *dir) { (void)h; zr_set(&zr_tcc_dir, dir); }
 
     static int zr_add_include(void *h, const char *dir)
     {
@@ -3156,7 +3173,7 @@ raw {
     #ifdef ZR_LOADER
         if (r->in_memory) return zr_compile_memory(r, v, own);
         memset(v, 0, sizeof(*v));
-        v->tcc = tcc_new();
+        v->tcc = zr_tcc_new();
         if (!v->tcc) return -1;
         tcc_set_error_func(v->tcc, NULL, own ? zr_on_tcc_error : zr_on_tcc_quiet);
     #ifdef TCC_RELOCATE_AUTO
@@ -3223,7 +3240,7 @@ raw {
     static int zr_compile_memory(ZrReloader *r, ZrVersion *v, int own)
     {
         memset(v, 0, sizeof(*v));
-        v->tcc = tcc_new();
+        v->tcc = zr_tcc_new();
         if (!v->tcc) return -1;
         tcc_set_error_func(v->tcc, NULL, own ? zr_on_tcc_error : zr_on_tcc_quiet);
         tcc_set_output_type(v->tcc, TCC_OUTPUT_MEMORY);
@@ -5241,6 +5258,7 @@ extern fn zr_set_source(h: void*, source: const char*);
 extern fn zr_set_watch(h: void*, dir: const char*);
 extern fn zr_set_keep_old(h: void*, keep: c_int);
 extern fn zr_set_verbose(h: void*, verbose: c_int);
+extern fn zr_set_tcc_dir(h: void*, dir: const char*);
 extern fn zr_add_include(h: void*, dir: const char*) -> c_int;
 extern fn zr_require_same(h: void*, type_name: const char*) -> c_int;
 extern fn zr_refused(h: void*) -> c_int;
@@ -5289,6 +5307,11 @@ impl Reloader {
 
     /// Print a line for each version loaded (the default) or not. Errors are always printed.
     fn verbose(self, on: bool) { zr_set_verbose(self.handle, on ? 1 : 0); }
+
+    /// tcc's directory (with its include/ and lib/), if libtcc doesn't find it itself: it
+    /// looks beside libtcc (on Windows, beside libtcc.dll, wherever that was loaded from)
+    /// or where it was built for. ZC_TCC_DIR in the environment says the same.
+    fn set_tcc_dir(self, dir: const char*) { zr_set_tcc_dir(self.handle, dir); }
 
     /// A directory for the C compiler to search for the module's #includes.
     fn add_include(self, dir: const char*) -> bool { return zr_add_include(self.handle, dir) != 0; }

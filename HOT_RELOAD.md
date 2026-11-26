@@ -66,7 +66,8 @@ before.
 **Platforms.** x86-64 Linux and Windows. On Windows the host is built with MinGW-w64's
 gcc (its C runtime, msvcrt, is the one tcc's code uses) against a libtcc built for it
 (tcc's `win32/build-tcc.bat -c gcc`), linked with `-ltcc -lpthread -lm` and, where Linux
-has `-rdynamic`, `-Wl,--export-all-symbols`; MinGW's gdb debugs it (below). `poll()` scans
+has `-rdynamic`, `-Wl,--export-all-symbols` (`zc build`, which links statically there,
+links `libtcc.dll` dynamically: tcc builds no static library for Windows); MinGW's gdb debugs it (below). `poll()` scans
 the files there (no inotify yet: up to 200 ms to see a save). Elsewhere (macOS, arm64)
 libtcc loads each version, without the Reloader's own loading: old versions stay loaded,
 and a debugger sees none of them; on Windows that fallback (`ZC_RELOAD_MEMORY=1`) doesn't
@@ -452,6 +453,7 @@ pending on` lets a breakpoint wait for the module. lldb reads the same interface
 |---|---|
 | `Reloader::new(source, c_file)` | a reloader for the module whose root file is `source`; its C goes to `c_file` |
 | `set_zc(path)`, `set_zc_flags(flags)`, `set_source(source)`, `watch(dir)`, `add_include(dir)` | where things are |
+| `set_tcc_dir(dir)` | tcc's directory (its `include/` and `lib/`), if libtcc doesn't find it (it looks beside libtcc: on Windows, beside `libtcc.dll`); or `ZC_TCC_DIR` in the environment |
 | `keep_old(bool)` | keep the version replaced loaded, for a crash to go back to (the default); or release it too |
 | `verbose(bool)` | print a line for each reload and what it changed (the default) |
 | `keep_state(ptr, size)` | the block the host passes to the module's functions |
