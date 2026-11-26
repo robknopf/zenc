@@ -83,6 +83,9 @@ typedef struct CompilerConfig
     /// Directories for the C compiler only (//> include:), each given to it as an argument
     /// of its own, so a space in one is kept.
     zvec_Str c_include_paths;
+    /// The directories of modules with an `include "x.h"` found there: searched first for
+    /// a quoted include, as C searches the including file's own (-iquote, or -I for tcc).
+    zvec_Str c_quote_paths;
 
     char *root_path;
     char *input_dir;

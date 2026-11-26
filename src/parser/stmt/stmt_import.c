@@ -396,6 +396,33 @@ ASTNode *parse_include(ParserContext *ctx, Lexer *l)
     n->include.path = path;
     n->include.is_system = is_system;
 
+    // `include "x.h"` is looked for next to the .zc file first, as C looks next to the file
+    // that includes it: the generated C is one file somewhere else, so that directory is
+    // given to the C compiler.
+    if (!is_system && path && !z_is_abs_path(path) && ctx->current_filename)
+    {
+        const char *sep = z_path_last_sep(ctx->current_filename);
+        char dir[MAX_PATH_LEN], file[MAX_PATH_LEN * 2];
+        snprintf(dir, sizeof(dir), "%.*s", sep ? (int)(sep - ctx->current_filename) : 1,
+                 sep ? ctx->current_filename : ".");
+        snprintf(file, sizeof(file), "%s/%s", dir, path);
+        FILE *probe = fopen(file, "r");
+        if (probe)
+        {
+            fclose(probe);
+            zvec_Str *qp = &ctx->config->c_quote_paths;
+            int seen = 0;
+            for (size_t i = 0; i < qp->length && !seen; i++)
+            {
+                seen = strcmp(qp->data[i], dir) == 0;
+            }
+            if (!seen)
+            {
+                zvec_push_Str(qp, xstrdup(dir));
+            }
+        }
+    }
+
     if (!is_system && path)
     {
         scan_c_header_contents(ctx, path, 0);
@@ -1024,7 +1051,7 @@ ASTNode *parse_import(ParserContext *ctx, Lexer *l, int is_re_export)
     // can say what it links (`//> link: -lz`). Not in the LSP, which doesn't build.
     if (ctx->compiler && !ctx->config->mode_lsp)
     {
-        scan_build_directives(ctx, src);
+        scan_build_directives(ctx, src, fn);
     }
 
     Lexer i;

@@ -74,7 +74,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    scan_build_directives(&ctx, src);
+    scan_build_directives(&ctx, src, cfg->input_file);
 
     Lexer l;
     lexer_init(&l, src, ctx.config, ctx.current_filename);
