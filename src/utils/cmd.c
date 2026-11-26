@@ -479,6 +479,39 @@ void arg_list_add_fmt(ArgList *list, const char *fmt, ...)
     zfree(buf);
 }
 
+void write_reload_build_args(ZenCompiler *compiler, const char *path)
+{
+    ArgList list = {0};
+    add_include_args(&list, compiler);
+    arg_list_add_from_string(&list, compiler->cflags);
+    CompilerConfig *cfg = &compiler->config;
+    FILE *f = NULL;
+    for (size_t i = 0; i < list.count + cfg->c_files.length; i++)
+    {
+        const char *a = i < list.count ? list.args[i] : cfg->c_files.data[i - list.count];
+        // (include directories, defines and C files: what tcc needs; -iquote's directory too)
+        int quote_dir = i > 0 && i < list.count && strcmp(list.args[i - 1], "-iquote") == 0;
+        if (i < list.count && strncmp(a, "-I", 2) != 0 && strncmp(a, "-D", 2) != 0 && !quote_dir)
+        {
+            continue;
+        }
+        if (!f && !(f = fopen(path, "w")))
+        {
+            break;
+        }
+        fprintf(f, "%s%s\n", quote_dir ? "-I" : "", a);
+    }
+    if (f)
+    {
+        fclose(f);
+    }
+    else
+    {
+        remove(path);
+    }
+    arg_list_free(&list);
+}
+
 void arg_list_free(ArgList *list)
 {
     for (size_t i = 0; i < list->count; i++)

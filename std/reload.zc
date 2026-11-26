@@ -3186,6 +3186,47 @@ raw {
     // symbols.
     static int zr_compile_memory(ZrReloader *r, ZrVersion *v, int own);
 
+    // What zc would give the C compiler besides the module's C file, which zc --reload
+    // writes in <c_file>.build, one a line: its include directories (-I), defines (-D), and
+    // the C files the module links (@link("x.c"), as std/regex.zc's TRE), compiled with it
+    // into the same version. -1 if one of those doesn't compile.
+    // Pass 0 applies the options, pass 1 adds the C files (after the module's own).
+    static int zr_add_build_args(ZrReloader *r, TCCState *s, int pass)
+    {
+        size_t len = strlen(r->c_file) + 7;
+        char *path = (char *)malloc(len);
+        if (!path) return -1;
+        snprintf(path, len, "%s.build", r->c_file);
+        FILE *f = fopen(path, "r");
+        free(path);
+        if (!f) return 0;
+        char line[4096];
+        int rc = 0;
+        {
+            while (rc == 0 && fgets(line, sizeof line, f))
+            {
+                size_t n = strlen(line);
+                while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+                if (!n) continue;
+                if (!strncmp(line, "-I", 2) || !strncmp(line, "-D", 2))
+                {
+                    if (pass) continue;
+                    if (line[1] == 'I') tcc_add_include_path(s, line + 2);
+                    else
+                    {
+                        char *eq = strchr(line + 2, '=');
+                        if (eq) *eq = 0;
+                        tcc_define_symbol(s, line + 2, eq ? eq + 1 : "1");
+                    }
+                }
+                else if (pass && tcc_add_file(s, line) == -1)
+                    rc = -1;
+            }
+        }
+        fclose(f);
+        return rc;
+    }
+
     #ifdef ZR_LOADER
     // Where a version that uses the store finds each global: there (zl_load's resolver).
     static void *zr_resolve_store(void *ctx, const char *name)
@@ -3216,7 +3257,8 @@ raw {
         tcc_define_symbol(v->tcc, "_Thread_local", "");
         tcc_define_symbol(v->tcc, "__thread", "");
         if (own) tcc_define_symbol(v->tcc, "ZC_RELOAD_OWN_GLOBALS", "1");
-        if (tcc_add_file(v->tcc, r->c_file) == -1)
+        if (zr_add_build_args(r, v->tcc, 0) == -1 || tcc_add_file(v->tcc, r->c_file) == -1 ||
+            zr_add_build_args(r, v->tcc, 1) == -1)
         {
             zr_version_delete(v);
             return -1; // the C doesn't compile: not a reason to change how it's loaded
@@ -3282,7 +3324,8 @@ raw {
         else
             for (unsigned i = 0; i < r->nstore; i++)
                 tcc_add_symbol(v->tcc, r->store[i].name, r->store[i].addr);
-        if (tcc_add_file(v->tcc, r->c_file) == -1 || zr_relocate(v) < 0)
+        if (zr_add_build_args(r, v->tcc, 0) == -1 || tcc_add_file(v->tcc, r->c_file) == -1 ||
+            zr_add_build_args(r, v->tcc, 1) == -1 || zr_relocate(v) < 0)
         {
             zr_version_delete(v);
             return -1;

@@ -1,0 +1,10 @@
+// Version 1. A module that uses std/regex.zc, whose C (TRE) is a C file it links
+// (@link("...tre_full.c")): the Reloader compiles that file with the module.
+import "std/regex.zc"
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    let re = Regex::compile("a+b");
+    let found = re.match("xaab");
+    println "version 1: {found}";
+    re.destroy();
+}

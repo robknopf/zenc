@@ -376,6 +376,17 @@ static int compile_program(ZenCompiler *compiler)
             perror("rename output");
             return 1;
         }
+        // --reload: what else the C compiler would be given (include directories, defines,
+        // the C files the module links: std/regex.zc's TRE), in <output>.build, for the
+        // Reloader to compile the module the same way.
+        if (compiler->config.reload_mode && compiler->config.output_file)
+        {
+            size_t len = strlen(compiler->config.output_file) + 7;
+            char *args = xmalloc(len);
+            snprintf(args, len, "%s.build", compiler->config.output_file);
+            write_reload_build_args(compiler, args);
+            zfree(args);
+        }
         return 0;
     }
 

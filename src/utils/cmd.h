@@ -57,6 +57,14 @@ void arg_list_add(ArgList *list, const char *arg);
 ZEN_FORMAT_PRINTF(2, 3) void arg_list_add_fmt(ArgList *list, const char *fmt, ...);
 
 /**
+ * @brief --reload: writes, one a line, what the C compiler would be given besides the C file
+ * (include directories and defines as -I/-D, and the C files the module links), for the
+ * Reloader (std/reload.zc) to compile the module the same way. Removes `path` if there's
+ * nothing to say.
+ */
+void write_reload_build_args(ZenCompiler *compiler, const char *path);
+
+/**
  * @brief Free the argument list
  * @param list The list to free
  */
