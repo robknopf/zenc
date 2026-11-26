@@ -369,6 +369,49 @@ else
     echo "$out" | head -8 | sed 's/^/      /'
 fi
 
+# //> include: the same, with a quoted directory holding a space, and a list of two.
+mkdir -p "$workdir/cnames/d1" "$workdir/cnames/d2"
+printf 'int lib_one(void);\n' > "$workdir/cnames/d1/one.h"
+printf 'int lib_two(void);\n' > "$workdir/cnames/d2/two.h"
+printf 'int lib_one(void) { return 1; }\nint lib_two(void) { return 2; }\n' > "$workdir/cnames/d1/one.c"
+cat > "$workdir/cnames/src/directive.zc" <<EOF_Z
+//> include: "$workdir/cnames/inc dir"
+//> include: $workdir/cnames/d1 $workdir/cnames/d2
+include <onlyinc.h>
+include <one.h>
+include <two.h>
+fn main() {
+    let n = lib_add(1, 2) + lib_one() + lib_two();
+    println "{n}";
+}
+EOF_Z
+sed 's/lib_two()/lib_tow()/' "$workdir/cnames/src/directive.zc" > "$workdir/cnames/src/directive_bad.zc"
+out=$("$ZC" transpile "$workdir/cnames/src/directive_bad.zc" -o "$workdir/cnames/directive_bad.c" 2>&1)
+if echo "$out" | grep -q "Did you mean 'lib_two'"; then
+    check "//> include: directories (quoted, with a space; and a list) are read for names" 1
+else
+    check "//> include: directories (quoted, with a space; and a list) are read for names" 0
+    echo "$out" | head -8 | sed 's/^/      /'
+fi
+out=$("$ZC" run "$workdir/cnames/src/directive.zc" "$workdir/cnames/inc dir/onlyinc.c" "$workdir/cnames/d1/one.c" -o "$workdir/cnames/directive" 2>&1)
+if echo "$out" | grep -q "^6$"; then
+    check "a program builds with //> include: directories (quoted, with a space; and a list)" 1
+else
+    check "a program builds with //> include: directories (quoted, with a space; and a list)" 0
+    echo "$out" | head -8 | sed 's/^/      /'
+fi
+
+# Inside an interpolated string, which reaches the C as text, the same.
+printf 'include "lib.h"\nfn main() {\n    let n = 1;\n    println "{lib_ad(1, 2)} {LIB_LIMTI} {n} {lib_add(1, 2)} {LIB_LIMIT}";\n}\n' > "$workdir/cnames/interp.zc"
+out=$("$ZC" transpile "$workdir/cnames/interp.zc" -o "$workdir/cnames/interp.c" 2>&1)
+if echo "$out" | grep -q "Undefined function 'lib_ad'" && echo "$out" | grep -q "Undefined name 'LIB_LIMTI'" &&
+    [ "$(echo "$out" | grep -c '^error')" = 2 ]; then
+    check "a misspelled C name inside string interpolation is reported" 1
+else
+    check "a misspelled C name inside string interpolation is reported" 0
+    echo "$out" | head -10 | sed 's/^/      /'
+fi
+
 out=$(ZC_NO_C_NAMES=1 "$ZC" transpile "$workdir/cnames/bad.zc" -o "$workdir/cnames/bad.c" 2>&1)
 if ! echo "$out" | grep -q "Undefined"; then
     check "ZC_NO_C_NAMES=1 turns the C names check off" 1

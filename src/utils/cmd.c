@@ -280,11 +280,14 @@ static void add_include_args(ArgList *list, ZenCompiler *compiler)
         arg_list_add_fmt(list, "-I%s", cfg->root_path);
     }
 
-    // User-defined include paths
-    for (size_t i = 0; i < cfg->include_paths.length; i++)
+    // User-defined include paths: -I, then //> include:
+    for (size_t i = 0; i < cfg->include_paths.length + cfg->c_include_paths.length; i++)
     {
+        const char *dir = i < cfg->include_paths.length
+                              ? cfg->include_paths.data[i]
+                              : cfg->c_include_paths.data[i - cfg->include_paths.length];
         char abs_inc[MAX_PATH_LEN];
-        z_get_absolute_path(cfg->include_paths.data[i], abs_inc, sizeof(abs_inc));
+        z_get_absolute_path(dir, abs_inc, sizeof(abs_inc));
         if (abs_inc[0])
         {
             arg_list_add_fmt(list, "-I%s", abs_inc);

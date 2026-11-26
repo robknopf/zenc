@@ -188,6 +188,84 @@ static int name_is_constant_like(const char *name)
     return letter;
 }
 
+// With the names the program's C declares known: a name in capitals that neither the Zen C
+// nor its C declares. (Only capitals: the parser leaves some locals unresolved too, so a
+// lower-case name can't be told from an undefined one.)
+int c_names_name_unknown(ParserContext *ctx, const char *name)
+{
+    return name_is_constant_like(name) && !should_suppress_undef_warning(ctx, name) &&
+           !find_func(ctx, name) && !find_symbol_in_all(ctx, name) &&
+           !find_symbol_entry(ctx, name) && !strstr(name, "::") && !strstr(name, "__");
+}
+
+void c_names_report_name(ParserContext *ctx, ASTNode *node)
+{
+    const char *close = c_name_closest(ctx, node->var_ref.name);
+    char msg[MAX_SHORT_MSG_LEN], help[MAX_SHORT_MSG_LEN];
+    snprintf(msg, sizeof(msg), "Undefined name '%s'", node->var_ref.name);
+    snprintf(help, sizeof(help), close ? "Did you mean '%s'?" : "%s",
+             close ? close
+                   : "Not declared here, nor by an included C header (ZC_NO_C_NAMES=1 skips "
+                     "this check)");
+    const char *hints[] = {help, NULL};
+    zerror_with_hints(node->token, msg, hints);
+}
+
+// The expressions of an interpolated string (println "{f(x)}"), which reach the C as text:
+// each call and each name in capitals, checked as they would be outside it.
+static void c_names_check_expr(ParserContext *ctx, ASTNode *node, int depth)
+{
+    if (!node || depth > 256 || node->kind == NODE_LAMBDA || node->kind == NODE_COMPTIME)
+    {
+        return;
+    }
+    if (node->kind == NODE_EXPR_CALL && node->call.callee &&
+        node->call.callee->kind == NODE_EXPR_VAR)
+    {
+        if (!c_names_call_known(ctx, node->call.callee))
+        {
+            c_names_report_call(ctx, node->call.callee);
+        }
+        for (ASTNode *a = node->call.args; a; a = a->next)
+        {
+            c_names_check_expr(ctx, a, depth + 1);
+        }
+        return;
+    }
+    if (node->kind == NODE_EXPR_VAR)
+    {
+        if (c_names_name_unknown(ctx, node->var_ref.name))
+        {
+            c_names_report_name(ctx, node);
+        }
+        return;
+    }
+    if (node->kind == NODE_RAW_STMT)
+    {
+        for (int i = 0; i < node->raw_stmt.interp_expr_count; i++)
+        {
+            c_names_check_expr(ctx, node->raw_stmt.interp_exprs[i], depth + 1);
+        }
+        return;
+    }
+    ASTChildren children = ast_children(node);
+    for (int i = 0; i < children.count; i++)
+    {
+        for (ASTNode *child = *children.slots[i]; child; child = child->next)
+        {
+            c_names_check_expr(ctx, child, depth + 1);
+        }
+    }
+}
+
+void c_names_check_raw(ParserContext *ctx, ASTNode *node)
+{
+    if (ctx->c_names_ready && !ctx->silent_warnings && node->kind == NODE_RAW_STMT)
+    {
+        c_names_check_expr(ctx, node, 0);
+    }
+}
+
 static void codegen_var_expr(ParserContext *ctx, ASTNode *node)
 {
     if (ctx->cg.current_lambda)
@@ -233,25 +311,9 @@ static void codegen_var_expr(ParserContext *ctx, ASTNode *node)
             zwarn_at(node->token, "%s\n   = help: %s", msg, help);
         }
         else if (ctx->c_names_ready && !ctx->silent_warnings &&
-                 name_is_constant_like(node->var_ref.name) &&
-                 !should_suppress_undef_warning(ctx, node->var_ref.name) &&
-                 !find_func(ctx, node->var_ref.name) &&
-                 !find_symbol_in_all(ctx, node->var_ref.name) &&
-                 !find_symbol_entry(ctx, node->var_ref.name) && !strstr(node->var_ref.name, "::") &&
-                 !strstr(node->var_ref.name, "__") && strcmp(node->var_ref.name, "self") != 0)
+                 c_names_name_unknown(ctx, node->var_ref.name))
         {
-            // Nothing in the Zen C declares it, and nor does the program's C. Only for a name
-            // in capitals (a C constant or macro, as written): the parser leaves some locals
-            // unresolved too, so a lower-case name isn't checked.
-            const char *close = c_name_closest(ctx, node->var_ref.name);
-            char msg[MAX_SHORT_MSG_LEN], help[MAX_SHORT_MSG_LEN];
-            snprintf(msg, sizeof(msg), "Undefined name '%s'", node->var_ref.name);
-            snprintf(help, sizeof(help), close ? "Did you mean '%s'?" : "%s",
-                     close ? close
-                           : "Not declared here, nor by an included C header (ZC_NO_C_NAMES=1 "
-                             "skips this check)");
-            const char *hints[] = {help, NULL};
-            zerror_with_hints(node->token, msg, hints);
+            c_names_report_name(ctx, node);
         }
     }
 
@@ -618,6 +680,7 @@ void emit_raw_with_captures(ParserContext *ctx, const char *content)
 
 void handle_raw_stmt(ParserContext *ctx, ASTNode *node)
 {
+    c_names_check_raw(ctx, node);
     emit_raw_with_captures(ctx, node->raw_stmt.content);
 }
 

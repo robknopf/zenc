@@ -896,6 +896,7 @@ void codegen_node_single(ParserContext *ctx, ASTNode *node)
         break;
     }
     case NODE_RAW_STMT:
+        c_names_check_raw(ctx, node);
         emit_raw_with_captures(ctx, node->raw_stmt.content);
         EMIT(ctx, "\n");
         break;
