@@ -680,7 +680,12 @@ static void directive_dir(const char *file, const char *dir, char *out, size_t s
     }
 }
 
-void scan_build_directives(ParserContext *ctx, const char *src, const char *path)
+void scan_build_directives(ParserContext *ctx, const char *src)
+{
+    scan_build_directives_at(ctx, src, NULL);
+}
+
+void scan_build_directives_at(ParserContext *ctx, const char *src, const char *path)
 {
     ZenCompiler *compiler = ctx->compiler;
     const char *p = src;
