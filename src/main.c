@@ -301,7 +301,8 @@ int main(int argc, char **argv)
             // A module for a reload host, which compiles it with libtcc: tcc's C unless --cc
             // says otherwise.
             cfg->reload_mode = 1;
-            if (!cfg->cc[0] || strcmp(cfg->cc, "gcc") == 0)
+            // (the default compiler: "gcc", "gcc.exe" on Windows)
+            if (!cfg->cc[0] || strcmp(cfg->cc, "gcc") == 0 || strcmp(cfg->cc, "gcc.exe") == 0)
             {
                 snprintf(cfg->cc, sizeof(cfg->cc), "tcc");
             }

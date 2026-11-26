@@ -35,6 +35,35 @@ raw {
 
     #include <dirent.h>
     #include <stdint.h>
+    #include <sys/stat.h>
+    static _Bool on_linux(void)
+    {
+    #ifdef __linux__
+        return 1;
+    #else
+        return 0;
+    #endif
+    }
+    #ifdef _WIN32
+    #include <windows.h>
+    #endif
+    // An editor's save: `from` renamed over `to` (which Windows' rename() won't replace).
+    static void replace_file(const char *from, const char *to)
+    {
+    #ifdef _WIN32
+        MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING);
+    #else
+        rename(from, to);
+    #endif
+    }
+    static void make_dir(const char *path)
+    {
+    #ifdef _WIN32
+        mkdir(path);
+    #else
+        mkdir(path, 0755);
+    #endif
+    }
     // Whether the code at `p` is in an object file registered with debuggers (gdb's JIT
     // interface, which std/reload.zc defines): in one of its loaded sections.
     struct zr_jit_entry;
@@ -70,14 +99,18 @@ raw {
     }
 }
 extern fn registered(p: void*) -> c_int;
+extern fn make_dir(path: const char*);
+extern fn replace_file(from: const char*, to: const char*);
+extern fn on_linux() -> bool;
 extern fn files_left(dir: const char*) -> int;
 extern fn put(path: const char*, text: const char*);
 extern fn module_src(out: char*, n: usize, value: int);
 
-// poll(), after waiting out the 200 ms between scans when scanning (ZC_RELOAD_SCAN set).
+// poll(), after waiting out the 200 ms between scans when scanning (ZC_RELOAD_SCAN set, or
+// not Linux: no inotify).
 fn poll_now(code: Reloader*) -> bool {
     let scan = getenv("ZC_RELOAD_SCAN");
-    if scan != NULL && scan[0] != 0 { usleep(250000); }
+    if (scan != NULL && scan[0] != 0) || !on_linux() { usleep(250000); }
     return code.poll();
 }
 
@@ -102,7 +135,7 @@ fn main(argc: int, argv: char**) -> int {
     let c_file: char[4096];
     let src: char[512];
     snprintf(dir, 3072, "%s/mod", argv[2]);
-    mkdir(dir, 0o755);
+    make_dir(dir);
     snprintf(main_zc, 4096, "%s/main.zc", dir);
     snprintf(c_file, 4096, "%s/module.c", argv[2]);
 
@@ -136,7 +169,7 @@ fn main(argc: int, argv: char**) -> int {
     module_src(src, 512, 3);
     snprintf(tmp, 4096, "%s/main.zc.swp", dir);
     put(tmp, src);
-    rename(tmp, main_zc);
+    replace_file(tmp, main_zc);
     check("saved through a rename", poll_now(&code), true);
     value = code.symbol("poll_value");
     check("and the new code runs", value() == 3, true);
@@ -147,7 +180,7 @@ fn main(argc: int, argv: char**) -> int {
 
     // A directory made after the first poll: a .zc in it counts, and so do later edits.
     snprintf(path, 4096, "%s/sub", dir);
-    mkdir(path, 0o755);
+    make_dir(path);
     snprintf(path, 4096, "%s/sub/extra.zc", dir);
     put(path, r"fn extra() -> int { return 1; }");
     check("a .zc added in a new directory", poll_now(&code), true);

@@ -63,7 +63,16 @@ globals and functions (the *manifest*), and the functions below in place of C's
 constructor and destructor attributes. Without `--reload`, the output is the same as
 before.
 
-Not yet: Windows, `--misra` (an error with `--reload`), and C++ output.
+**Platforms.** x86-64 Linux and Windows. On Windows the host is built with MinGW-w64's
+gcc (its C runtime, msvcrt, is the one tcc's code uses) against a libtcc built for it
+(tcc's `win32/build-tcc.bat -c gcc`), linked with `-ltcc -lpthread -lm` and, where Linux
+has `-rdynamic`, `-Wl,--export-all-symbols`; MinGW's gdb debugs it (below). `poll()` scans
+the files there (no inotify yet: up to 200 ms to see a save). Elsewhere (macOS, arm64)
+libtcc loads each version, without the Reloader's own loading: old versions stay loaded,
+and a debugger sees none of them; on Windows that fallback (`ZC_RELOAD_MEMORY=1`) doesn't
+keep globals across reloads either.
+
+Not yet: `--misra` (an error with `--reload`), and C++ output.
 
 ## What a reload keeps
 
@@ -340,6 +349,10 @@ information costs a little per reload: about 50 ms at 1000 generated modules, 23
 
 A module's global or function of the same name as one in the host or libc is the module's
 own: its names bind to its own definitions first [`global_name_taken`].
+
+On Windows, MinGW-w64's gdb (10.2 tried) reads it the same way: tcc's object files for
+Windows have no frame information for gdb, so the Reloader writes it (every tcc function
+starts the same way), and gives the system the version's unwind table (`.pdata`).
 
 In VS Code, a `cppdbg` launch configuration for the host is enough; breakpoints in `.zc`
 files show as unbound until the module loads. For gdb on the command line, `set breakpoint

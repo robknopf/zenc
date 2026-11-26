@@ -36,14 +36,19 @@ elif [ -f /usr/local/lib/libtcc.a ]; then
     TCC_DIRS="-I/usr/local/include -L/usr/local/lib"
 fi
 CC="${CC:-cc}"
+LIBS="-ltcc -ldl -lpthread -lm"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) # Windows: no libdl; the host exports its functions to the module
+        LIBS="-ltcc -lpthread -lm -Wl,--export-all-symbols" ;;
+esac
 if ! printf '#include <libtcc.h>\nint main(void) { tcc_delete(tcc_new()); return 0; }\n' |
-    $CC -x c - -o "$WORK/probe" $TCC_DIRS -ltcc -ldl -lpthread -lm > /dev/null 2>&1; then
+    $CC -x c - -o "$WORK/probe" $TCC_DIRS $LIBS > /dev/null 2>&1; then
     echo "Reload tests skipped: libtcc is not available"
     exit 0
 fi
 if ! "$ZC" transpile -q "$ROOT/tests/reload/host.zc" -o "$WORK/host.c" \
         > "$WORK/host_build.log" 2>&1 ||
-    ! $CC "$WORK/host.c" $TCC_DIRS -ltcc -ldl -lpthread -lm -o "$WORK/host" \
+    ! $CC "$WORK/host.c" $TCC_DIRS $LIBS -o "$WORK/host" \
         >> "$WORK/host_build.log" 2>&1; then
     echo "Reload tests: the host does not build"
     sed 's/^/  /' "$WORK/host_build.log" | head -10
@@ -103,7 +108,7 @@ done
 mkdir -p "$WORK/poll"
 if "$ZC" transpile -q "$ROOT/tests/reload/poll_host.zc" -o "$WORK/poll_host.c" \
         > "$WORK/poll/build.log" 2>&1 &&
-    $CC "$WORK/poll_host.c" $TCC_DIRS -ltcc -ldl -lpthread -lm -o "$WORK/poll_host" \
+    $CC "$WORK/poll_host.c" $TCC_DIRS $LIBS -o "$WORK/poll_host" \
         >> "$WORK/poll/build.log" 2>&1 &&
     timeout 60 "$WORK/poll_host" "$ZC" "$WORK/poll" > "$WORK/poll/out" 2>&1 &&
     rm -rf "$WORK/poll/mod" &&

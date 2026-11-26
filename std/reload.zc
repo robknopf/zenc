@@ -60,12 +60,15 @@
 //
 // Needs libtcc (0.9.27 or 0.9.28). `zc build` and `zc run` link it, from the line below; a
 // C compiler given the generated C needs `-ltcc -ldl -lpthread -lm`, and either needs `-L`
-// for a libtcc outside the system's library path. The Reloader loads versions itself on
-// Linux x86-64; elsewhere libtcc loads them, old versions stay loaded and a debugger sees
-// none of them. Not available on Windows yet. It is for development hosts, and not written
-// for --misra builds.
+// for a libtcc outside the system's library path (on Windows, `-ltcc -lpthread -lm`, and
+// the host linked with -Wl,--export-all-symbols where Linux's has -rdynamic). The Reloader
+// loads versions itself on x86-64 Linux and Windows; elsewhere libtcc loads them, old
+// versions stay loaded and a debugger sees none of them. It is for development hosts, and
+// not written for --misra builds.
 
-//> link: -ltcc -ldl -lpthread -lm
+//> linux: link: -ltcc -ldl -lpthread -lm
+//> macos: link: -ltcc -ldl -lpthread -lm
+//> windows: link: -ltcc -lpthread -lm
 
 include <libtcc.h>
 
@@ -81,8 +84,15 @@ raw {
     #include <unistd.h>
     #include <setjmp.h>
     #include <signal.h>
+    #ifdef _WIN32
+    #include <windows.h>
+    #define PSAPI_VERSION 2 // EnumProcessModules is kernel32's (K32...): no psapi library
+    #include <psapi.h>
+    #include <malloc.h>
+    #else
     #include <sys/mman.h>
     #include <dlfcn.h>
+    #endif
     #ifdef __linux__
     #include <sys/inotify.h>
     #include <elf.h>
@@ -92,8 +102,60 @@ raw {
     #if defined(__x86_64__) && !defined(_WIN32)
     #define ZR_FORWARD 1 // old functions can be made to jump to new ones (zr_forward)
     #endif
-    #if defined(__x86_64__) && defined(__linux__)
+    #if defined(__x86_64__) && (defined(__linux__) || defined(_WIN32))
     #define ZR_LOADER 1 // the Reloader loads each version itself (zl_load)
+    #endif
+
+    // What Windows spells otherwise.
+    #ifdef _WIN32
+    static void *zr_aligned_alloc(size_t align, size_t size) { return _aligned_malloc(size, align); }
+    static void zr_aligned_free(void *p) { _aligned_free(p); }
+    static char *zr_realpath(const char *path) { return _fullpath(NULL, path, 0); }
+    // open_memstream: a temporary file, read back when closed (zr_ms_close).
+    static struct ZrMs { FILE *f; char **buf; size_t *len; } zr_ms[16];
+    static FILE *zr_ms_open(char **buf, size_t *len)
+    {
+        char dir[MAX_PATH], path[MAX_PATH];
+        if (!GetTempPathA(MAX_PATH, dir) || !GetTempFileNameA(dir, "zr", 0, path)) return NULL;
+        FILE *f = fopen(path, "w+bD"); // D: removed when closed
+        for (int i = 0; f && i < 16; i++)
+            if (!zr_ms[i].f)
+            {
+                zr_ms[i] = (struct ZrMs){f, buf, len};
+                *buf = NULL;
+                *len = 0;
+                return f;
+            }
+        if (f) fclose(f);
+        return NULL;
+    }
+    static void zr_ms_close(FILE *f)
+    {
+        for (int i = 0; i < 16; i++)
+        {
+            if (zr_ms[i].f != f) continue;
+            fflush(f);
+            long n = ftell(f);
+            char *b = (char *)malloc(n > 0 ? (size_t)n + 1 : 1);
+            if (b)
+            {
+                rewind(f);
+                size_t got = n > 0 ? fread(b, 1, (size_t)n, f) : 0;
+                b[got] = 0;
+                *zr_ms[i].buf = b;
+                *zr_ms[i].len = got;
+            }
+            zr_ms[i].f = NULL;
+            break;
+        }
+        fclose(f);
+    }
+    #else
+    static void *zr_aligned_alloc(size_t align, size_t size) { return aligned_alloc(align, size); }
+    static void zr_aligned_free(void *p) { free(p); }
+    static char *zr_realpath(const char *path) { return realpath(path, NULL); }
+    static FILE *zr_ms_open(char **buf, size_t *len) { return open_memstream(buf, len); }
+    static void zr_ms_close(FILE *f) { fclose(f); }
     #endif
 
     enum { ZR_MAX_INCLUDES = 32, ZR_MAX_REQUIRED = 32 };
@@ -236,14 +298,32 @@ raw {
 
     static double zr_now_ms(void)
     {
+    #ifdef _WIN32
+        LARGE_INTEGER f, c;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&c);
+        return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+    #else
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+    #endif
     }
 
-    static int64_t zr_mtime_ns(const struct stat *st)
+    // A file's modification time in nanoseconds (to 100 ns on Windows, whose stat() gives
+    // whole seconds: two saves in a second would look like one).
+    static int64_t zr_mtime_ns(const struct stat *st, const char *path)
     {
-    #if defined(__APPLE__)
+    #if defined(_WIN32)
+        WIN32_FILE_ATTRIBUTE_DATA a;
+        if (path && GetFileAttributesExA(path, GetFileExInfoStandard, &a))
+        {
+            // (100 ns units since 1601: since 1970, then in nanoseconds, which fits)
+            int64_t t = (int64_t)((uint64_t)a.ftLastWriteTime.dwHighDateTime << 32 | a.ftLastWriteTime.dwLowDateTime);
+            return (t - 116444736000000000LL) * 100;
+        }
+        return (int64_t)st->st_mtime * 1000000000LL;
+    #elif defined(__APPLE__)
         return (int64_t)st->st_mtimespec.tv_sec * 1000000000LL + st->st_mtimespec.tv_nsec;
     #else
         return (int64_t)st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
@@ -278,7 +358,7 @@ raw {
                 else
                 {
                     size_t n = strlen(name);
-                    if (n > 3 && strcmp(name + n - 3, ".zc") == 0) m = zr_mtime_ns(&st);
+                    if (n > 3 && strcmp(name + n - 3, ".zc") == 0) m = zr_mtime_ns(&st, path);
                 }
                 if (m > newest) newest = m;
             }
@@ -303,7 +383,9 @@ raw {
     // libtcc 0.9.27 compiles into memory the caller gives it; 0.9.28 always allocates it.
     static int zr_relocate(ZrVersion *v)
     {
-    #ifdef TCC_RELOCATE_AUTO
+    #if defined(TCC_RELOCATE_AUTO) && defined(_WIN32)
+        return tcc_relocate(v->tcc, TCC_RELOCATE_AUTO);
+    #elif defined(TCC_RELOCATE_AUTO)
         int size = tcc_relocate(v->tcc, NULL);
         if (size < 0) return -1;
         long page = sysconf(_SC_PAGESIZE);
@@ -346,10 +428,12 @@ raw {
     {
         if (v->im) zl_free(v->im);
         if (v->tcc) tcc_delete(v->tcc);
+    #ifndef _WIN32
         if (v->mem)
         {
             munmap(v->mem, v->mem_size);
         }
+    #endif
         memset(v, 0, sizeof(*v));
     }
 
@@ -390,14 +474,21 @@ raw {
     #define ZL_BIND(info) ((unsigned)(info) >> 4)
     #define ZL_TYPE(info) ((unsigned)(info) & 0xf)
     enum { ZL_R_64 = 1, ZL_R_PC32 = 2, ZL_R_PLT32 = 4, ZL_R_GOTPCREL = 9, ZL_R_32 = 10, ZL_R_32S = 11,
-           ZL_R_PC64 = 24, ZL_R_GOTPCRELX = 41, ZL_R_REX_GOTPCRELX = 42 };
+           ZL_R_PC64 = 24, ZL_R_GOTPCRELX = 41, ZL_R_REX_GOTPCRELX = 42,
+           ZL_R_ADDR32NB = 8 }; // (tcc's for Windows: an offset from the image's base, in .pdata)
 
     // gdb's JIT interface (gdb/jit.h), which lldb reads too. Weak: a host with a JIT of its
     // own (LLVM) defines them, and then both register in its list.
     typedef struct zr_jit_entry { struct zr_jit_entry *next_entry, *prev_entry; const char *symfile_addr; uint64_t symfile_size; } zr_jit_entry;
     struct zr_jit_descriptor { uint32_t version; uint32_t action_flag; zr_jit_entry *relevant_entry, *first_entry; };
-    __attribute__((weak, noinline, used)) void __jit_debug_register_code(void) { __asm__ volatile("" ::: "memory"); }
-    __attribute__((weak, used)) struct zr_jit_descriptor __jit_debug_descriptor = {1, 0, 0, 0};
+    // (Not weak on Windows, where a weak definition doesn't keep the name gdb looks for.)
+    #ifdef _WIN32
+    #define ZL_JIT_WEAK
+    #else
+    #define ZL_JIT_WEAK weak,
+    #endif
+    __attribute__((ZL_JIT_WEAK noinline, used)) void __jit_debug_register_code(void) { __asm__ volatile("" ::: "memory"); }
+    __attribute__((ZL_JIT_WEAK used)) struct zr_jit_descriptor __jit_debug_descriptor = {1, 0, 0, 0};
 
     static void zl_jit_add(zr_jit_entry *e)
     {
@@ -440,8 +531,13 @@ raw {
     {
         if (zl_space.base) return 1;
         if (zl_space.failed) return 0;
+    #ifdef _WIN32
+        void *p = VirtualAlloc(NULL, ZL_SPACE_SIZE, MEM_RESERVE, PAGE_NOACCESS);
+        if (!p)
+    #else
         void *p = mmap(NULL, ZL_SPACE_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (p == MAP_FAILED)
+    #endif
         {
             zl_space.failed = 1;
             return 0;
@@ -455,7 +551,11 @@ raw {
 
     static int zl_commit(size_t start, size_t end)
     {
+    #ifdef _WIN32
+        return VirtualAlloc(zl_space.base + start, end - start, MEM_COMMIT, PAGE_EXECUTE_READWRITE) != NULL;
+    #else
         return mprotect(zl_space.base + start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+    #endif
     }
 
     // Kept memory: `size` bytes, zeroed, aligned to `align` (a power of two), never released.
@@ -525,8 +625,12 @@ raw {
         {
             if (zl_space.live[i].start != start) continue;
             size_t len = zl_space.live[i].end - start;
+    #ifdef _WIN32
+            VirtualFree(mem, len, MEM_DECOMMIT); // reserved still: an access faults
+    #else
             madvise(mem, len, MADV_DONTNEED);
             mprotect(mem, len, PROT_NONE);
+    #endif
             zl_space.live[i] = zl_space.live[--zl_space.nlive];
             return;
         }
@@ -564,7 +668,9 @@ raw {
                 (h->addr = tcc_get_symbol(h->tcc, name)))
                 break;
             tcc_delete(h->tcc);
+    #ifndef _WIN32
             if (v.mem) munmap(v.mem, v.mem_size);
+    #endif
             h->tcc = NULL;
         }
         if (!h->tcc) return NULL;
@@ -643,6 +749,43 @@ raw {
         return at;
     }
 
+    // A name the host defines: in the program or a library it loaded. On Windows, what a
+    // module exports (the program's own functions only if it's linked with
+    // -Wl,--export-all-symbols); the C runtime's before the others, as ntdll.dll exports
+    // functions of the same names (sprintf, without floating point).
+    static void *zl_host_sym(const char *name)
+    {
+    #ifdef _WIN32
+        HMODULE mods[1024];
+        DWORD need = 0;
+        if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) return NULL;
+        unsigned n = need / sizeof(HMODULE);
+        if (n > 1024) n = 1024;
+        static const char *const first[] = {"msvcrt.dll", "ucrtbase.dll"};
+        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+        void *p = (void *)GetProcAddress(mods[0], name); // the program
+        for (unsigned k = 0; !p && k < 2; k++)
+        {
+            HMODULE m = GetModuleHandleA(first[k]);
+            if (m) p = (void *)GetProcAddress(m, name);
+        }
+        for (unsigned i = 1; !p && i < n; i++)
+            if (mods[i] != ntdll) p = (void *)GetProcAddress(mods[i], name);
+        if (!p && ntdll) p = (void *)GetProcAddress(ntdll, name);
+        // POSIX's names (dup, fileno, getpid) are the C runtime's with an underscore, which a
+        // program gets from MinGW's libmoldname.
+        if (!p && name[0] != '_' && strlen(name) < 250)
+        {
+            char under[256];
+            snprintf(under, sizeof under, "_%s", name);
+            p = zl_host_sym(under);
+        }
+        return p;
+    #else
+        return dlsym(RTLD_DEFAULT, name);
+    #endif
+    }
+
     // Where an undefined name of a version is: given by the caller, else the host's.
     typedef void *(*ZlResolve)(void *ctx, const char *name);
 
@@ -672,6 +815,7 @@ raw {
         unsigned nrefs, refs_cap;
         zr_jit_entry jit;
         int registered;
+        void *pdata; // Windows: its function table (.pdata), given to the system to unwind it
     } ZlImage;
 
     static int zl_note_ref(ZlImage *im, uint64_t at, unsigned sym, int pc, int64_t addend)
@@ -736,6 +880,9 @@ raw {
     {
         if (!im) return;
         if (im->registered) zl_jit_remove(&im->jit);
+    #ifdef _WIN32
+        if (im->pdata) RtlDeleteFunctionTable((PRUNTIME_FUNCTION)im->pdata);
+    #endif
         if (im->mem) zl_ring_give(im->mem);
         if (im->data) zl_ring_give(im->data);
         free(im->img);
@@ -758,6 +905,93 @@ raw {
             if (!strcmp(im->strtab + im->syms[s].st_name, name)) return (void *)(uintptr_t)im->addr[s];
         }
         return NULL;
+    }
+
+    // Whether `a` is in `im`'s memory.
+    static int zl_in(const ZlImage *im, uint64_t a)
+    {
+        uint64_t m = (uint64_t)(uintptr_t)im->mem, d = (uint64_t)(uintptr_t)im->data;
+        return (a >= m && a < m + im->mem_size) || (d && a >= d && a < d + im->data_size);
+    }
+
+    // For a debugger to walk the stack through the version's code, it needs to know how each
+    // function's frame is laid out. tcc's object files for Linux say so (.eh_frame); those for
+    // Windows don't (their .pdata is for the system, and gdb reads it only from a program's
+    // own image). tcc starts every function the same way (push %rbp; mov %rsp,%rbp), so for
+    // each one that does, a .debug_frame says so, added to the object file the debugger reads.
+    static void zl_add_frames(ZlImage *im)
+    {
+        ZlEhdr *eh = (ZlEhdr *)im->img;
+        const char *names = (const char *)im->img + im->sh[eh->e_shstrndx].sh_offset;
+        for (unsigned i = 0; i < im->nsh; i++)
+            if (!strcmp(names + im->sh[i].sh_name, ".eh_frame") || !strcmp(names + im->sh[i].sh_name, ".debug_frame"))
+                return;
+        // A CIE (the CFA is %rsp + 8, the return address just below it), then an FDE a function.
+        unsigned nfn = 0;
+        for (unsigned s = 1; s < im->nsyms; s++)
+            if (ZL_TYPE(im->syms[s].st_info) == ZL_STT_FUNC && im->syms[s].st_size) nfn++;
+        size_t cap = 24 + (size_t)nfn * 40;
+        unsigned char *fr = (unsigned char *)malloc(cap);
+        if (!fr) return;
+        static const unsigned char cie[24] = {20, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 1, 0, 1, 0x78, 16,
+                                              0x0c, 7, 8, 0x90, 1, 0, 0, 0, 0, 0, 0};
+        memcpy(fr, cie, 24);
+        size_t f = 24;
+        for (unsigned s = 1; s < im->nsyms; s++)
+        {
+            const ZlSym *y = &im->syms[s];
+            if (ZL_TYPE(y->st_info) != ZL_STT_FUNC || !y->st_size || !zl_in(im, im->addr[s])) continue;
+            if (memcmp((const void *)(uintptr_t)im->addr[s], "\x55\x48\x89\xe5", 4) != 0) continue;
+            unsigned char *e = fr + f;
+            uint32_t len = 36, cie_at = 0;
+            memcpy(e, &len, 4);
+            memcpy(e + 4, &cie_at, 4);
+            memcpy(e + 8, &im->addr[s], 8);
+            memcpy(e + 16, &y->st_size, 8);
+            // after push %rbp: CFA = %rsp + 16, %rbp at CFA - 16; after mov: CFA = %rbp + 16
+            static const unsigned char ops[16] = {0x41, 0x0e, 16, 0x86, 2, 0x43, 0x0d, 6, 0, 0, 0, 0, 0, 0, 0, 0};
+            memcpy(e + 24, ops, 16);
+            f += 40;
+        }
+        // The object file again, with .debug_frame and a section-name table that names it.
+        size_t old_names = im->sh[eh->e_shstrndx].sh_size;
+        size_t at_fr = (im->img_size + 7) & ~(size_t)7, at_names = at_fr + f;
+        size_t at_sh = (at_names + old_names + 13 + 7) & ~(size_t)7;
+        size_t total = at_sh + ((size_t)im->nsh + 2) * sizeof(ZlShdr);
+        unsigned char *out = (unsigned char *)calloc(1, total);
+        if (!out)
+        {
+            free(fr);
+            return;
+        }
+        memcpy(out, im->img, im->img_size);
+        memcpy(out + at_fr, fr, f);
+        memcpy(out + at_names, names, old_names);
+        memcpy(out + at_names + old_names, ".debug_frame", 13);
+        ZlShdr *nsh = (ZlShdr *)(out + at_sh);
+        memcpy(nsh, im->sh, im->nsh * sizeof(ZlShdr));
+        memset(&nsh[im->nsh], 0, sizeof(ZlShdr));
+        nsh[im->nsh].sh_name = (uint32_t)old_names;
+        nsh[im->nsh].sh_type = 1; // SHT_PROGBITS
+        nsh[im->nsh].sh_offset = at_fr;
+        nsh[im->nsh].sh_size = f;
+        nsh[im->nsh].sh_addralign = 8;
+        nsh[im->nsh + 1] = im->sh[eh->e_shstrndx];
+        nsh[im->nsh + 1].sh_offset = at_names;
+        nsh[im->nsh + 1].sh_size = old_names + 13;
+        ZlEhdr *oh = (ZlEhdr *)out;
+        oh->e_shoff = at_sh;
+        oh->e_shnum = (uint16_t)(im->nsh + 2);
+        oh->e_shstrndx = (uint16_t)(im->nsh + 1);
+        // (the image's sections and symbols, where they are in the new copy)
+        size_t syms_off = (size_t)((unsigned char *)im->syms - im->img), str_off = (size_t)((const unsigned char *)im->strtab - im->img);
+        free(im->img);
+        free(fr);
+        im->img = out;
+        im->img_size = total;
+        im->sh = nsh; // (nsh counts the two new ones too; nsh's first im->nsh are the old)
+        im->syms = (ZlSym *)(out + syms_off);
+        im->strtab = (const char *)out + str_off;
     }
 
     // Loads the object file `img` (taken: freed with the image, or on failure). Its writable
@@ -828,7 +1062,7 @@ raw {
             const char *name = im->strtab + y->st_name;
             if (!*name) continue;
             void *p = resolve ? resolve(ctx, name) : NULL;
-            if (!p) p = dlsym(RTLD_DEFAULT, name);
+            if (!p) p = zl_host_sym(name);
             if (!p) p = zl_helper(name);
             if (!p && ZL_BIND(y->st_info) != ZL_STB_WEAK)
             {
@@ -1127,6 +1361,9 @@ raw {
                     memcpy(P, &(int32_t){(int32_t)d}, 4);
                     break;
                 }
+                case ZL_R_ADDR32NB:
+                    memcpy(P, &(uint32_t){(uint32_t)(S + (uint64_t)A - (uint64_t)(uintptr_t)im->mem)}, 4);
+                    break;
                 case ZL_R_32:
                     if (S + (uint64_t)A > 0xffffffffu) goto out_of_reach;
                     memcpy(P, &(uint32_t){(uint32_t)(S + (uint64_t)A)}, 4);
@@ -1155,6 +1392,19 @@ raw {
         need_got = need_plt = NULL;
         gslot = pslot = NULL;
         mf = NULL;
+
+    #ifdef _WIN32
+        // Its function table, so the system can unwind through its code (an exception in it,
+        // a debugger's backtrace without gdb's own information).
+        {
+            const char *names = (const char *)img + im->sh[eh->e_shstrndx].sh_offset;
+            for (unsigned i = 0; i < im->nsh; i++)
+                if (im->sec[i] && !strcmp(names + im->sh[i].sh_name, ".pdata") && im->sh[i].sh_size >= 12 &&
+                    RtlAddFunctionTable((PRUNTIME_FUNCTION)(uintptr_t)im->sec[i], (DWORD)(im->sh[i].sh_size / 12),
+                                        (DWORD64)(uintptr_t)im->mem))
+                    im->pdata = (void *)(uintptr_t)im->sec[i];
+        }
+    #endif
 
         // The debugger's view: the object file with each loaded section at its address, and
         // each name it took from elsewhere (the store's globals, the host's) at that address.
@@ -1205,8 +1455,9 @@ raw {
                 y->st_value = im->addr[s];
             }
         }
-        im->jit.symfile_addr = (const char *)img;
-        im->jit.symfile_size = img_size;
+        zl_add_frames(im);
+        im->jit.symfile_addr = (const char *)im->img;
+        im->jit.symfile_size = im->img_size;
         zl_jit_add(&im->jit);
         im->registered = 1;
         return im;
@@ -1234,12 +1485,6 @@ raw {
     // The address to use for a reference from copied code to function `sym` of `im`, or 0:
     // copy it too.
     typedef uint64_t (*ZlCallee)(void *ctx, ZlImage *im, unsigned sym);
-
-    static int zl_in(const ZlImage *im, uint64_t a)
-    {
-        uint64_t m = (uint64_t)(uintptr_t)im->mem, d = (uint64_t)(uintptr_t)im->data;
-        return (a >= m && a < m + im->mem_size) || (d && a >= d && a < d + im->data_size);
-    }
 
     // A far jump in kept memory to `to`, for a call from copied code that wouldn't reach.
     static uint64_t zl_far_jump(uint64_t to)
@@ -1315,9 +1560,9 @@ raw {
                     dd = (int64_t)(T + (uint64_t)A - Pa);
                     if (!zl_fits32(dd))
                     {
-                        uint64_t far = zl_far_jump(T);
-                        if (!far) return 0;
-                        dd = (int64_t)(far + (uint64_t)A - Pa);
+                        uint64_t jump = zl_far_jump(T);
+                        if (!jump) return 0;
+                        dd = (int64_t)(jump + (uint64_t)A - Pa);
                     }
                     if (!zl_fits32(dd)) return 0;
                     memcpy(P, &(int32_t){(int32_t)dd}, 4);
@@ -2828,7 +3073,7 @@ raw {
                 !zr_global_type_changed(r->types_now, m, g, NULL))
                 continue;
             size_t size = ((size_t)g->size + 63) & ~(size_t)63;
-            void *mem = aligned_alloc(64, size ? size : 64); // aligned for any type
+            void *mem = zr_aligned_alloc(64, size ? size : 64); // aligned for any type
             if (!mem) continue;
             memset(mem, 0, size ? size : 64);
             if (g->addr && g->size) memcpy(mem, g->addr, g->size);
@@ -3080,7 +3325,7 @@ raw {
         if ((next->owns_globals || r->store_prev) && was)
         {
             const ZcManifest *live = zr_version_manifest(next);
-            mv.notes = dry ? NULL : open_memstream(&text, &len);
+            mv.notes = dry ? NULL : zr_ms_open(&text, &len);
             mv.nnotes = 0;
             for (unsigned i = 0; live && i < live->nglobals; i++)
             {
@@ -3093,7 +3338,7 @@ raw {
             }
             if (mv.notes)
             {
-                fclose(mv.notes);
+                zr_ms_close(mv.notes);
                 if (mv.nnotes && log) fprintf(log, "reload: moved the globals: %s\n", text);
                 free(text);
                 text = NULL;
@@ -3130,14 +3375,14 @@ raw {
                 {
                     memcpy(old, r->state, ot->size);
                     memset(r->state, 0, r->state_size);
-                    mv.notes = open_memstream(&text, &len);
+                    mv.notes = zr_ms_open(&text, &len);
                     mv.nnotes = 0;
                 }
                 zr_move_value(&mv, "", is, ot->size, old, is, nt->size, r->state, 0);
                 if (!dry)
                 {
                     free(old);
-                    fclose(mv.notes);
+                    zr_ms_close(mv.notes);
                     if (log)
                         fprintf(log, "reload: moved the state (%s) to the new layout%s%s\n", is,
                                 mv.nnotes ? ": " : "", mv.nnotes ? text : "");
@@ -4333,6 +4578,62 @@ raw {
     // With nothing to go back to (the first version, or one already undone), calls are
     // skipped until a version that loads replaces it. Best effort, for development.
 
+    #ifdef _WIN32
+    // On Windows a crash is an exception, seen first by a vectored handler. It goes back to
+    // zr_call by __builtin_longjmp, which unwinds nothing (old code copied out of its version
+    // has no unwind information), from a small stack of its own (a stack overflow leaves
+    // none).
+    #ifndef SIGBUS
+    #define SIGBUS 10
+    #endif
+    static __thread void **zr_guard;      // zr_call's __builtin_setjmp buffer, while it runs code
+    static __thread volatile int zr_guard_sig;
+    static __thread unsigned char *zr_guard_stack;
+    static int zr_guard_ready;
+
+    __attribute__((noinline, noreturn)) static void zr_guard_jump(void)
+    {
+        void **to = zr_guard;
+        zr_guard = NULL;
+        __builtin_longjmp(to, 1);
+    }
+
+    static LONG CALLBACK zr_on_exception(EXCEPTION_POINTERS *ep)
+    {
+        if (!zr_guard || !zr_guard_stack) return EXCEPTION_CONTINUE_SEARCH;
+        int sig = 0;
+        switch (ep->ExceptionRecord->ExceptionCode)
+        {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_IN_PAGE_ERROR:
+        case EXCEPTION_STACK_OVERFLOW:
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED: sig = SIGSEGV; break;
+        case EXCEPTION_DATATYPE_MISALIGNMENT: sig = SIGBUS; break;
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        case EXCEPTION_INT_OVERFLOW:
+        case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+        case EXCEPTION_FLT_INVALID_OPERATION:
+        case EXCEPTION_FLT_OVERFLOW: sig = SIGFPE; break;
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_PRIV_INSTRUCTION: sig = SIGILL; break;
+        default: return EXCEPTION_CONTINUE_SEARCH; // (a C++ exception, a debugger's breakpoint)
+        }
+        zr_guard_sig = sig;
+        ep->ContextRecord->Rsp = ((DWORD64)(uintptr_t)(zr_guard_stack + 65536) & ~(DWORD64)15) - 8;
+        ep->ContextRecord->Rip = (DWORD64)(uintptr_t)zr_guard_jump;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    static void zr_guard_install(void)
+    {
+        if (!zr_guard_stack) zr_guard_stack = (unsigned char *)malloc(65536);
+        if (zr_guard_ready) return;
+        zr_guard_ready = 1;
+        ULONG reserve = 32768; // room on the thread's stack to handle its overflow
+        SetThreadStackGuarantee(&reserve);
+        AddVectoredExceptionHandler(1, zr_on_exception);
+    }
+    #else
     static __thread sigjmp_buf *zr_guard;   // where a crash goes: set while zr_call runs code
     static __thread volatile int zr_guard_sig;
     static struct sigaction zr_prev_act[32]; // the handlers there were, for other crashes
@@ -4388,6 +4689,8 @@ raw {
             sigaction(sigs[i], &sa, &zr_prev_act[sigs[i]]);
         }
     }
+
+    #endif
 
     static const char *zr_sig_name(int sig)
     {
@@ -4518,6 +4821,20 @@ raw {
         ZrReloader *volatile r = (ZrReloader *)h;
         if (!r || !fn || r->broken) return 0;
         zr_guard_install();
+    #ifdef _WIN32
+        void *here[5];
+        void **volatile outer = zr_guard;
+        if (__builtin_setjmp(here) == 0)
+        {
+            zr_guard = here;
+            if (with_arg) ((void (*)(void *))fn)(arg);
+            else ((void (*)(void))fn)();
+            zr_guard = outer;
+            return 1;
+        }
+        zr_guard = outer;
+        _resetstkoflw(); // the stack's guard page again, after an overflow
+    #else
         sigjmp_buf here;
         sigjmp_buf *volatile outer = zr_guard;
         if (sigsetjmp(here, 1) == 0)
@@ -4529,6 +4846,7 @@ raw {
             return 1;
         }
         zr_guard = outer;
+    #endif
         zr_crashed(r, zr_guard_sig);
         return 0;
     }
@@ -4564,12 +4882,23 @@ raw {
         }
         // The source by its absolute path: zc then writes the C's #line directives with
         // absolute paths, which a debugger finds the .zc files by wherever it runs.
-        char *abs_source = realpath(r->source, NULL);
+        char *abs_source = zr_realpath(r->source);
         snprintf(cmd, len,
                  "\"%s\" transpile --reload -q %s%s \"%s\" -o \"%s\" 1>&2", r->zc, incs,
                  r->zc_flags ? r->zc_flags : "", abs_source ? abs_source : r->source, r->c_file);
         free(abs_source);
         free(incs);
+    #ifdef _WIN32
+        // cmd.exe drops the first and last quote of a command that starts with one.
+        size_t clen = strlen(cmd);
+        char *wcmd = (char *)malloc(clen + 3);
+        if (wcmd)
+        {
+            snprintf(wcmd, clen + 3, "\"%s\"", cmd);
+            free(cmd);
+            cmd = wcmd;
+        }
+    #endif
         int rc = system(cmd);
         free(cmd);
         if (rc != 0)
@@ -4653,9 +4982,9 @@ raw {
         {
             char *why = NULL;
             size_t why_len = 0;
-            FILE *wf = open_memstream(&why, &why_len);
+            FILE *wf = zr_ms_open(&why, &why_len);
             int problems = zr_move_state(r, &next, r->types_now, nm, 1, wf, NULL);
-            if (wf) fclose(wf);
+            if (wf) zr_ms_close(wf);
             if (problems)
             {
                 zr_mf_report(stderr, r->types_now, nm, r->version + 1);
@@ -4738,7 +5067,7 @@ raw {
         free(r->moved);
         r->moved = NULL;
         size_t moved_len = 0;
-        FILE *log = open_memstream(&r->moved, &moved_len);
+        FILE *log = zr_ms_open(&r->moved, &moved_len);
         if (r->types_prev && r->types_now)
             zr_move_state(r, &r->current, r->types_prev, r->types_now, 0, NULL, log);
         zr_store_settle(r, 1); // the values are in the storage they keep from now on
@@ -4752,9 +5081,9 @@ raw {
         ZrVersion *replaced = keep_current ? &r->old[r->old_count - 1] : NULL;
         char *kept_text = NULL;
         size_t kept_len = 0;
-        FILE *kept_log = open_memstream(&kept_text, &kept_len);
+        FILE *kept_log = zr_ms_open(&kept_text, &kept_len);
         if (kept_log) zr_stubs_follow(r, kept_log);
-        if (kept_log) fclose(kept_log);
+        if (kept_log) zr_ms_close(kept_log);
     #ifdef ZR_LOADER
         zr_copy_pinned(r);
     #endif
@@ -4763,7 +5092,7 @@ raw {
         free(kept_text);
         if (r->types_prev && r->types_now && log && !r->current.im && (!replaced || !replaced->im))
             zr_forward(r, replaced, log);
-        if (log) fclose(log);
+        if (log) zr_ms_close(log);
         if (r->current.owns_globals) zr_store_set(r, zr_version_manifest(&r->current));
 
         zr_version_call(&r->current, first ? "_zc_module_init" : "_zc_module_after_reload");
@@ -4862,7 +5191,7 @@ raw {
         zr_mf_free(r->types_prev);
         zr_store_settle(r, 1);
         zr_store_free(r);
-        for (unsigned i = 0; i < r->nblocks; i++) free(r->blocks[i]);
+        for (unsigned i = 0; i < r->nblocks; i++) zr_aligned_free(r->blocks[i]);
         free(r->blocks);
     #ifdef __linux__
         zr_ino_close(r);
