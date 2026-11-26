@@ -1,0 +1,1 @@
+Needs the pool: under libtcc's loading (ZC_RELOAD_MEMORY) the literal is in the deleted version.

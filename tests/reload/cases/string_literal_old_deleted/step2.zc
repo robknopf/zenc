@@ -1,0 +1,11 @@
+// A string literal from version 1, kept in the host's block, is read after versions 1 and 2 are
+// deleted: the literal is the pool's copy, which no version owns. Version 3's edited literal
+// is another copy, and the kept one still reads the same.
+struct State { msg: string; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.msg == NULL { state.msg = "hello from version 1"; }
+    let now = "edited in version 2";
+    if false { println "{now}"; }
+    println "{state.msg}";
+}

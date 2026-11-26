@@ -564,6 +564,66 @@ raw {
 
     static int zl_fits32(int64_t d) { return d == (int64_t)(int32_t)d; }
 
+    // The pool: read-only objects with no relocation in them (string literals, numbers, a
+    // const table of them), in kept memory, one copy of each by its bytes (and its name, if it
+    // has one: two const globals are two objects even with the same bytes). A version's code
+    // refers to the pool's copy, not its own, so a pointer to a literal kept past a reload
+    // doesn't keep the version, and most of a new version's literals are the old one's
+    // copies. It grows with what is new: an edited literal, a new one.
+    static struct ZlPooled { unsigned hash; unsigned size; const char *name; unsigned char *at; } *zl_pool_tab;
+    static unsigned zl_pool_cap, zl_pool_used;
+    static size_t zl_pool_bytes;
+
+    static unsigned zl_bytes_hash(const unsigned char *p, size_t n, const char *name)
+    {
+        unsigned h = 2166136261u;
+        for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
+        for (; name && *name; name++) h = (h ^ (unsigned char)*name) * 16777619u;
+        return h ^ (unsigned)n;
+    }
+
+    // The pool's copy of `n` bytes at `p` (named `name`, or NULL), aligned to `align`.
+    static unsigned char *zl_pool(const unsigned char *p, size_t n, const char *name, size_t align)
+    {
+        if ((zl_pool_used + 1) * 2 > zl_pool_cap)
+        {
+            unsigned cap = zl_pool_cap ? zl_pool_cap * 2 : 4096;
+            struct ZlPooled *t = (struct ZlPooled *)calloc(cap, sizeof(*t));
+            if (!t) return NULL;
+            for (unsigned i = 0; i < zl_pool_cap; i++)
+            {
+                if (!zl_pool_tab[i].at) continue;
+                unsigned k = zl_pool_tab[i].hash & (cap - 1);
+                while (t[k].at) k = (k + 1) & (cap - 1);
+                t[k] = zl_pool_tab[i];
+            }
+            free(zl_pool_tab);
+            zl_pool_tab = t;
+            zl_pool_cap = cap;
+        }
+        unsigned h = zl_bytes_hash(p, n, name);
+        unsigned k = h & (zl_pool_cap - 1);
+        for (; zl_pool_tab[k].at; k = (k + 1) & (zl_pool_cap - 1))
+        {
+            struct ZlPooled *e = &zl_pool_tab[k];
+            if (e->hash == h && e->size == n && ((uintptr_t)e->at & (align - 1)) == 0 &&
+                (e->name == name || (e->name && name && !strcmp(e->name, name))) && !memcmp(e->at, p, n))
+                return e->at;
+        }
+        char *nm = name ? zr_strdup(name) : NULL;
+        unsigned char *at = (unsigned char *)zl_keep(n, align);
+        if (!at || (name && !nm))
+        {
+            free(nm);
+            return NULL;
+        }
+        memcpy(at, p, n);
+        zl_pool_tab[k] = (struct ZlPooled){h, (unsigned)n, nm, at};
+        zl_pool_used++;
+        zl_pool_bytes += n;
+        return at;
+    }
+
     // Where an undefined name of a version is: given by the caller, else the host's.
     typedef void *(*ZlResolve)(void *ctx, const char *name);
 
@@ -866,6 +926,87 @@ raw {
                 im->by_name[k] = s + 1;
             }
 
+        // Read-only objects with no relocation in them: the pool's copies (zl_pool). (The
+        // manifest is the version's own: the Reloader reads it, and copies what it keeps.)
+        {
+            unsigned ncand = 0;
+            uint64_t *cand = NULL; // start, end, symbol, has a relocation
+            for (int pass = 0; pass < 2; pass++)
+            {
+                for (unsigned s = 1; s < im->nsyms; s++)
+                {
+                    ZlSym *y = &im->syms[s];
+                    if (ZL_TYPE(y->st_info) != ZL_STT_OBJECT || !y->st_size || y->st_shndx >= im->nsh ||
+                        y->st_shndx == ZL_SHN_UNDEF || !im->sec[y->st_shndx])
+                        continue;
+                    ZlShdr *ys = &im->sh[y->st_shndx];
+                    // libtcc 0.9.27 puts string literals with the writable data: there, an
+                    // anonymous object ending in a zero byte is taken to be one.
+                    int literal = !strncmp(zl_name(im, s), "L.", 2) &&
+                                  ((const unsigned char *)(uintptr_t)im->addr[s])[y->st_size - 1] == 0;
+                    if ((ys->sh_flags & 4) || ((ys->sh_flags & ZL_SHF_WRITE) && !literal) ||
+                        ys->sh_type == ZL_SHT_NOBITS || !strncmp(zl_name(im, s), "_zc_mf", 6))
+                        continue;
+                    if (pass)
+                    {
+                        cand[4 * ncand] = im->addr[s];
+                        cand[4 * ncand + 1] = im->addr[s] + y->st_size;
+                        cand[4 * ncand + 2] = s;
+                        cand[4 * ncand + 3] = 0;
+                    }
+                    ncand++;
+                }
+                if (!pass)
+                {
+                    if (!ncand) break;
+                    if (!(cand = (uint64_t *)malloc(ncand * 4 * sizeof(uint64_t))))
+                    {
+                        zl_err(err, errn, "out of memory");
+                        goto fail;
+                    }
+                    ncand = 0;
+                }
+            }
+            if (ncand)
+            {
+                qsort(cand, ncand, 4 * sizeof(uint64_t), zl_range_cmp);
+                for (unsigned i = 0; i < im->nsh; i++)
+                {
+                    ZlShdr *rs = &im->sh[i];
+                    if (rs->sh_type != ZL_SHT_RELA || rs->sh_info >= im->nsh || !im->sec[rs->sh_info] ||
+                        (im->sh[rs->sh_info].sh_flags & 4))
+                        continue;
+                    ZlRela *ra = (ZlRela *)(img + rs->sh_offset);
+                    for (size_t k = 0; k < rs->sh_size / sizeof(ZlRela); k++)
+                    {
+                        uint64_t at = im->sec[rs->sh_info] + ra[k].r_offset;
+                        unsigned lo = 0, hi = ncand;
+                        while (lo < hi)
+                        {
+                            unsigned mid = (lo + hi) / 2;
+                            if (cand[4 * mid] <= at) lo = mid + 1;
+                            else hi = mid;
+                        }
+                        if (lo && at < cand[4 * (lo - 1) + 1]) cand[4 * (lo - 1) + 3] = 1;
+                    }
+                }
+                for (unsigned c = 0; c < ncand; c++)
+                {
+                    if (cand[4 * c + 3]) continue;
+                    unsigned s = (unsigned)cand[4 * c + 2];
+                    ZlSym *y = &im->syms[s];
+                    const char *nm = zl_name(im, s);
+                    // As aligned as it was in its section (where tcc put it at its alignment).
+                    size_t align = 16;
+                    while (align > 1 && (y->st_value & (align - 1))) align >>= 1;
+                    unsigned char *at = zl_pool((const unsigned char *)(uintptr_t)im->addr[s], (size_t)y->st_size,
+                                                !strncmp(nm, "L.", 2) ? NULL : nm, align);
+                    if (at) im->addr[s] = (uint64_t)(uintptr_t)at;
+                }
+            }
+            free(cand);
+        }
+
         // The manifest's objects (its functions' addresses there are the functions' own).
         unsigned nmf = 0;
         for (unsigned s = 1; s < im->nsyms; s++)
@@ -1037,7 +1178,9 @@ raw {
         for (unsigned s = 1; s < im->nsyms; s++)
         {
             ZlSym *y = &im->syms[s];
-            if ((y->st_shndx == ZL_SHN_UNDEF && im->addr[s]) || y->st_shndx == ZL_SHN_COMMON)
+            int moved = y->st_shndx != ZL_SHN_UNDEF && y->st_shndx < im->nsh && im->sec[y->st_shndx] &&
+                        ZL_TYPE(y->st_info) == ZL_STT_OBJECT && im->addr[s] != im->sec[y->st_shndx] + y->st_value;
+            if ((y->st_shndx == ZL_SHN_UNDEF && im->addr[s]) || y->st_shndx == ZL_SHN_COMMON || moved)
             {
                 y->st_shndx = ZL_SHN_ABS;
                 y->st_value = im->addr[s];
