@@ -448,6 +448,13 @@ static void cd_locate(const CdRead *r, TSNode n, CDecl *d)
     {
         d->file = r->row_file[row] ? xstrdup(r->row_file[row]) : NULL;
         d->line = r->row_line[row];
+        d->end_line = d->line;
+        uint32_t end = ts_node_end_point(n).row;
+        if ((int)end < r->nrows && r->row_file[end] == r->row_file[row] &&
+            r->row_line[end] >= d->line)
+        {
+            d->end_line = r->row_line[end];
+        }
     }
 }
 
@@ -855,6 +862,7 @@ static void cd_define(ParserContext *ctx, const char *line, const char *file, in
     }
     d->file = file ? xstrdup(file) : NULL;
     d->line = lineno;
+    d->end_line = lineno;
     if (*p == ' ' || *p == '\t') // an object-like macro: its value's type, if a number
     {
         d->type = cd_number_type(p);

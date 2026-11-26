@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "lsp_project.h"
+#include "lsp_c_decls.h"
 #include "lsp_config.h"
 #include "../utils/utils.h"
 #include "../constants.h"
@@ -625,6 +626,9 @@ void lsp_project_update_file(const char *uri, const char *src)
 
         if (!g_is_indexing)
         {
+            // The document's C, read as a build reads it: what the checks below (and the
+            // requests on it) know of C types and names.
+            lsp_c_decls_update(pf);
             validate_types(g_project->ctx);
         }
     }

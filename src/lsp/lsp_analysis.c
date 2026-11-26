@@ -5,6 +5,8 @@
 #include "../utils/utils.h"
 #include "lsp_project.h" // Includes lsp_index.h, parser.h
 #include "lsp_c_headers.h"
+#include "lsp_c_decls.h"
+#include "../parser/utils/c_decls.h"
 #include "lsp_locals.h"
 #include "json_rpc.h"
 #include "../plugins/plugin_manager.h"
@@ -245,6 +247,7 @@ void lsp_check_file(const char *uri, const char *json_src, int id)
 
     const char *document_path = strncmp(uri, "file://", 7) == 0 ? uri + 7 : uri;
     lsp_c_headers_add_diagnostics(document_path, json_src, diag_array);
+    lsp_c_decls_add_diagnostics(lsp_project_get_file(uri), diag_array);
 
     cJSON_AddItemToObject(params, "diagnostics", diag_array);
     cJSON_AddItemToObject(root, "params", params);
@@ -264,6 +267,25 @@ void lsp_check_file(const char *uri, const char *json_src, int id)
 }
 
 static char *get_symbol_name(LSPRange *r);
+
+// The C declarations of the name at (line, col): as a build reads the document's C (the
+// preprocessor, then tree-sitter), or else as lsp_c_headers.c reads the headers (without a C
+// compiler; a header re-exported by an imported module).
+static int c_find_at(ProjectFile *pf, int line, int col, const CHeaderSymbol **results, int max,
+                     CHeaderOrigin *via)
+{
+    const CHeaderSymbol *symbol = lsp_c_decls_symbol_at(pf, line, col);
+    if (symbol && max > 0)
+    {
+        results[0] = symbol;
+        if (via)
+        {
+            memset(via, 0, sizeof(*via));
+        }
+        return 1;
+    }
+    return lsp_c_headers_find_at(pf->path, pf->source, line, col, results, max, via);
+}
 
 void lsp_goto_definition(const char *uri, int line, int col, int id)
 {
@@ -292,8 +314,7 @@ void lsp_goto_definition(const char *uri, int line, int col, int id)
         c_origin_kind = lsp_c_headers_origin_at(pf->path, pf->source, line, col, &c_origin);
         if (c_origin_kind == C_HEADER_NONE && lsp_c_headers_is_extern_name(pf->source, line, col))
         {
-            c_symbol_count =
-                lsp_c_headers_find_at(pf->path, pf->source, line, col, c_symbols, 8, NULL);
+            c_symbol_count = c_find_at(pf, line, col, c_symbols, 8, NULL);
         }
         if (c_origin_kind != C_HEADER_NONE || c_symbol_count > 0)
         {
@@ -373,7 +394,7 @@ void lsp_goto_definition(const char *uri, int line, int col, int id)
 
     if (!found && c_origin_kind == C_HEADER_NONE && c_symbol_count == 0 && pf->source)
     {
-        c_symbol_count = lsp_c_headers_find_at(pf->path, pf->source, line, col, c_symbols, 8, NULL);
+        c_symbol_count = c_find_at(pf, line, col, c_symbols, 8, NULL);
     }
     cJSON *c_location =
         c_origin_kind != C_HEADER_NONE
@@ -648,7 +669,7 @@ void lsp_hover(const char *uri, int line, int col, int id)
         else if (lsp_c_headers_is_extern_name(pf->source, line, col))
         {
             const CHeaderSymbol *c_symbol = NULL;
-            if (lsp_c_headers_find_at(pf->path, pf->source, line, col, &c_symbol, 1, NULL) > 0)
+            if (c_find_at(pf, line, col, &c_symbol, 1, NULL) > 0)
             {
                 c_hover = lsp_c_headers_hover(c_symbol, NULL);
             }
@@ -747,7 +768,7 @@ void lsp_hover(const char *uri, int line, int col, int id)
     {
         const CHeaderSymbol *c_symbol = NULL;
         CHeaderOrigin via;
-        if (lsp_c_headers_find_at(pf->path, pf->source, line, col, &c_symbol, 1, &via) > 0)
+        if (c_find_at(pf, line, col, &c_symbol, 1, &via) > 0)
         {
             c_hover = lsp_c_headers_hover(c_symbol, &via);
             text = c_hover;
@@ -1114,6 +1135,18 @@ void lsp_completion(const char *uri, int line, int col, int id)
                                 }
                             }
                         }
+                        // `let v = c_function()`: the type of what it is given, as zc
+                        // infers it (with the document's C declarations).
+                        if (!type_name && decl && decl->kind == NODE_VAR_DECL &&
+                            decl->var_decl.init_expr)
+                        {
+                            lsp_c_decls_use(pf);
+                            char *inferred = infer_type(g_project->ctx, decl->var_decl.init_expr);
+                            if (inferred && strcmp(inferred, "unknown") != 0)
+                            {
+                                type_name = xstrdup(inferred);
+                            }
+                        }
                     }
 
                     // Now traverse properties
@@ -1148,6 +1181,18 @@ void lsp_completion(const char *uri, int line, int col, int id)
                                     break;
                                 }
                                 field = field->next;
+                            }
+                        }
+                        if (!found_field && !struct_node)
+                        {
+                            lsp_c_decls_use(pf);
+                            char *c_field =
+                                get_field_type_str(g_project->ctx, clean_name, parts[p]);
+                            if (c_field)
+                            {
+                                zfree(type_name);
+                                type_name = xstrdup(c_field);
+                                found_field = 1;
                             }
                         }
                         if (!found_field)
@@ -1201,6 +1246,10 @@ void lsp_completion(const char *uri, int line, int col, int id)
                                     variant = variant->next;
                                 }
                             }
+                            dot_completed = 1;
+                        }
+                        else if (lsp_c_decls_fields(pf, type_name, items))
+                        {
                             dot_completed = 1;
                         }
 
@@ -1599,6 +1648,9 @@ void lsp_completion(const char *uri, int line, int col, int id)
         }
     }
 
+    // The C names the typed word starts (after the Zen C's: sortText).
+    int c_more = !dot_completed ? lsp_c_decls_complete(pf, line, col, items) : 0;
+
     if (prefix_len > 0)
     {
         size_t plen = (size_t)prefix_len;
@@ -1636,7 +1688,18 @@ void lsp_completion(const char *uri, int line, int col, int id)
         }
     }
 
-    cJSON_AddItemToObject(root, "result", items);
+    if (c_more)
+    {
+        // Cut short: the client asks again as more is typed.
+        cJSON *list = cJSON_CreateObject();
+        cJSON_AddBoolToObject(list, "isIncomplete", 1);
+        cJSON_AddItemToObject(list, "items", items);
+        cJSON_AddItemToObject(root, "result", list);
+    }
+    else
+    {
+        cJSON_AddItemToObject(root, "result", items);
+    }
     send_json_response(root);
 }
 

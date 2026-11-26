@@ -34,7 +34,8 @@ typedef struct CDecl
     char *name;
     char *file; // the header it is declared in, as the preprocessor names it (or NULL)
     int line;
-    char *text; // the declaration, on one line, for showing it (hover)
+    int end_line; // the declaration's last line (in `file`)
+    char *text;   // the declaration, on one line, for showing it (hover)
     // A variable's or typedef's type; a function's return type; an enum constant's enum
     // ("enum wgf_actor_kind", or the typedef that names an anonymous one; "int" otherwise).
     char *type;

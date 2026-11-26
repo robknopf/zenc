@@ -15,11 +15,12 @@ struct cJSON;
  */
 typedef struct ProjectFile
 {
-    char *path;      ///< Absolute file path.
-    char *uri;       ///< file:// URI.
-    char *source;    ///< Cached source content (in-memory).
-    ASTNode *ast;    ///< Cached AST for semantic analysis.
-    LSPIndex *index; ///< File-specific symbol index.
+    char *path;          ///< Absolute file path.
+    char *uri;           ///< file:// URI.
+    char *source;        ///< Cached source content (in-memory).
+    ASTNode *ast;        ///< Cached AST for semantic analysis.
+    LSPIndex *index;     ///< File-specific symbol index.
+    CNamesState c_names; ///< What its C declares (lsp_c_decls.h); not ready until opened.
     struct ProjectFile *next;
 } ProjectFile;
 

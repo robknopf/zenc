@@ -223,7 +223,8 @@ static int c_stat(const char *path, long long *mtime, long long *size)
 // The declarations, after the files: a line a declaration, its strings separated by tabs
 // (C's text holds none: it is read with white space made single spaces), each "=" and the
 // string, or empty for none; then a line for each parameter (P) and field (F).
-//   D kind line variadic params_known complete \t name \t file \t type \t text \t aggregate
+//   D kind line end_line variadic params_known complete \t name \t file \t type \t text \t
+//   aggregate
 
 static void c_cache_put(FILE *f, const char *s)
 {
@@ -245,8 +246,8 @@ static void c_cache_write_decls(ParserContext *ctx, FILE *f)
     for (unsigned i = 0; i < n; i++)
     {
         const CDecl *d = all[i];
-        fprintf(f, "D %d %d %d %d %d", (int)d->kind, d->line, d->variadic, d->params_known,
-                d->complete);
+        fprintf(f, "D %d %d %d %d %d %d", (int)d->kind, d->line, d->end_line, d->variadic,
+                d->params_known, d->complete);
         c_cache_put(f, d->name);
         c_cache_put(f, d->file);
         c_cache_put(f, d->type);
@@ -315,8 +316,8 @@ static int c_cache_read_decls(ParserContext *ctx, char *p)
             }
             memset(&d, 0, sizeof d);
             int kind = 0, used = 0;
-            if (sscanf(p, "D %d %d %d %d %d%n", &kind, &d.line, &d.variadic, &d.params_known,
-                       &d.complete, &used) < 5)
+            if (sscanf(p, "D %d %d %d %d %d %d%n", &kind, &d.line, &d.end_line, &d.variadic,
+                       &d.params_known, &d.complete, &used) < 6)
             {
                 return 0;
             }
@@ -366,7 +367,7 @@ static int c_cache_load(ParserContext *ctx, const char *path)
     {
         return 0;
     }
-    if (strncmp(text, "zc-c-names 3\n", 13) != 0)
+    if (strncmp(text, "zc-c-names 4\n", 13) != 0)
     {
         zfree(text);
         return 0;
@@ -415,7 +416,7 @@ static void c_cache_save(ParserContext *ctx, const char *path, const char *text)
     {
         return;
     }
-    fputs("zc-c-names 3\n", f);
+    fputs("zc-c-names 4\n", f);
     // The line markers: `# 1 "/usr/include/stdio.h" 1 3 4`.
     char **seen = NULL;
     size_t nseen = 0;
@@ -537,4 +538,34 @@ void c_names_scan(ParserContext *ctx, ASTNode *root)
         c_cache_save(ctx, cached, text);
     }
     zfree(text);
+}
+
+void c_names_save(ParserContext *ctx, CNamesState *s)
+{
+    s->names = ctx->c_names;
+    s->cap = ctx->c_names_cap;
+    s->count = ctx->c_names_count;
+    s->ready = ctx->c_names_ready;
+    s->decls = ctx->c_decls;
+}
+
+void c_names_load(ParserContext *ctx, const CNamesState *s)
+{
+    ctx->c_names = s ? s->names : NULL;
+    ctx->c_names_cap = s ? s->cap : 0;
+    ctx->c_names_count = s ? s->count : 0;
+    ctx->c_names_ready = s ? s->ready : 0;
+    ctx->c_decls = s ? s->decls : NULL;
+}
+
+void c_names_scan_into(ParserContext *ctx, ASTNode *root, CNamesState *s)
+{
+    c_names_load(ctx, NULL);
+    int lsp = ctx->config->mode_lsp;
+    ctx->config->mode_lsp = 0;
+    c_names_scan(ctx, root);
+    ctx->config->mode_lsp = lsp;
+    unsigned long long key = s->unit_key;
+    c_names_save(ctx, s);
+    s->unit_key = key;
 }
