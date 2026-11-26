@@ -477,7 +477,9 @@ int main(int argc, char **argv)
             }
             if (i_path)
             {
-                append_flag(cfg->gcc_flags, sizeof(cfg->gcc_flags), arg, NULL);
+                // "-I" and the path as one flag: given as `-I dir`, the C compiler's flags got
+                // a bare -I, which took the next flag as its directory.
+                append_flag(cfg->gcc_flags, sizeof(cfg->gcc_flags), "-I", i_path);
                 zvec_push_Str(&cfg->include_paths, xstrdup(i_path));
             }
         }
