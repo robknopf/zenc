@@ -2700,12 +2700,30 @@ raw {
         r->seen = zr_newest(r);
         double t0 = zr_now_ms();
 
-        size_t len = strlen(r->zc) + strlen(r->source) + strlen(r->c_file) +
+        // The include directories go to zc too: it reads the module's C headers (to know the
+        // names they declare) with them.
+        size_t incs_len = 1;
+        for (int i = 0; i < r->include_count; i++) incs_len += strlen(r->includes[i]) + 6;
+        char *incs = (char *)malloc(incs_len);
+        if (!incs) return 0;
+        incs[0] = 0;
+        for (int i = 0; i < r->include_count; i++)
+        {
+            strcat(incs, "\"-I");
+            strcat(incs, r->includes[i]);
+            strcat(incs, "\" ");
+        }
+        size_t len = strlen(r->zc) + strlen(r->source) + strlen(r->c_file) + incs_len +
                      (r->zc_flags ? strlen(r->zc_flags) : 0) + 64;
         char *cmd = (char *)malloc(len);
-        if (!cmd) return 0;
-        snprintf(cmd, len, "\"%s\" transpile --reload -q %s \"%s\" -o \"%s\" 1>&2", r->zc,
-                 r->zc_flags ? r->zc_flags : "", r->source, r->c_file);
+        if (!cmd)
+        {
+            free(incs);
+            return 0;
+        }
+        snprintf(cmd, len, "\"%s\" transpile --reload -q %s%s \"%s\" -o \"%s\" 1>&2", r->zc,
+                 incs, r->zc_flags ? r->zc_flags : "", r->source, r->c_file);
+        free(incs);
         int rc = system(cmd);
         free(cmd);
         if (rc != 0)

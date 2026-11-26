@@ -42,6 +42,9 @@ fn main() -> int {
   elsewhere it checks every file's modification time, at most every 200 ms (so a save is
   seen up to that much later). `ZC_RELOAD_SCAN=1` in the environment makes it scan on
   Linux too, to test that.
+- `add_include(dir)` gives tcc a directory to find the module's C headers in, and zc
+  too: zc reads them to know the names they declare, so a misspelled C function or
+  constant is an error at the `.zc` line, not tcc's "undefined symbol".
 - `symbol(name)` gives the address of a function (or anything else) in the version loaded
   now. Look it up again after a `build()` or `poll()` that returned true.
 - The host needs libtcc (0.9.27 or 0.9.28). `std/reload.zc` asks for it (`//> link:`), so
