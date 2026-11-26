@@ -145,7 +145,7 @@ Each reload prints what changed, unless `verbose(false)`; `print_changes()` prin
 request [`layout_changes_reported`]. Errors and refusals are always printed.
 
 ```
-reload: version 2 of src/game/game.zc loaded (zc 7 ms, tcc 6 ms)
+reload: version 2 of src/game/game.zc loaded (zc 7 ms, tcc 6 ms, reload 1.1 ms)
 reload: changes in version 2:
 reload:   GameState: size 256 -> 260 bytes, lives_bonus added at byte 8, 14 fields shifted down 4 bytes (rock_prefabs to ship)
 reload:   globals: game's type GameState changed

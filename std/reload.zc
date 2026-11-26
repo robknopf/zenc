@@ -1723,6 +1723,7 @@ raw {
             }
         }
         if (compiled != 0) compiled = zr_compile(r, &next, 1);
+        double t2 = zr_now_ms();
         if (compiled != 0)
         {
             fprintf(stderr, "reload: %s did not compile%s\n", r->c_file,
@@ -1841,8 +1842,8 @@ raw {
         zr_version_call(&r->current, first ? "_zc_module_init" : "_zc_module_after_reload");
         if (r->verbose)
         {
-            fprintf(stderr, "reload: version %d of %s loaded (zc %.0f ms, tcc %.0f ms)\n",
-                    r->version, r->source, t1 - t0, zr_now_ms() - t1);
+            fprintf(stderr, "reload: version %d of %s loaded (zc %.0f ms, tcc %.0f ms, reload %.1f ms)\n",
+                    r->version, r->source, t1 - t0, t2 - t1, zr_now_ms() - t2);
             zr_report_kept(r);
             zr_mf_report(stderr, r->types_prev, r->types_now, r->version);
             if (r->moved) fputs(r->moved, stderr);
