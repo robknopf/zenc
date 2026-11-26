@@ -90,6 +90,9 @@ raw {
     #if defined(__x86_64__) && !defined(_WIN32)
     #define ZR_FORWARD 1 // old functions can be made to jump to new ones (zr_forward)
     #endif
+    #if defined(__x86_64__) && defined(__linux__)
+    #define ZR_LOADER 1 // the Reloader loads each version itself (zl_load)
+    #endif
 
     enum { ZR_MAX_INCLUDES = 32, ZR_MAX_REQUIRED = 32 };
 
@@ -112,10 +115,8 @@ raw {
         void *mem;       // the code's memory, ours with libtcc 0.9.27; NULL with 0.9.28
         size_t mem_size; // 0 when not known (0.9.28)
         int owns_globals; // compiled with ZC_RELOAD_OWN_GLOBALS: the globals' storage is here
-        void *dl;         // the version as a shared library (dlopen), for debuggers; or NULL
-        char *so_path;    // that library's file
-        int loaded;       // compiled and loaded (tcc is freed once the library is)
-        int tomb;         // shrunk to what old pointers can reach (zr_tombstone)
+        struct ZlImage *im; // loaded by the Reloader itself (zl_load), or NULL: by libtcc
+        int loaded;       // compiled and loaded (tcc is freed once the Reloader loads it)
     } ZrVersion;
 
     typedef struct
@@ -167,9 +168,8 @@ raw {
         int ino_failed; // it couldn't be set up for ino_root: poll() scans instead
         int force_scan; // ZC_RELOAD_SCAN set: scan, never inotify (to test the scanning)
         double last_scan; // when poll() last scanned the files (without inotify), or 0
-        int in_memory;    // compile into memory, not to a shared library (ZC_RELOAD_MEMORY, or
-                          // writing or loading one failed)
-        unsigned so_serial; // names each library file
+        int in_memory;    // libtcc loads the versions, not the Reloader (ZC_RELOAD_MEMORY, or
+                          // the Reloader couldn't load one)
         char *ino_root; // the directory ino_fd watches
         // Old functions made to jump to the new code (zr_forward): where, the bytes the jump
         // replaced, the name, and whether it still follows the newest version of that name.
@@ -289,13 +289,14 @@ raw {
     #endif
     }
 
-    // Deletes a version. With libtcc 0.9.27 its memory is unmapped, so anything still using
-    // it fails at once instead of reading what happens to be left there.
-    // Runs a version's _zc_module_init or _zc_module_fini (from zc --reload), if it has one.
-    // The address of `name` in a version: from its shared library, or from tcc's memory.
+    // The address of `name` in a version: where the Reloader loaded it, or in tcc's memory.
+    struct ZlImage;
+    static void *zl_sym(struct ZlImage *im, const char *name);
+    static void zl_free(struct ZlImage *im);
+
     static void *zr_sym(ZrVersion *v, const char *name)
     {
-        if (v->dl) return dlsym(v->dl, name);
+        if (v->im) return zl_sym(v->im, name);
         return v->tcc ? tcc_get_symbol(v->tcc, name) : NULL;
     }
 
@@ -308,12 +309,7 @@ raw {
 
     static void zr_version_delete(ZrVersion *v)
     {
-        if (v->dl) dlclose(v->dl);
-        if (v->so_path)
-        {
-            remove(v->so_path);
-            free(v->so_path);
-        }
+        if (v->im) zl_free(v->im);
         if (v->tcc) tcc_delete(v->tcc);
         if (v->mem)
         {
@@ -322,174 +318,653 @@ raw {
         memset(v, 0, sizeof(*v));
     }
 
-    // ---- Old versions, shrunk -------------------------------------------------------------
+    // ---- Loading a version ----------------------------------------------------------------
     //
-    // An old version stays loaded: a pointer kept in the heap or by a library can still reach
-    // its functions (std's and generic ones aren't forwarded), its data (string literals, the
-    // first version's globals, vtables) and its exit code (glibc runs its fini). What nothing
-    // can reach after loading goes: the library's file (its disk space, with the symbol
-    // table and debug information) and, in memory, the relocations, the dynamic symbol and
-    // hash tables (loaded with RTLD_NOW and RTLD_LOCAL: nothing is looked up in it again) and
-    // the manifest (the Reloader keeps a copy). Each of the file's mappings becomes anonymous
-    // memory holding the same bytes, in place (mremap: nothing is unmapped, not even for a
-    // moment), the dropped pages are released, and the file is emptied. Linux, shared
-    // libraries only (not ZC_RELOAD_MEMORY). The two newest versions stay whole: the current
-    // one and the one a crash goes back to.
+    // tcc compiles each version to an object file, and the Reloader loads it itself, as a
+    // linker would: its sections into memory of the Reloader's, its symbols resolved (the
+    // store's globals, then the host's and its libraries', then libtcc's runtime helpers), its
+    // relocations applied. tcc's object files are ELF on every system it runs on, so this is
+    // the same code everywhere; only the relocations are the processor's (x86-64 for now).
+    //
+    // Loading it ourselves is what lets a version go whole: nothing of it is in a library the
+    // system loaded, no file of it is left (the object file is read, then removed), and its
+    // memory is ours to release. And it is what lets a debugger see it without a file: each
+    // version is registered with the JIT interface gdb and lldb read (the object file, its
+    // sections given the addresses they were loaded at), so breakpoints by .zc file and line
+    // bind in it, and backtraces and variables read through it.
+    //
+    // Every version, and everything that outlives one, is in one reservation of address
+    // space (zl_space), so a 32-bit PC-relative reference between any two of them reaches.
+    // Its first part is kept memory, never released: the globals' storage, and (later) what
+    // old pointers need. The rest holds the versions, each where the last one ended, around
+    // and around: a released version's addresses aren't given to another until the space has
+    // gone round once, so a pointer nothing caught still faults there for a long while
+    // instead of running someone else's code.
 
-    #ifdef __linux__
-    typedef struct { uintptr_t start, end; } ZrRange;
+    #ifdef ZR_LOADER
+    // The parts of ELF this reads (not <elf.h>: not every system has it).
+    typedef struct { unsigned char e_ident[16]; uint16_t e_type, e_machine; uint32_t e_version; uint64_t e_entry, e_phoff, e_shoff; uint32_t e_flags; uint16_t e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx; } ZlEhdr;
+    typedef struct { uint32_t sh_name, sh_type; uint64_t sh_flags, sh_addr, sh_offset, sh_size; uint32_t sh_link, sh_info; uint64_t sh_addralign, sh_entsize; } ZlShdr;
+    typedef struct { uint32_t st_name; unsigned char st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } ZlSym;
+    typedef struct { uint64_t r_offset, r_info; int64_t r_addend; } ZlRela;
+    enum { ZL_SHT_SYMTAB = 2, ZL_SHT_RELA = 4, ZL_SHT_NOBITS = 8 };
+    enum { ZL_SHF_WRITE = 1, ZL_SHF_ALLOC = 2 };
+    enum { ZL_SHN_UNDEF = 0, ZL_SHN_LORESERVE = 0xff00, ZL_SHN_ABS = 0xfff1, ZL_SHN_COMMON = 0xfff2 };
+    enum { ZL_STT_OBJECT = 1, ZL_STT_FUNC = 2, ZL_STT_SECTION = 3, ZL_STT_FILE = 4 };
+    enum { ZL_STB_LOCAL = 0, ZL_STB_WEAK = 2 };
+    #define ZL_BIND(info) ((unsigned)(info) >> 4)
+    #define ZL_TYPE(info) ((unsigned)(info) & 0xf)
+    enum { ZL_R_64 = 1, ZL_R_PC32 = 2, ZL_R_PLT32 = 4, ZL_R_GOTPCREL = 9, ZL_R_32 = 10, ZL_R_32S = 11,
+           ZL_R_PC64 = 24, ZL_R_GOTPCRELX = 41, ZL_R_REX_GOTPCRELX = 42 };
 
-    // The address ranges (from the library's base) to drop: sections named in `drop`, and the
-    // manifest's objects. Into `out` (at most `max`); their count.
-    static unsigned zr_drop_ranges(const char *path, ZrRange *out, unsigned max)
+    // gdb's JIT interface (gdb/jit.h), which lldb reads too. Weak: a host with a JIT of its
+    // own (LLVM) defines them, and then both register in its list.
+    typedef struct zr_jit_entry { struct zr_jit_entry *next_entry, *prev_entry; const char *symfile_addr; uint64_t symfile_size; } zr_jit_entry;
+    struct zr_jit_descriptor { uint32_t version; uint32_t action_flag; zr_jit_entry *relevant_entry, *first_entry; };
+    __attribute__((weak, noinline, used)) void __jit_debug_register_code(void) { __asm__ volatile("" ::: "memory"); }
+    __attribute__((weak, used)) struct zr_jit_descriptor __jit_debug_descriptor = {1, 0, 0, 0};
+
+    static void zl_jit_add(zr_jit_entry *e)
+    {
+        e->prev_entry = NULL;
+        e->next_entry = __jit_debug_descriptor.first_entry;
+        if (e->next_entry) e->next_entry->prev_entry = e;
+        __jit_debug_descriptor.first_entry = e;
+        __jit_debug_descriptor.relevant_entry = e;
+        __jit_debug_descriptor.action_flag = 1; // JIT_REGISTER_FN
+        __jit_debug_register_code();
+    }
+
+    static void zl_jit_remove(zr_jit_entry *e)
+    {
+        if (e->prev_entry) e->prev_entry->next_entry = e->next_entry;
+        else __jit_debug_descriptor.first_entry = e->next_entry;
+        if (e->next_entry) e->next_entry->prev_entry = e->prev_entry;
+        __jit_debug_descriptor.relevant_entry = e;
+        __jit_debug_descriptor.action_flag = 2; // JIT_UNREGISTER_FN
+        __jit_debug_register_code();
+    }
+
+    // The space: kept memory from the start of it, versions in the rest.
+    static struct
+    {
+        unsigned char *base;
+        size_t size;      // reserved
+        size_t keep_end;  // kept memory is [base, base + keep_end)
+        size_t keep_used; // of which in use
+        size_t keep_committed;
+        size_t ring_next; // where the next version goes (an offset from base)
+        struct ZlRange { size_t start, end; } *live; // versions' ranges in use
+        unsigned nlive, live_cap;
+        int failed; // couldn't be reserved
+    } zl_space;
+
+    enum { ZL_SPACE_SIZE = 1536u << 20, ZL_KEEP_SIZE = 256u << 20, ZL_CHUNK = 64u << 10 };
+
+    static int zl_space_ready(void)
+    {
+        if (zl_space.base) return 1;
+        if (zl_space.failed) return 0;
+        void *p = mmap(NULL, ZL_SPACE_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (p == MAP_FAILED)
+        {
+            zl_space.failed = 1;
+            return 0;
+        }
+        zl_space.base = (unsigned char *)p;
+        zl_space.size = ZL_SPACE_SIZE;
+        zl_space.keep_end = ZL_KEEP_SIZE;
+        zl_space.ring_next = ZL_KEEP_SIZE;
+        return 1;
+    }
+
+    static int zl_commit(size_t start, size_t end)
+    {
+        return mprotect(zl_space.base + start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+    }
+
+    // Kept memory: `size` bytes, zeroed, aligned to `align` (a power of two), never released.
+    static void *zl_keep(size_t size, size_t align)
+    {
+        if (!zl_space_ready()) return NULL;
+        if (align < 16) align = 16;
+        size_t at = (zl_space.keep_used + align - 1) & ~(align - 1);
+        if (at + size > zl_space.keep_end) return NULL;
+        size_t need = (at + size + ZL_CHUNK - 1) & ~(size_t)(ZL_CHUNK - 1);
+        if (need > zl_space.keep_committed)
+        {
+            if (!zl_commit(zl_space.keep_committed, need)) return NULL;
+            zl_space.keep_committed = need;
+        }
+        zl_space.keep_used = at + size;
+        return zl_space.base + at;
+    }
+
+    static int zl_overlaps(size_t start, size_t end)
+    {
+        for (unsigned i = 0; i < zl_space.nlive; i++)
+            if (start < zl_space.live[i].end && zl_space.live[i].start < end) return (int)i;
+        return -1;
+    }
+
+    // A version's memory: `size` bytes, zeroed, after the last one given out, or NULL.
+    static unsigned char *zl_ring_take(size_t size)
+    {
+        if (!zl_space_ready()) return NULL;
+        size = (size + ZL_CHUNK - 1) & ~(size_t)(ZL_CHUNK - 1);
+        if (zl_space.nlive == zl_space.live_cap)
+        {
+            unsigned cap = zl_space.live_cap ? zl_space.live_cap * 2 : 16;
+            struct ZlRange *grown = (struct ZlRange *)realloc(zl_space.live, cap * sizeof(*grown));
+            if (!grown) return NULL;
+            zl_space.live = grown;
+            zl_space.live_cap = cap;
+        }
+        size_t at = zl_space.ring_next;
+        int wrapped = 0;
+        for (;;)
+        {
+            if (at + size > zl_space.size)
+            {
+                if (wrapped) return NULL;
+                wrapped = 1;
+                at = zl_space.keep_end;
+                continue;
+            }
+            int o = zl_overlaps(at, at + size);
+            if (o < 0) break;
+            at = zl_space.live[o].end;
+            if (wrapped && at >= zl_space.ring_next) return NULL;
+        }
+        if (!zl_commit(at, at + size)) return NULL;
+        zl_space.live[zl_space.nlive++] = (struct ZlRange){at, at + size};
+        zl_space.ring_next = at + size;
+        return zl_space.base + at;
+    }
+
+    // Gives a version's memory back: released, and left reserved (a stray access faults).
+    static void zl_ring_give(unsigned char *mem)
+    {
+        size_t start = (size_t)(mem - zl_space.base);
+        for (unsigned i = 0; i < zl_space.nlive; i++)
+        {
+            if (zl_space.live[i].start != start) continue;
+            size_t len = zl_space.live[i].end - start;
+            madvise(mem, len, MADV_DONTNEED);
+            mprotect(mem, len, PROT_NONE);
+            zl_space.live[i] = zl_space.live[--zl_space.nlive];
+            return;
+        }
+    }
+
+    // libtcc's runtime helpers (__va_arg, conversions between floats and 64-bit integers),
+    // which tcc's code calls and an object file leaves to the linker: each one found by
+    // linking a reference to it in memory, kept for the process.
+    static struct ZlHelper { char *name; void *addr; TCCState *tcc; void *mem; } *zl_helpers;
+    static unsigned zl_nhelpers;
+
+    static void *zl_helper(const char *name)
+    {
+        for (unsigned i = 0; i < zl_nhelpers; i++)
+            if (!strcmp(zl_helpers[i].name, name)) return zl_helpers[i].addr;
+        struct ZlHelper *grown = (struct ZlHelper *)realloc(zl_helpers, (zl_nhelpers + 1) * sizeof(*grown));
+        if (!grown) return NULL;
+        zl_helpers = grown;
+        struct ZlHelper *h = &zl_helpers[zl_nhelpers];
+        memset(h, 0, sizeof(*h));
+        if (strlen(name) > 200) return NULL;
+        // Declared, or (one tcc declares itself, as __va_arg) not.
+        char src[320];
+        ZrVersion v;
+        for (int declared = 1; declared >= 0; declared--)
+        {
+            memset(&v, 0, sizeof v);
+            v.tcc = h->tcc = tcc_new();
+            if (!h->tcc) return NULL;
+            tcc_set_error_func(h->tcc, NULL, zr_on_tcc_quiet);
+            tcc_set_output_type(h->tcc, TCC_OUTPUT_MEMORY);
+            snprintf(src, sizeof src, "%s%s%svoid *_zr_helper_ref(void) { return (void *)%s; }\n",
+                     declared ? "extern char " : "", declared ? name : "", declared ? "[];\n" : "", name);
+            if (tcc_compile_string(h->tcc, src) != -1 && zr_relocate(&v) >= 0 &&
+                (h->addr = tcc_get_symbol(h->tcc, name)))
+                break;
+            tcc_delete(h->tcc);
+            if (v.mem) munmap(v.mem, v.mem_size);
+            h->tcc = NULL;
+        }
+        if (!h->tcc) return NULL;
+        h->mem = v.mem;
+        h->name = zr_strdup(name);
+        zl_nhelpers++;
+        return h->addr;
+    }
+
+    // Where an undefined name of a version is: given by the caller, else the host's.
+    typedef void *(*ZlResolve)(void *ctx, const char *name);
+
+    // A version loaded: its object file (kept while it is: a debugger reads it), where each
+    // section and symbol is, and its memory.
+    typedef struct ZlImage
+    {
+        unsigned char *img;
+        size_t img_size;
+        ZlShdr *sh;
+        unsigned nsh;
+        ZlSym *syms;
+        unsigned nsyms;
+        const char *strtab;
+        uint64_t *sec;     // each section's address, or 0 if it isn't loaded
+        uint64_t *addr;    // each symbol's
+        unsigned *by_name; // defined symbols by name: index + 1, or 0
+        unsigned by_name_cap;
+        unsigned char *mem; // in the ring
+        size_t mem_size;
+        size_t kept_size;   // its writable sections' bytes in kept memory (keep_data), or 0
+        zr_jit_entry jit;
+        int registered;
+    } ZlImage;
+
+    static unsigned zl_name_hash(const char *s)
+    {
+        unsigned h = 2166136261u;
+        for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+        return h;
+    }
+
+    static int zl_err(char *err, size_t n, const char *fmt, ...)
+    {
+        va_list ap;
+        va_start(ap, fmt);
+        if (err && n) vsnprintf(err, n, fmt, ap);
+        va_end(ap);
+        return 0;
+    }
+
+    static int zl_fits32(int64_t d) { return d == (int64_t)(int32_t)d; }
+
+    static void zl_free(ZlImage *im)
+    {
+        if (!im) return;
+        if (im->registered) zl_jit_remove(&im->jit);
+        if (im->mem) zl_ring_give(im->mem);
+        free(im->img);
+        free(im->sec);
+        free(im->addr);
+        free(im->by_name);
+        free(im);
+    }
+
+    // The address of the symbol `name` defined in `im` (a global one before a local one of
+    // the same name), or NULL.
+    static void *zl_sym(ZlImage *im, const char *name)
+    {
+        if (!im || !im->by_name_cap) return NULL;
+        unsigned k = zl_name_hash(name) & (im->by_name_cap - 1);
+        for (; im->by_name[k]; k = (k + 1) & (im->by_name_cap - 1))
+        {
+            unsigned s = im->by_name[k] - 1;
+            if (!strcmp(im->strtab + im->syms[s].st_name, name)) return (void *)(uintptr_t)im->addr[s];
+        }
+        return NULL;
+    }
+
+    // Loads the object file `img` (taken: freed with the image, or on failure). Its writable
+    // sections go to kept memory if `keep_data` (a version whose globals are the store's),
+    // else with the rest. NULL, with why in `err`, if it can't be.
+    static ZlImage *zl_load(unsigned char *img, size_t img_size, ZlResolve resolve, void *ctx,
+                            int keep_data, int *module_fault, char *err, size_t errn)
+    {
+        ZlImage *im = (ZlImage *)calloc(1, sizeof(ZlImage));
+        unsigned char *need_got = NULL, *need_plt = NULL;
+        uint64_t *gslot = NULL, *pslot = NULL; // each symbol's GOT entry and jump, once made
+        if (!im)
+        {
+            free(img);
+            zl_err(err, errn, "out of memory");
+            return NULL;
+        }
+        im->img = img;
+        im->img_size = img_size;
+        ZlEhdr *eh = (ZlEhdr *)img;
+        if (img_size < sizeof(ZlEhdr) || memcmp(eh->e_ident, "\177ELF", 4) != 0 || eh->e_ident[4] != 2 ||
+            eh->e_type != 1 || eh->e_machine != 62 || eh->e_shentsize != sizeof(ZlShdr) ||
+            eh->e_shoff + (uint64_t)eh->e_shnum * sizeof(ZlShdr) > img_size)
+        {
+            zl_err(err, errn, "not an x86-64 object file");
+            goto fail;
+        }
+        im->sh = (ZlShdr *)(img + eh->e_shoff);
+        im->nsh = eh->e_shnum;
+        for (unsigned i = 0; i < im->nsh; i++)
+        {
+            if (im->sh[i].sh_type != ZL_SHT_NOBITS && im->sh[i].sh_offset + im->sh[i].sh_size > img_size)
+            {
+                zl_err(err, errn, "a section past the end of the file");
+                goto fail;
+            }
+            if (im->sh[i].sh_type == ZL_SHT_SYMTAB && im->sh[i].sh_link < im->nsh)
+            {
+                im->syms = (ZlSym *)(img + im->sh[i].sh_offset);
+                im->nsyms = (unsigned)(im->sh[i].sh_size / sizeof(ZlSym));
+                im->strtab = (const char *)img + im->sh[im->sh[i].sh_link].sh_offset;
+            }
+        }
+        if (!im->syms)
+        {
+            zl_err(err, errn, "no symbol table");
+            goto fail;
+        }
+        im->sec = (uint64_t *)calloc(im->nsh, sizeof(uint64_t));
+        im->addr = (uint64_t *)calloc(im->nsyms, sizeof(uint64_t));
+        need_got = (unsigned char *)calloc(im->nsyms, 1);
+        need_plt = (unsigned char *)calloc(im->nsyms, 1);
+        gslot = (uint64_t *)calloc(im->nsyms, sizeof(uint64_t));
+        pslot = (uint64_t *)calloc(im->nsyms, sizeof(uint64_t));
+        if (!im->sec || !im->addr || !need_got || !need_plt || !gslot || !pslot)
+        {
+            zl_err(err, errn, "out of memory");
+            goto fail;
+        }
+
+        // The names it uses and doesn't define.
+        for (unsigned s = 1; s < im->nsyms; s++)
+        {
+            ZlSym *y = &im->syms[s];
+            if (y->st_shndx != ZL_SHN_UNDEF) continue;
+            const char *name = im->strtab + y->st_name;
+            if (!*name) continue;
+            void *p = resolve ? resolve(ctx, name) : NULL;
+            if (!p) p = dlsym(RTLD_DEFAULT, name);
+            if (!p) p = zl_helper(name);
+            if (!p && ZL_BIND(y->st_info) != ZL_STB_WEAK)
+            {
+                *module_fault = 1;
+                zl_err(err, errn, "undefined symbol '%s'", name);
+                goto fail;
+            }
+            im->addr[s] = (uint64_t)(uintptr_t)p;
+        }
+        // GOT entries, and jumps for calls that may not reach (to what the host defines).
+        unsigned ngot = 0, nplt = 0;
+        for (unsigned i = 0; i < im->nsh; i++)
+        {
+            ZlShdr *rs = &im->sh[i];
+            if (rs->sh_type != ZL_SHT_RELA || rs->sh_info >= im->nsh || !(im->sh[rs->sh_info].sh_flags & ZL_SHF_ALLOC)) continue;
+            ZlRela *ra = (ZlRela *)(img + rs->sh_offset);
+            for (size_t k = 0; k < rs->sh_size / sizeof(ZlRela); k++)
+            {
+                unsigned s = (unsigned)(ra[k].r_info >> 32), t = (unsigned)ra[k].r_info;
+                if (s >= im->nsyms) continue;
+                if ((t == ZL_R_GOTPCREL || t == ZL_R_GOTPCRELX || t == ZL_R_REX_GOTPCRELX) && !need_got[s])
+                {
+                    need_got[s] = 1;
+                    ngot++;
+                }
+                if (t == ZL_R_PLT32 && im->syms[s].st_shndx == ZL_SHN_UNDEF && !need_plt[s])
+                {
+                    need_plt[s] = 1;
+                    nplt++;
+                }
+            }
+        }
+
+        // Layout: the sections (the writable ones elsewhere if keep_data), common symbols,
+        // the GOT, the jumps.
+        size_t size = 0, kept = 0;
+        for (unsigned i = 0; i < im->nsh; i++)
+        {
+            ZlShdr *s = &im->sh[i];
+            if (!(s->sh_flags & ZL_SHF_ALLOC) || !s->sh_size) continue;
+            size_t a = s->sh_addralign > 1 ? (size_t)s->sh_addralign : 1;
+            size_t *at = keep_data && (s->sh_flags & ZL_SHF_WRITE) ? &kept : &size;
+            *at = (*at + a - 1) & ~(a - 1);
+            im->sec[i] = *at + 1; // an offset + 1 for now
+            *at += s->sh_size;
+        }
+        size_t *common_at = keep_data ? &kept : &size;
+        for (unsigned s = 1; s < im->nsyms; s++)
+        {
+            ZlSym *y = &im->syms[s];
+            if (y->st_shndx != ZL_SHN_COMMON) continue;
+            size_t a = y->st_value > 1 ? (size_t)y->st_value : 1; // a common symbol's alignment
+            *common_at = (*common_at + a - 1) & ~(a - 1);
+            im->addr[s] = *common_at + 1;
+            *common_at += y->st_size;
+        }
+        size = (size + 15) & ~(size_t)15;
+        size_t got_at = size;
+        size += (size_t)ngot * 8;
+        size_t plt_at = size;
+        size += (size_t)nplt * 16;
+        im->mem = zl_ring_take(size ? size : 16);
+        unsigned char *kmem = kept ? (unsigned char *)zl_keep(kept, 64) : NULL;
+        if (!im->mem || (kept && !kmem))
+        {
+            zl_err(err, errn, "no room left for it in the Reloader's address space");
+            goto fail;
+        }
+        im->mem_size = size;
+        im->kept_size = kept;
+        for (unsigned i = 0; i < im->nsh; i++)
+        {
+            ZlShdr *s = &im->sh[i];
+            if (!im->sec[i]) continue;
+            unsigned char *base = keep_data && (s->sh_flags & ZL_SHF_WRITE) ? kmem : im->mem;
+            im->sec[i] = (uint64_t)(uintptr_t)(base + im->sec[i] - 1);
+            if (s->sh_type != ZL_SHT_NOBITS)
+                memcpy((void *)(uintptr_t)im->sec[i], img + s->sh_offset, s->sh_size);
+        }
+        // Where each defined symbol is, and an index of them by name.
+        unsigned named = 0;
+        for (unsigned s = 1; s < im->nsyms; s++)
+        {
+            ZlSym *y = &im->syms[s];
+            if (y->st_shndx == ZL_SHN_COMMON)
+                im->addr[s] = (uint64_t)(uintptr_t)((keep_data ? kmem : im->mem) + im->addr[s] - 1);
+            else if (y->st_shndx == ZL_SHN_ABS)
+                im->addr[s] = y->st_value;
+            else if (y->st_shndx != ZL_SHN_UNDEF && y->st_shndx < im->nsh && im->sec[y->st_shndx])
+                im->addr[s] = im->sec[y->st_shndx] + y->st_value;
+            else
+                continue;
+            unsigned ty = ZL_TYPE(y->st_info);
+            if (y->st_name && ty != ZL_STT_SECTION && ty != ZL_STT_FILE) named++;
+        }
+        im->by_name_cap = 16;
+        while (im->by_name_cap < named * 2) im->by_name_cap *= 2;
+        im->by_name = (unsigned *)calloc(im->by_name_cap, sizeof(unsigned));
+        if (!im->by_name)
+        {
+            zl_err(err, errn, "out of memory");
+            goto fail;
+        }
+        for (int pass = 0; pass < 2; pass++) // globals first, so a lookup finds them first
+            for (unsigned s = 1; s < im->nsyms; s++)
+            {
+                ZlSym *y = &im->syms[s];
+                unsigned ty = ZL_TYPE(y->st_info);
+                int local = ZL_BIND(y->st_info) == ZL_STB_LOCAL;
+                if (!y->st_name || ty == ZL_STT_SECTION || ty == ZL_STT_FILE || local != pass) continue;
+                if (y->st_shndx == ZL_SHN_UNDEF) continue;
+                unsigned k = zl_name_hash(im->strtab + y->st_name) & (im->by_name_cap - 1);
+                while (im->by_name[k]) k = (k + 1) & (im->by_name_cap - 1);
+                im->by_name[k] = s + 1;
+            }
+
+        // The relocations of what is loaded (the debug sections' are the debugger's to apply).
+        unsigned ngot_used = 0, nplt_used = 0;
+        for (unsigned i = 0; i < im->nsh; i++)
+        {
+            ZlShdr *rs = &im->sh[i];
+            if (rs->sh_type != ZL_SHT_RELA || rs->sh_info >= im->nsh || !im->sec[rs->sh_info]) continue;
+            ZlShdr *ts = &im->sh[rs->sh_info];
+            ZlRela *ra = (ZlRela *)(img + rs->sh_offset);
+            for (size_t k = 0; k < rs->sh_size / sizeof(ZlRela); k++)
+            {
+                unsigned s = (unsigned)(ra[k].r_info >> 32), t = (unsigned)ra[k].r_info;
+                if (s >= im->nsyms || ra[k].r_offset + 4 > ts->sh_size) continue;
+                unsigned char *P = (unsigned char *)(uintptr_t)(im->sec[rs->sh_info] + ra[k].r_offset);
+                uint64_t S = im->addr[s];
+                int64_t A = ra[k].r_addend;
+                uint64_t Pa = (uint64_t)(uintptr_t)P;
+                int64_t d;
+                switch (t)
+                {
+                case ZL_R_64:
+                    memcpy(P, &(uint64_t){S + (uint64_t)A}, 8);
+                    break;
+                case ZL_R_PC64:
+                    memcpy(P, &(uint64_t){S + (uint64_t)A - Pa}, 8);
+                    break;
+                case ZL_R_PC32:
+                case ZL_R_PLT32:
+                    d = (int64_t)(S + (uint64_t)A - Pa);
+                    if (!zl_fits32(d) && need_plt[s])
+                    {
+                        if (!pslot[s])
+                        {
+                            unsigned char *st = im->mem + plt_at + 16 * nplt_used++;
+                            static const unsigned char jmp[6] = {0xFF, 0x25, 0, 0, 0, 0}; // jmp *0(%rip)
+                            memcpy(st, jmp, 6);
+                            memcpy(st + 6, &S, 8);
+                            pslot[s] = (uint64_t)(uintptr_t)st;
+                        }
+                        d = (int64_t)(pslot[s] + (uint64_t)A - Pa);
+                    }
+                    if (!zl_fits32(d))
+                    {
+                        zl_err(err, errn, "'%s' is out of reach of a 32-bit reference",
+                               im->strtab + im->syms[s].st_name);
+                        goto fail;
+                    }
+                    memcpy(P, &(int32_t){(int32_t)d}, 4);
+                    break;
+                case ZL_R_GOTPCREL:
+                case ZL_R_GOTPCRELX:
+                case ZL_R_REX_GOTPCRELX:
+                {
+                    if (!gslot[s])
+                    {
+                        uint64_t *g = (uint64_t *)(im->mem + got_at) + ngot_used++;
+                        *g = S;
+                        gslot[s] = (uint64_t)(uintptr_t)g;
+                    }
+                    d = (int64_t)(gslot[s] + (uint64_t)A - Pa);
+                    memcpy(P, &(int32_t){(int32_t)d}, 4);
+                    break;
+                }
+                case ZL_R_32:
+                    if (S + (uint64_t)A > 0xffffffffu) goto out_of_reach;
+                    memcpy(P, &(uint32_t){(uint32_t)(S + (uint64_t)A)}, 4);
+                    break;
+                case ZL_R_32S:
+                    if (!zl_fits32((int64_t)(S + (uint64_t)A))) goto out_of_reach;
+                    memcpy(P, &(int32_t){(int32_t)(S + (uint64_t)A)}, 4);
+                    break;
+                default:
+                    zl_err(err, errn, "a relocation of type %u, which the Reloader doesn't know", t);
+                    goto fail;
+                out_of_reach:
+                    zl_err(err, errn, "an absolute 32-bit reference to '%s'", im->strtab + im->syms[s].st_name);
+                    goto fail;
+                }
+            }
+        }
+        free(need_got);
+        free(need_plt);
+        free(gslot);
+        free(pslot);
+        need_got = need_plt = NULL;
+        gslot = pslot = NULL;
+
+        // The debugger's view: the object file with each loaded section at its address, and
+        // each name it took from elsewhere (the store's globals, the host's) at that address.
+        // The debug sections' relocations are applied here: tcc writes them as ELF's REL kind
+        // (the offset in the field, none in the entry, against a section's symbol), which gdb,
+        // reading them as RELA (the field replaced), would put every function at the start of
+        // .text. Their entries are then hidden from it.
+        for (unsigned i = 0; i < im->nsh; i++)
+        {
+            ZlShdr *rs = &im->sh[i];
+            if (rs->sh_type != ZL_SHT_RELA || rs->sh_info >= im->nsh || im->sec[rs->sh_info]) continue;
+            ZlShdr *ts = &im->sh[rs->sh_info];
+            if (ts->sh_type == ZL_SHT_NOBITS) continue;
+            unsigned char *data = img + ts->sh_offset;
+            ZlRela *ra = (ZlRela *)(img + rs->sh_offset);
+            for (size_t k = 0; k < rs->sh_size / sizeof(ZlRela); k++)
+            {
+                unsigned sym = (unsigned)(ra[k].r_info >> 32), t = (unsigned)ra[k].r_info;
+                if (sym >= im->nsyms) continue;
+                uint64_t v = im->addr[sym] + (uint64_t)ra[k].r_addend;
+                if (t == ZL_R_64 && ra[k].r_offset + 8 <= ts->sh_size)
+                {
+                    uint64_t f;
+                    memcpy(&f, data + ra[k].r_offset, 8);
+                    f += v;
+                    memcpy(data + ra[k].r_offset, &f, 8);
+                }
+                else if ((t == ZL_R_32 || t == ZL_R_32S) && ra[k].r_offset + 4 <= ts->sh_size)
+                {
+                    uint32_t f;
+                    memcpy(&f, data + ra[k].r_offset, 4);
+                    f += (uint32_t)v;
+                    memcpy(data + ra[k].r_offset, &f, 4);
+                }
+            }
+            rs->sh_type = 0; // SHT_NULL
+        }
+        for (unsigned i = 0; i < im->nsh; i++)
+            if (im->sec[i]) im->sh[i].sh_addr = im->sec[i];
+        for (unsigned s = 1; s < im->nsyms; s++)
+        {
+            ZlSym *y = &im->syms[s];
+            if ((y->st_shndx == ZL_SHN_UNDEF && im->addr[s]) || y->st_shndx == ZL_SHN_COMMON)
+            {
+                y->st_shndx = ZL_SHN_ABS;
+                y->st_value = im->addr[s];
+            }
+        }
+        im->jit.symfile_addr = (const char *)img;
+        im->jit.symfile_size = img_size;
+        zl_jit_add(&im->jit);
+        im->registered = 1;
+        return im;
+
+    fail:
+        free(need_got);
+        free(need_plt);
+        free(gslot);
+        free(pslot);
+        zl_free(im);
+        return NULL;
+    }
+
+    static unsigned char *zl_read_file(const char *path, size_t *size)
     {
         FILE *f = fopen(path, "rb");
-        if (!f) return 0;
-        unsigned n = 0;
-        Elf64_Ehdr eh;
-        Elf64_Shdr *sh = NULL;
-        char *names = NULL;
-        Elf64_Sym *syms = NULL;
-        char *strs = NULL;
-        if (fread(&eh, sizeof eh, 1, f) != 1 || memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
-            eh.e_ident[EI_CLASS] != ELFCLASS64 || eh.e_shentsize != sizeof(Elf64_Shdr) ||
-            eh.e_shstrndx >= eh.e_shnum)
-            goto done;
-        sh = (Elf64_Shdr *)calloc(eh.e_shnum, sizeof(Elf64_Shdr));
-        if (!sh || fseek(f, (long)eh.e_shoff, SEEK_SET) != 0 ||
-            fread(sh, sizeof(Elf64_Shdr), eh.e_shnum, f) != eh.e_shnum)
-            goto done;
-        names = (char *)malloc(sh[eh.e_shstrndx].sh_size + 1);
-        if (!names || fseek(f, (long)sh[eh.e_shstrndx].sh_offset, SEEK_SET) != 0 ||
-            fread(names, 1, sh[eh.e_shstrndx].sh_size, f) != sh[eh.e_shstrndx].sh_size)
-            goto done;
-        names[sh[eh.e_shstrndx].sh_size] = 0;
-        static const char *const drop[] = {".dynsym", ".dynstr", ".hash", ".gnu.hash",
-                                           ".gnu.version", ".gnu.version_r", ".gnu.version_d", NULL};
-        for (unsigned i = 0; i < eh.e_shnum && n < max; i++)
+        if (!f) return NULL;
+        unsigned char *buf = NULL;
+        long n = -1;
+        if (fseek(f, 0, SEEK_END) == 0) n = ftell(f);
+        if (n > 0 && fseek(f, 0, SEEK_SET) == 0 && (buf = (unsigned char *)malloc((size_t)n)) &&
+            fread(buf, 1, (size_t)n, f) != (size_t)n)
         {
-            const char *nm = sh[i].sh_name < sh[eh.e_shstrndx].sh_size ? names + sh[i].sh_name : "";
-            int hit = !strncmp(nm, ".rela", 5) || !strncmp(nm, ".rel.", 5);
-            for (int k = 0; drop[k] && !hit; k++) hit = !strcmp(nm, drop[k]);
-            if (hit && (sh[i].sh_flags & SHF_ALLOC) && !(sh[i].sh_flags & (SHF_WRITE | SHF_EXECINSTR)))
-                out[n++] = (ZrRange){(uintptr_t)sh[i].sh_addr, (uintptr_t)(sh[i].sh_addr + sh[i].sh_size)};
+            free(buf);
+            buf = NULL;
         }
-        // The manifest: the objects named _zc_mf* (its tables), from the symbol table.
-        for (unsigned i = 0; i < eh.e_shnum; i++)
-        {
-            if (sh[i].sh_type != SHT_SYMTAB || sh[i].sh_link >= eh.e_shnum) continue;
-            Elf64_Shdr *ss = &sh[sh[i].sh_link];
-            syms = (Elf64_Sym *)malloc(sh[i].sh_size ? sh[i].sh_size : 1);
-            strs = (char *)malloc(ss->sh_size + 1);
-            if (!syms || !strs || fseek(f, (long)sh[i].sh_offset, SEEK_SET) != 0 ||
-                fread(syms, 1, sh[i].sh_size, f) != sh[i].sh_size ||
-                fseek(f, (long)ss->sh_offset, SEEK_SET) != 0 ||
-                fread(strs, 1, ss->sh_size, f) != ss->sh_size)
-                break;
-            strs[ss->sh_size] = 0;
-            // Adjacent objects as one range: a page between two of them can go too.
-            uintptr_t lo = 0, hi = 0;
-            size_t count = sh[i].sh_size / sizeof(Elf64_Sym);
-            int (*cmp)(const void *, const void *) = NULL;
-            (void)cmp;
-            for (size_t k = 0; k < count && n < max; k++)
-            {
-                Elf64_Sym *s = &syms[k];
-                if (ELF64_ST_TYPE(s->st_info) != STT_OBJECT || !s->st_size || s->st_name >= ss->sh_size ||
-                    strncmp(strs + s->st_name, "_zc_mf", 6) != 0)
-                    continue;
-                uintptr_t a = (uintptr_t)s->st_value, b = a + (uintptr_t)s->st_size;
-                if (hi && a <= hi + 64 && b + 64 >= lo)
-                {
-                    if (a < lo) lo = a;
-                    if (b > hi) hi = b;
-                    continue;
-                }
-                if (hi) out[n++] = (ZrRange){lo, hi};
-                lo = a;
-                hi = b;
-            }
-            if (hi && n < max) out[n++] = (ZrRange){lo, hi};
-            break;
-        }
-    done:
-        free(syms);
-        free(strs);
-        free(names);
-        free(sh);
         fclose(f);
-        return n;
+        *size = buf ? (size_t)n : 0;
+        return buf;
     }
 
-    // Every mapping of the file (`dev`, `ino`) made anonymous memory with the same bytes and
-    // protection, in place. 0 if one couldn't be (it is then as it was).
-    static int zr_unmap_file(unsigned long dev_major, unsigned long dev_minor, unsigned long ino)
+    static size_t zr_version_bytes(const ZrVersion *v)
     {
-        FILE *maps = fopen("/proc/self/maps", "r");
-        if (!maps) return 0;
-        ZrRange spans[64];
-        char perms[64][5];
-        unsigned n = 0;
-        char line[1024];
-        while (n < 64 && fgets(line, sizeof line, maps))
-        {
-            unsigned long s, e, off, maj, min, in;
-            char p[5];
-            if (sscanf(line, "%lx-%lx %4s %lx %lx:%lx %lu", &s, &e, p, &off, &maj, &min, &in) != 7) continue;
-            if (in != ino || maj != dev_major || min != dev_minor) continue;
-            spans[n] = (ZrRange){s, e};
-            memcpy(perms[n], p, 5);
-            n++;
-        }
-        fclose(maps);
-        int ok = n > 0;
-        for (unsigned i = 0; i < n; i++)
-        {
-            size_t len = spans[i].end - spans[i].start;
-            int prot = (perms[i][0] == 'r' ? PROT_READ : 0) | (perms[i][1] == 'w' ? PROT_WRITE : 0) |
-                       (perms[i][2] == 'x' ? PROT_EXEC : 0);
-            void *tmp = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-            if (tmp == MAP_FAILED) { ok = 0; continue; }
-            if (prot & PROT_READ) memcpy(tmp, (void *)spans[i].start, len);
-            if (mprotect(tmp, len, prot) != 0 ||
-                mremap(tmp, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)spans[i].start) == MAP_FAILED)
-            {
-                munmap(tmp, len);
-                ok = 0;
-            }
-        }
-        return ok;
-    }
-
-    static void zr_tombstone(ZrVersion *v)
-    {
-        if (v->tomb || !v->dl || !v->so_path) return;
-        struct link_map *lm = NULL;
-        struct stat st;
-        if (dlinfo(v->dl, RTLD_DI_LINKMAP, &lm) != 0 || !lm || stat(v->so_path, &st) != 0) return;
-        ZrRange drop[4096];
-        unsigned nd = zr_drop_ranges(v->so_path, drop, 4096);
-        if (!zr_unmap_file(major(st.st_dev), minor(st.st_dev), (unsigned long)st.st_ino)) return;
-        long page = sysconf(_SC_PAGESIZE);
-        uintptr_t base = (uintptr_t)lm->l_addr;
-        for (unsigned i = 0; i < nd; i++)
-        {
-            // Whole pages only, and never the first (the ELF and program headers, which
-            // dl_iterate_phdr and unwinders read).
-            uintptr_t a = (base + drop[i].start + (uintptr_t)page - 1) & ~(uintptr_t)(page - 1);
-            uintptr_t b = (base + drop[i].end) & ~(uintptr_t)(page - 1);
-            if (a < base + (uintptr_t)page) a = base + (uintptr_t)page;
-            if (b > a) madvise((void *)a, b - a, MADV_DONTNEED);
-        }
-        // Emptied, not removed: its disk space is freed, but its inode stays taken. glibc
-        // knows a loaded library by its device and inode, so a later version's file given
-        // a removed one's inode would be taken for this library, still loaded, and dlopen
-        // would return this handle. It is removed when the version is deleted (free()).
-        if (truncate(v->so_path, 0) != 0) remove(v->so_path);
-        v->tomb = 1;
+        return v->im ? v->im->mem_size + v->im->img_size : v->mem_size;
     }
     #else
-    static void zr_tombstone(ZrVersion *v) { (void)v; }
+    static size_t zr_version_bytes(const ZrVersion *v) { return v->mem_size; }
+    static void *zl_sym(struct ZlImage *im, const char *name) { (void)im; (void)name; return NULL; }
+    static void zl_free(struct ZlImage *im) { (void)im; }
     #endif
 
     static void *zr_new(const char *source, const char *c_file)
@@ -658,31 +1133,24 @@ raw {
     }
 
     // The old versions kept, and their memory when known.
+    static size_t zr_version_bytes(const ZrVersion *v);
     static void zr_report_kept(ZrReloader *r)
     {
+        if (r->old_count == 0) return;
         size_t bytes = 0;
         int known = 1;
         for (int i = 0; i < r->old_count; i++)
         {
-            if (r->old[i].mem_size == 0) known = 0;
-            bytes += r->old[i].mem_size;
+            size_t b = zr_version_bytes(&r->old[i]);
+            if (!b) known = 0;
+            bytes += b;
         }
-        if (r->old_count == 0) return;
-        int shrunk = 0;
-        for (int i = 0; i < r->old_count; i++) shrunk += r->old[i].tomb;
-        char tail[64] = "";
-        if (shrunk) snprintf(tail, sizeof tail, ", %d of them shrunk", shrunk);
         if (known)
-        {
-            fprintf(stderr, "reload: %d old version%s kept loaded (%zu KB%s)\n", r->old_count,
-                    r->old_count == 1 ? "" : "s", bytes / 1024, tail);
-        }
+            fprintf(stderr, "reload: %d old version%s kept loaded (%zu KB)\n", r->old_count,
+                    r->old_count == 1 ? "" : "s", bytes / 1024);
         else
-        {
-            fprintf(stderr, "reload: %d old version%s kept loaded%s%s%s\n", r->old_count,
-                    r->old_count == 1 ? "" : "s", shrunk ? " (" : "", shrunk ? tail + 2 : "",
-                    shrunk ? ")" : "");
-        }
+            fprintf(stderr, "reload: %d old version%s kept loaded\n", r->old_count,
+                    r->old_count == 1 ? "" : "s");
     }
 
     // ---- Comparing versions' manifests ------------------------------------------------
@@ -2003,52 +2471,29 @@ raw {
     // Compile the module's C into `v`, defining its globals (`own`) or using the ones in the
     // store. Errors are printed only for a version that defines them: a failure to use the
     // store is retried that way.
-    // Each version is a shared library, written beside the C file with debug information and
-    // loaded with dlopen, so a debugger sees it as it sees any library: breakpoints by .zc
-    // file and line (the C's #line directives) bind in every version as it loads, and
-    // backtraces and variables read through it. DWARF with libtcc 0.9.28 (-gdwarf); 0.9.27
-    // writes stabs, which gdb no longer binds breakpoints in. If writing or loading the
-    // library fails, or with ZC_RELOAD_MEMORY=1, the code is compiled into memory instead,
-    // where a debugger sees no symbols.
+    // tcc writes an object file with debug information (beside the C file, removed once read),
+    // and the Reloader loads it (zl_load), registered with debuggers: breakpoints by .zc file
+    // and line (the C's #line directives) bind in every version as it loads, and backtraces
+    // and variables read through it. DWARF with libtcc 0.9.28 (-gdwarf); 0.9.27 writes stabs,
+    // which gdb no longer binds breakpoints in. If the Reloader can't load it, or with
+    // ZC_RELOAD_MEMORY=1, libtcc compiles it into memory instead, where a debugger sees no
+    // symbols.
     static int zr_compile_memory(ZrReloader *r, ZrVersion *v, int own);
 
-    // Library files left by a process that ended without free() (killed, or crashed outside
-    // call()): <c_file>.<pid>.<n>.so of a pid no longer running. (A file can't go as soon as
-    // it's loaded: a debugger reads the debug information from it.)
-    static void zr_remove_stale_libraries(ZrReloader *r)
+    #ifdef ZR_LOADER
+    // Where a version that uses the store finds each global: there (zl_load's resolver).
+    static void *zr_resolve_store(void *ctx, const char *name)
     {
-        char *dir_path = zr_strdup(r->c_file);
-        if (!dir_path) return;
-        char *slash = strrchr(dir_path, '/');
-        const char *base = slash ? slash + 1 : r->c_file;
-        if (slash) *slash = 0;
-        DIR *dir = opendir(slash ? dir_path : ".");
-        size_t blen = strlen(base);
-        struct dirent *e;
-        while (dir && (e = readdir(dir)) != NULL)
-        {
-            const char *n = e->d_name;
-            int pid = 0;
-            unsigned serial = 0;
-            char tail[8];
-            if (strncmp(n, base, blen) != 0 || n[blen] != '.') continue;
-            if (sscanf(n + blen + 1, "%d.%u.%3s", &pid, &serial, tail) != 3 || strcmp(tail, "so")) continue;
-            if (pid <= 0 || pid == (int)getpid() || kill(pid, 0) == 0) continue;
-            size_t len = strlen(dir_path) + strlen(n) + 2;
-            char *path = (char *)malloc(len);
-            if (!path) break;
-            snprintf(path, len, "%s/%s", slash ? dir_path : ".", n);
-            remove(path);
-            free(path);
-        }
-        if (dir) closedir(dir);
-        free(dir_path);
+        ZrReloader *r = (ZrReloader *)ctx;
+        const ZcMfGlobal *g = zr_global_find(r->store, r->nstore, name);
+        return g ? g->addr : NULL;
     }
+    #endif
 
     static int zr_compile(ZrReloader *r, ZrVersion *v, int own)
     {
+    #ifdef ZR_LOADER
         if (r->in_memory) return zr_compile_memory(r, v, own);
-        if (r->so_serial == 0) zr_remove_stale_libraries(r);
         memset(v, 0, sizeof(*v));
         v->tcc = tcc_new();
         if (!v->tcc) return -1;
@@ -2058,50 +2503,60 @@ raw {
     #else
         tcc_set_options(v->tcc, "-gdwarf");
     #endif
-        // The module's names bind to its own definitions first: without it the dynamic
-        // linker would take a global or function of the same name in the host or libc
-        // (opterr, or a host's `update`) for the module's own.
-        tcc_set_options(v->tcc, "-Wl,-Bsymbolic");
-        tcc_set_output_type(v->tcc, TCC_OUTPUT_DLL);
+        tcc_set_output_type(v->tcc, TCC_OUTPUT_OBJ);
         for (int i = 0; i < r->include_count; i++) tcc_add_include_path(v->tcc, r->includes[i]);
+        // A thread-local is an ordinary global of the module, shared by its threads (see
+        // zr_compile_memory).
         tcc_define_symbol(v->tcc, "_Thread_local", "");
         tcc_define_symbol(v->tcc, "__thread", "");
         if (own) tcc_define_symbol(v->tcc, "ZC_RELOAD_OWN_GLOBALS", "1");
-        else
-            for (unsigned i = 0; i < r->nstore; i++)
-                tcc_add_symbol(v->tcc, r->store[i].name, r->store[i].addr);
         if (tcc_add_file(v->tcc, r->c_file) == -1)
         {
             zr_version_delete(v);
             return -1; // the C doesn't compile: not a reason to change how it's loaded
         }
         size_t len = strlen(r->c_file) + 64;
-        v->so_path = (char *)malloc(len);
-        if (v->so_path)
-            snprintf(v->so_path, len, "%s.%d.%u.so", r->c_file, (int)getpid(), r->so_serial++);
-        if (v->so_path && tcc_output_file(v->tcc, v->so_path) == 0)
-            v->dl = dlopen(v->so_path, RTLD_NOW | RTLD_LOCAL);
-        // (glibc returns a loaded library's handle for a file it takes to be that library)
-        for (int i = 0; v->dl && i < r->old_count; i++)
-            if (r->old[i].dl == v->dl || r->current.dl == v->dl) v->dl = NULL;
-        if (!v->dl)
+        char *obj = (char *)malloc(len);
+        unsigned char *img = NULL;
+        size_t img_size = 0;
+        if (obj)
+        {
+            snprintf(obj, len, "%s.%d.o", r->c_file, (int)getpid());
+            if (tcc_output_file(v->tcc, obj) == 0) img = zl_read_file(obj, &img_size);
+            remove(obj);
+            free(obj);
+        }
+        tcc_delete(v->tcc);
+        v->tcc = NULL;
+        char err[512] = "the object file couldn't be written or read";
+        int module_fault = 0;
+        if (img)
+            v->im = zl_load(img, img_size, own ? NULL : zr_resolve_store, r, own, &module_fault,
+                            err, sizeof err);
+        if (!v->im && module_fault)
+        {
+            // What the module's C itself got wrong (a name nothing defines): as tcc reports it.
+            if (own) fprintf(stderr, "reload: tcc: %s\n", err);
+            zr_version_delete(v);
+            return -1;
+        }
+        if (!v->im)
         {
             if (r->verbose)
-                fprintf(stderr, "reload: the module can't be loaded as a shared library (%s); "
-                                "compiling it into memory, where a debugger sees no symbols\n",
-                        v->so_path ? dlerror() : "out of memory");
+                fprintf(stderr, "reload: the module can't be loaded by the Reloader (%s); "
+                                "libtcc loads it instead, where a debugger sees no symbols\n",
+                        err);
             zr_version_delete(v);
             r->in_memory = 1;
             return zr_compile_memory(r, v, own);
         }
-        // libtcc's state (every section, symbol and relocation of the module, several times
-        // the code's size) isn't needed once the library is loaded: symbols come from dlsym.
-        tcc_delete(v->tcc);
-        v->tcc = NULL;
         v->loaded = 1;
         const ZcManifest *m = own ? zr_version_manifest(v) : NULL;
         v->owns_globals = m && m->nglobals > 0;
         return 0;
+    #else
+        return zr_compile_memory(r, v, own);
+    #endif
     }
 
     static int zr_compile_memory(ZrReloader *r, ZrVersion *v, int own)
@@ -3279,8 +3734,6 @@ raw {
         if (r->current.owns_globals) zr_store_set(r, zr_version_manifest(&r->current));
 
         zr_version_call(&r->current, first ? "_zc_module_init" : "_zc_module_after_reload");
-        // Old versions but the one a crash goes back to, shrunk (zr_tombstone).
-        for (int i = 0; i + 1 < r->old_count; i++) zr_tombstone(&r->old[i]);
         if (r->verbose)
         {
             fprintf(stderr, "reload: version %d of %s loaded (zc %.0f ms, tcc %.0f ms, reload %.1f ms)\n",

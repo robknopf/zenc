@@ -33,16 +33,44 @@ raw {
         snprintf(out, n, "@link_name(\"poll_value\")\nfn poll_value() -> int {\n    return %d;\n}\n", value);
     }
 
-    #include <dlfcn.h>
-    // The file the code at `p` was loaded from, or "" (a version compiled into memory).
-    static const char *loaded_from(void *p)
+    #include <dirent.h>
+    #include <stdint.h>
+    // Whether the code at `p` is in an object file registered with debuggers (gdb's JIT
+    // interface, which std/reload.zc defines): in one of its loaded sections.
+    struct zr_jit_entry;
+    struct zr_jit_descriptor;
+    static int registered(void *p)
     {
-        Dl_info info;
-        if (p && dladdr(p, &info) && info.dli_fname) return info.dli_fname;
-        return "";
+        typedef struct { unsigned char e_ident[16]; uint16_t e_type, e_machine; uint32_t e_version; uint64_t e_entry, e_phoff, e_shoff; uint32_t e_flags; uint16_t e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx; } Ehdr;
+        typedef struct { uint32_t sh_name, sh_type; uint64_t sh_flags, sh_addr, sh_offset, sh_size; uint32_t sh_link, sh_info; uint64_t sh_addralign, sh_entsize; } Shdr;
+    #ifdef ZR_LOADER
+        for (zr_jit_entry *e = __jit_debug_descriptor.first_entry; e; e = e->next_entry)
+        {
+            const Ehdr *eh = (const Ehdr *)e->symfile_addr;
+            const Shdr *sh = (const Shdr *)(e->symfile_addr + eh->e_shoff);
+            for (unsigned i = 0; i < eh->e_shnum; i++)
+                if ((sh[i].sh_flags & 2) && sh[i].sh_addr <= (uintptr_t)p && (uintptr_t)p < sh[i].sh_addr + sh[i].sh_size)
+                    return 1;
+        }
+    #endif
+        (void)p;
+        return 0;
+    }
+
+    // Files beside the C file named after it (module.c.*): what a version left on disk.
+    static int files_left(const char *dir_path)
+    {
+        DIR *d = opendir(dir_path);
+        int n = 0;
+        struct dirent *e;
+        while (d && (e = readdir(d)) != NULL)
+            if (!strncmp(e->d_name, "module.c.", 9)) n++;
+        if (d) closedir(d);
+        return n;
     }
 }
-extern fn loaded_from(p: void*) -> const char*;
+extern fn registered(p: void*) -> c_int;
+extern fn files_left(dir: const char*) -> int;
 extern fn put(path: const char*, text: const char*);
 extern fn module_src(out: char*, n: usize, value: int);
 
@@ -86,12 +114,12 @@ fn main(argc: int, argv: char**) -> int {
     if !code.build() { println "FAIL the module does not build"; return 1; }
     let value: fn*() -> int = code.symbol("poll_value");
 
-    // Each version is a shared library (for debuggers) unless ZC_RELOAD_MEMORY is set.
-    let from: const char* = loaded_from((void*)value);
+    // Each version is registered with debuggers unless libtcc loads it (ZC_RELOAD_MEMORY),
+    // and leaves no file beside the C file either way.
     let mem = getenv("ZC_RELOAD_MEMORY");
     let in_memory = mem != NULL && mem[0] != 0;
-    let is_library = strstr(from, "module.c.") != NULL && strstr(from, ".so") != NULL;
-    check("loaded as a shared library beside the C file", is_library, !in_memory);
+    check("registered with debuggers", registered((void*)value) != 0, !in_memory);
+    check("no file left beside the C file", files_left(argv[2]) == 0, true);
 
     check("nothing changed (first poll)", poll_now(&code), false);
     check("nothing changed", poll_now(&code), false);
@@ -101,6 +129,7 @@ fn main(argc: int, argv: char**) -> int {
     check("written in place", poll_now(&code), true);
     value = code.symbol("poll_value");
     check("and the new code runs", value() == 2, true);
+    check("the new version registered too", registered((void*)value) != 0, !in_memory);
     check("nothing changed since", poll_now(&code), false);
 
     // An editor's save: a temporary file, renamed over the source.
