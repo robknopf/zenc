@@ -98,6 +98,26 @@ check "and in version 2" '^\$3 = 20$'
 check "a local of a caller in version 2" '^buf = '
 check "the program runs to its end" "exited normally|exited with code 0"
 
+# The same from VS Code: its debug adapters (CodeLLDB, the C/C++ extension's gdb), driven as
+# VS Code drives them, where they're installed (tests/scripts/vscode_debug.py).
+PY="$(command -v python3 || command -v python)"
+if [ -n "$PY" ] && "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 6))' 2> /dev/null; then
+    winpath() { if command -v cygpath > /dev/null; then cygpath -w "$1"; else echo "$1"; fi; }
+    "$PY" "$ROOT/tests/scripts/vscode_debug.py" "$(winpath "$WORK/host$EXE")" "$(winpath "$ZC")" \
+        "$(winpath "$CASE")" "$(winpath "$WORK/vsrun")" > "$WORK/vscode.out" 2>&1
+    grep -E '^\s+\[(PASS|FAIL|SKIP)\]' "$WORK/vscode.out"
+    vp=$(sed -n 's/^vscode: \([0-9]*\) passed, \([0-9]*\) failed$/\1/p' "$WORK/vscode.out")
+    vf=$(sed -n 's/^vscode: \([0-9]*\) passed, \([0-9]*\) failed$/\2/p' "$WORK/vscode.out")
+    if [ -z "$vp" ]; then
+        echo "  [FAIL] the VS Code checks didn't finish"; sed 's/^/      /' "$WORK/vscode.out" | tail -10
+        failed=$((failed + 1))
+    else
+        passed=$((passed + vp)); failed=$((failed + vf))
+    fi
+else
+    echo "  [SKIP] VS Code's debug adapters: no Python 3"
+fi
+
 echo "----------------------------------------"
 echo "Results (debugger):"
 echo "-> Passed:  $passed"

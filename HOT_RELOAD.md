@@ -13,7 +13,8 @@ none of this in it.
 Everything here is checked by a test case in `tests/reload/cases/` (run by
 `make test-reload`), named in brackets after the claim. `make test-reload` also runs every
 compiler test program through the Reloader's own loader (`run_loader_tests.sh`), and
-`make test-debugger` checks gdb on reloaded code (`run_debugger_tests.sh`), and
+`make test-debugger` checks gdb, and VS Code's debug adapters where they're installed, on
+reloaded code (`run_debugger_tests.sh`, `vscode_debug.py`), and
 `make test-reload-soak` runs a long session of random edits checked against a model of what
 must follow and what must stay (`tests/reload/soak.py`).
 
@@ -332,8 +333,12 @@ for that.
 
 Each version is registered with debuggers as it loads, through the JIT interface gdb reads
 (the one JIT compilers use: the version's object file, its sections at the addresses they
-were loaded at), so gdb, and VS Code's C/C++ debugger, which drives gdb, sees the module's
-code as it sees a library's, with no file of it on disk:
+were loaded at), so gdb and lldb see the module's code as they see a library's, with no
+file of it on disk. So does VS Code, through either of its debuggers that drive them:
+CodeLLDB (`"type": "lldb"`), or the C/C++ extension with gdb (`"type": "cppdbg"`,
+`"MIMode": "gdb"`). The C/C++ extension's Visual Studio debugger (`cppvsdbg`) and WinDbg
+read only PDBs, and see none of it. A breakpoint in a `.zc` file needs VS Code to take
+breakpoints there: the Zen C extension does (or `"debug.allowBreakpointsEverywhere"`).
 
 - **Breakpoints by `.zc` file and line** bind when a version loads, in every version that
   has that line: set one in `src/game/rock.zc` before the program starts, or while it runs,
