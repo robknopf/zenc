@@ -77,6 +77,7 @@ src/platform/dylib.c
 src/platform/misra.c
 src/utils/config.c
 src/utils/string_list.c
+src/utils/list_index.c
 src/diagnostics/diagnostics.c
 src/lexer/token.c
 src/analysis/typecheck.c

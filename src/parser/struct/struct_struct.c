@@ -313,11 +313,7 @@ ASTNode *parse_struct(ParserContext *ctx, Lexer *l, int is_union, int is_opaque,
                           name);
             }
         }
-        GenericTemplate *tpl = ctx->templates;
-        while (tpl && strcmp(tpl->name, name) != 0)
-        {
-            tpl = tpl->next;
-        }
+        GenericTemplate *tpl = find_template(ctx, name);
         ASTNode *concrete = gp_count > 0 ? find_concrete_struct_def(ctx, name) : NULL;
         if ((gp_count == 0 && tpl) || concrete)
         {

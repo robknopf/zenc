@@ -14,17 +14,19 @@
 
 // Emit includes and type aliases (and top-level comments)
 
+static const char *visited_path(const void *e)
+{
+    return ((const VisitedModules *)e)->path;
+}
+
 int is_module_visited(VisitedModules *visited, const char *path)
 {
-    while (visited)
+    if (!visited)
     {
-        if (strcmp(visited->path, path) == 0)
-        {
-            return 1;
-        }
-        visited = visited->next;
+        return 0;
     }
-    return 0;
+    return list_index_find(visited->index, visited, offsetof(VisitedModules, next), visited_path,
+                           path) != NULL;
 }
 
 void mark_module_visited(VisitedModules **visited, const char *path)
@@ -32,6 +34,7 @@ void mark_module_visited(VisitedModules **visited, const char *path)
     VisitedModules *node = xmalloc(sizeof(VisitedModules));
     node->path = path;
     node->next = *visited;
+    node->index = *visited ? (*visited)->index : xcalloc(1, sizeof(ListIndex));
     *visited = node;
 }
 

@@ -50,17 +50,8 @@ static void trigger_type_instantiation(ParserContext *ctx, Type *t)
             *underscore = '\0';
             char *template_name = type_copy;
 
-            GenericTemplate *gt = ctx->templates;
-            int found = 0;
-            while (gt)
-            {
-                if (strcmp(gt->name, template_name) == 0)
-                {
-                    found = 1;
-                    break;
-                }
-                gt = gt->next;
-            }
+            GenericTemplate *gt = find_template(ctx, template_name);
+            int found = gt != NULL;
 
             if (found)
             {
@@ -132,17 +123,8 @@ static void trigger_instantiations(ParserContext *ctx, ASTNode *node)
                 char *template_name = type_copy;
 
                 // Check if this is a known generic template
-                GenericTemplate *gt = ctx->templates;
-                int found = 0;
-                while (gt)
-                {
-                    if (strcmp(gt->name, template_name) == 0)
-                    {
-                        found = 1;
-                        break;
-                    }
-                    gt = gt->next;
-                }
+                GenericTemplate *gt = find_template(ctx, template_name);
+                int found = gt != NULL;
 
                 if (found)
                 {
@@ -196,17 +178,8 @@ static void trigger_instantiations(ParserContext *ctx, ASTNode *node)
                 *underscore = '\0';
                 char *template_name = type_copy;
 
-                GenericTemplate *gt = ctx->templates;
-                int found = 0;
-                while (gt)
-                {
-                    if (strcmp(gt->name, template_name) == 0)
-                    {
-                        found = 1;
-                        break;
-                    }
-                    gt = gt->next;
-                }
+                GenericTemplate *gt = find_template(ctx, template_name);
+                int found = gt != NULL;
 
                 if (found)
                 {
@@ -311,11 +284,7 @@ char *instantiate_function_template(ParserContext *ctx, const char *name, const 
             struct_base[base_len] = 0;
 
             // Check if it's a known generic template
-            GenericTemplate *gt = ctx->templates;
-            while (gt && strcmp(gt->name, struct_base) != 0)
-            {
-                gt = gt->next;
-            }
+            GenericTemplate *gt = find_template(ctx, struct_base);
             if (gt)
             {
                 // Parse the concrete types from unmangled_type or concrete_type
@@ -440,6 +409,8 @@ void register_template(ParserContext *ctx, const char *name, ASTNode *node)
     GenericTemplate *t = xcalloc(1, sizeof(GenericTemplate));
     t->name = xstrdup(name);
     t->struct_node = node;
+    static unsigned seq;
+    t->seq = ++seq;
     t->next = ctx->templates;
     ctx->templates = t;
 }
@@ -483,17 +454,8 @@ static ASTNode *copy_fields_replacing(ParserContext *ctx, ASTNode *fields, const
                 char *concrete_arg = underscore + 1;
 
                 // Check if this is actually a known generic template
-                GenericTemplate *gt = ctx->templates;
-                int found = 0;
-                while (gt)
-                {
-                    if (strcmp(gt->name, template_name) == 0)
-                    {
-                        found = 1;
-                        break;
-                    }
-                    gt = gt->next;
-                }
+                GenericTemplate *gt = find_template(ctx, template_name);
+                int found = gt != NULL;
 
                 if (found)
                 {
@@ -805,15 +767,7 @@ void instantiate_generic(ParserContext *ctx, const char *tpl, const char *arg,
         return; // Already instantiated, DO NOTHING.
     }
 
-    GenericTemplate *t = ctx->templates;
-    while (t)
-    {
-        if (strcmp(t->name, tpl) == 0)
-        {
-            break;
-        }
-        t = t->next;
-    }
+    GenericTemplate *t = find_template(ctx, tpl);
     if (!t)
     {
         zpanic_at(token, "Unknown generic: %s", tpl);
@@ -940,15 +894,20 @@ void instantiate_generic(ParserContext *ctx, const char *tpl, const char *arg,
                                                                 : struct_node_copy->strct.name);
     }
 
-    GenericImplTemplate *it = ctx->impl_templates;
-    while (it)
+    // Every impl template for it, newest first as a walk from the head meets them; those
+    // registered while instantiating are not among them, as they were not for the walk.
+    unsigned n_impls = 0;
+    GenericImplTemplate **found = find_impl_templates(ctx, tpl, &n_impls);
+    GenericImplTemplate **impls = xmalloc((n_impls ? n_impls : 1) * sizeof(*impls));
+    if (n_impls)
     {
-        if (strcmp(it->struct_name, tpl) == 0)
-        {
-            instantiate_methods(ctx, it, m, arg, unmangled_arg);
-        }
-        it = it->next;
+        memcpy(impls, found, n_impls * sizeof(*impls));
     }
+    for (unsigned i = n_impls; i-- > 0;)
+    {
+        instantiate_methods(ctx, impls[i], m, arg, unmangled_arg);
+    }
+    zfree(impls);
     zfree(m);
 }
 
@@ -1004,15 +963,7 @@ void instantiate_generic_multi(ParserContext *ctx, const char *tpl, char **args,
     }
 
     // Find the template
-    GenericTemplate *t = ctx->templates;
-    while (t)
-    {
-        if (strcmp(t->name, tpl) == 0)
-        {
-            break;
-        }
-        t = t->next;
-    }
+    GenericTemplate *t = find_template(ctx, tpl);
     if (!t)
     {
         zpanic_at(token, "Unknown generic: %s", tpl);

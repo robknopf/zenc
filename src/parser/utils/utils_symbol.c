@@ -294,18 +294,51 @@ void register_deprecated_func(ParserContext *ctx, const char *name, const char *
     ctx->deprecated_funcs = d;
 }
 
+static const char *func_template_name(const void *e)
+{
+    return ((const GenericFuncTemplate *)e)->name;
+}
+
 GenericFuncTemplate *find_func_template(ParserContext *ctx, const char *name)
 {
-    GenericFuncTemplate *t = ctx->func_templates;
-    while (t)
-    {
-        if (strcmp(t->name, name) == 0)
-        {
-            return t;
-        }
-        t = t->next;
-    }
-    return NULL;
+    return list_index_find(&ctx->func_templates_index, ctx->func_templates,
+                           offsetof(GenericFuncTemplate, next), func_template_name, name);
+}
+
+static const char *template_name(const void *e)
+{
+    return ((const GenericTemplate *)e)->name;
+}
+
+GenericTemplate *find_template(ParserContext *ctx, const char *name)
+{
+    return list_index_find(&ctx->templates_index, ctx->templates, offsetof(GenericTemplate, next),
+                           template_name, name);
+}
+
+static const char *impl_template_name(const void *e)
+{
+    return ((const GenericImplTemplate *)e)->struct_name;
+}
+
+GenericImplTemplate **find_impl_templates(ParserContext *ctx, const char *name, unsigned *count)
+{
+    return (GenericImplTemplate **)list_index_all(&ctx->impl_templates_index, ctx->impl_templates,
+                                                  offsetof(GenericImplTemplate, next),
+                                                  impl_template_name, name, count);
+}
+
+static const char *parsed_struct_name(const void *e)
+{
+    const StructRef *r = e;
+    return r->node && r->node->kind == NODE_STRUCT ? r->node->strct.name : NULL;
+}
+
+ASTNode *find_parsed_struct(ParserContext *ctx, const char *name)
+{
+    StructRef *r = list_index_find(&ctx->parsed_structs_index, ctx->parsed_structs_list,
+                                   offsetof(StructRef, next), parsed_struct_name, name);
+    return r ? r->node : NULL;
 }
 
 void register_generic(ParserContext *ctx, char *name)
@@ -649,12 +682,18 @@ void register_lambda(ParserContext *ctx, ASTNode *node)
 
     // Keep the creation order, which is the order they are emitted in: a lambda defined inside
     // another one is created first, and the outer body uses its context and its function.
+    // Added after the last one, found without a walk unless the list changed elsewhere.
     LambdaRef **tail = &ctx->global_lambdas;
+    if (ctx->global_lambdas && ctx->global_lambdas_last && !ctx->global_lambdas_last->next)
+    {
+        tail = &ctx->global_lambdas_last->next;
+    }
     while (*tail)
     {
         tail = &(*tail)->next;
     }
     *tail = ref;
+    ctx->global_lambdas_last = ref;
 }
 
 void register_extern_symbol(ParserContext *ctx, const char *name)

@@ -4,11 +4,14 @@
 
 // Cross-file declarations for codegen/*.c
 
+#include "../utils/list_index.h"
+
 // VisitedModules for tracking module cycles during emit
 struct VisitedModules
 {
     const char *path;
     struct VisitedModules *next;
+    ListIndex *index; ///< The list's index by path, shared by its nodes (list_index.h).
 };
 int is_module_visited(struct VisitedModules *visited, const char *path);
 void mark_module_visited(struct VisitedModules **visited, const char *path);
