@@ -190,97 +190,11 @@ void print_command_help(const char *command)
     }
 }
 
-void build_compile_arg_list(ArgList *list, const char *outfile, const char *temp_source_file,
-                            ZenCompiler *compiler)
+// The include paths the C compiler is given: the std root, TRE, the user's, the input's
+// directory.
+static void add_include_args(ArgList *list, ZenCompiler *compiler)
 {
     CompilerConfig *cfg = &compiler->config;
-
-    // Compiler
-    arg_list_add_from_string(list, cfg->cc);
-
-    // GCC Flags
-    arg_list_add_from_string(list, cfg->gcc_flags);
-    arg_list_add_from_string(list, compiler->cflags);
-
-    // Suppress warnings triggered by transpiled code
-    // nvcc rejects these GCC-specific flags, so skip them for CUDA
-    if (!cfg->no_suppress_warnings && !cfg->use_cuda)
-    {
-        arg_list_add(list, "-Wno-parentheses");
-        arg_list_add(list, "-Wno-unused-value");
-        arg_list_add(list, "-Wno-unused-variable");
-        arg_list_add(list, "-Wno-unused-parameter");
-        arg_list_add(list, "-Wno-unused-function");
-        arg_list_add(list, "-Wno-unused-but-set-variable");
-        arg_list_add(list, "-Wno-sign-compare");
-        arg_list_add(list, "-Wno-missing-field-initializers");
-    }
-    // nvcc needs -x cu when source is .c (non-CUDA extension)
-    // When transpiling to .cu, nvcc auto-detects CUDA from the extension
-
-    // Freestanding
-    if (cfg->is_freestanding)
-    {
-        arg_list_add(list, "-ffreestanding");
-    }
-
-    // Quiet
-    if (cfg->quiet)
-    {
-        arg_list_add(list, "-w");
-    }
-
-    // C++ compatibility flags
-    if (cfg->use_cpp && !cfg->use_cuda)
-    {
-        arg_list_add(list, "-fpermissive");
-        arg_list_add(list, "-Wno-write-strings");
-    }
-
-    // ObjC mode: tell the compiler to treat input as Objective-C
-    if (cfg->use_objc)
-    {
-        arg_list_add(list, "-x");
-        arg_list_add(list, "objective-c");
-        arg_list_add(list, "-std=gnu11");
-    }
-
-    // Output file
-    arg_list_add(list, "-o");
-    arg_list_add(list, outfile);
-
-    // Input files
-    arg_list_add(list, temp_source_file);
-    for (size_t i = 0; i < cfg->c_files.length; i++)
-    {
-        const char *file = cfg->c_files.data[i];
-        size_t len = strlen(file);
-        if (cfg->use_cpp && len > 2 && file[len - 2] == '.' && file[len - 1] == 'c')
-        {
-            // Force C compilation for .c files in C++ mode to match extern "C" linkage
-            arg_list_add(list, "-x");
-            arg_list_add(list, "c");
-        }
-        arg_list_add(list, file);
-    }
-
-    // Platform flags
-    if (z_is_windows() && !cfg->is_freestanding)
-    {
-        arg_list_add(list, "-static");
-    }
-    if (!z_is_windows() && !cfg->is_freestanding)
-    {
-        arg_list_add(list, "-lm");
-    }
-
-    // Linker flags
-    arg_list_add_from_string(list, compiler->link_flags);
-    if (z_is_windows())
-    {
-        arg_list_add(list, "-lws2_32");
-    }
-
     // Include paths
     if (cfg->root_path && cfg->root_path[0])
     {
@@ -395,6 +309,100 @@ void build_compile_arg_list(ArgList *list, const char *outfile, const char *temp
             arg_list_add(list, abs_input_dir);
         }
     }
+}
+
+void build_compile_arg_list(ArgList *list, const char *outfile, const char *temp_source_file,
+                            ZenCompiler *compiler)
+{
+    CompilerConfig *cfg = &compiler->config;
+
+    // Compiler
+    arg_list_add_from_string(list, cfg->cc);
+
+    // GCC Flags
+    arg_list_add_from_string(list, cfg->gcc_flags);
+    arg_list_add_from_string(list, compiler->cflags);
+
+    // Suppress warnings triggered by transpiled code
+    // nvcc rejects these GCC-specific flags, so skip them for CUDA
+    if (!cfg->no_suppress_warnings && !cfg->use_cuda)
+    {
+        arg_list_add(list, "-Wno-parentheses");
+        arg_list_add(list, "-Wno-unused-value");
+        arg_list_add(list, "-Wno-unused-variable");
+        arg_list_add(list, "-Wno-unused-parameter");
+        arg_list_add(list, "-Wno-unused-function");
+        arg_list_add(list, "-Wno-unused-but-set-variable");
+        arg_list_add(list, "-Wno-sign-compare");
+        arg_list_add(list, "-Wno-missing-field-initializers");
+    }
+    // nvcc needs -x cu when source is .c (non-CUDA extension)
+    // When transpiling to .cu, nvcc auto-detects CUDA from the extension
+
+    // Freestanding
+    if (cfg->is_freestanding)
+    {
+        arg_list_add(list, "-ffreestanding");
+    }
+
+    // Quiet
+    if (cfg->quiet)
+    {
+        arg_list_add(list, "-w");
+    }
+
+    // C++ compatibility flags
+    if (cfg->use_cpp && !cfg->use_cuda)
+    {
+        arg_list_add(list, "-fpermissive");
+        arg_list_add(list, "-Wno-write-strings");
+    }
+
+    // ObjC mode: tell the compiler to treat input as Objective-C
+    if (cfg->use_objc)
+    {
+        arg_list_add(list, "-x");
+        arg_list_add(list, "objective-c");
+        arg_list_add(list, "-std=gnu11");
+    }
+
+    // Output file
+    arg_list_add(list, "-o");
+    arg_list_add(list, outfile);
+
+    // Input files
+    arg_list_add(list, temp_source_file);
+    for (size_t i = 0; i < cfg->c_files.length; i++)
+    {
+        const char *file = cfg->c_files.data[i];
+        size_t len = strlen(file);
+        if (cfg->use_cpp && len > 2 && file[len - 2] == '.' && file[len - 1] == 'c')
+        {
+            // Force C compilation for .c files in C++ mode to match extern "C" linkage
+            arg_list_add(list, "-x");
+            arg_list_add(list, "c");
+        }
+        arg_list_add(list, file);
+    }
+
+    // Platform flags
+    if (z_is_windows() && !cfg->is_freestanding)
+    {
+        arg_list_add(list, "-static");
+    }
+    if (!z_is_windows() && !cfg->is_freestanding)
+    {
+        arg_list_add(list, "-lm");
+    }
+
+    // Linker flags
+    arg_list_add_from_string(list, compiler->link_flags);
+    if (z_is_windows())
+    {
+        arg_list_add(list, "-lws2_32");
+    }
+
+    add_include_args(list, compiler);
 }
 
 void arg_list_init(ArgList *list)
@@ -515,4 +523,24 @@ void arg_list_add_from_string(ArgList *list, const char *str)
         *d = '\0';
         arg_list_add(list, arg);
     }
+}
+
+void build_preprocess_arg_list(ArgList *list, const char *outfile, const char *source,
+                               ZenCompiler *compiler)
+{
+    CompilerConfig *cfg = &compiler->config;
+    arg_list_add_from_string(list, cfg->cc);
+    arg_list_add_from_string(list, cfg->gcc_flags);
+    arg_list_add_from_string(list, compiler->cflags);
+    if (cfg->is_freestanding)
+    {
+        arg_list_add(list, "-ffreestanding");
+    }
+    arg_list_add(list, "-E");
+    arg_list_add(list, "-dD"); // the #defines too
+    arg_list_add(list, "-w");
+    add_include_args(list, compiler);
+    arg_list_add(list, "-o");
+    arg_list_add(list, outfile);
+    arg_list_add(list, source);
 }

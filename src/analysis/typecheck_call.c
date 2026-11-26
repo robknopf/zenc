@@ -68,7 +68,19 @@ void check_expr_call(TypeChecker *tc, ASTNode *node, int depth)
                     {
                         snprintf(msg, sizeof(msg), "Undefined function '%s'", func_name);
                     }
-                    const char *hints[] = {"Check if the function is defined or imported", NULL};
+                    char mean[MAX_SHORT_MSG_LEN];
+                    const char *close =
+                        tc->pctx->c_names_ready ? c_name_closest(tc->pctx, func_name) : NULL;
+                    if (close)
+                    {
+                        snprintf(mean, sizeof(mean), "Did you mean '%s'?", close);
+                    }
+                    const char *hints[] = {close ? mean
+                                           : tc->pctx->c_names_ready
+                                               ? "Check if the function is defined, imported, or "
+                                                 "declared by an included C header"
+                                               : "Check if the function is defined or imported",
+                                           NULL};
                     tc_error_with_hints(tc, node->call.callee->token, msg, hints);
                 }
             }

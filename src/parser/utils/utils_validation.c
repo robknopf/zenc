@@ -55,6 +55,11 @@ int validate_types(ParserContext *ctx)
                             }
                         }
 
+                        if (ctx->c_names_ready && c_name_known(ctx, u->name))
+                        {
+                            whitelisted = 1; // declared by the program's C
+                        }
+
                         if (whitelisted)
                         {
                             u = u->next;

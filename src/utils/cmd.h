@@ -79,4 +79,11 @@ void arg_list_add_from_string(ArgList *list, const char *str);
 void build_compile_arg_list(ArgList *list, const char *outfile, const char *temp_source_file,
                             ZenCompiler *compiler);
 
+/**
+ * @brief The command that runs the C preprocessor on `source` into `outfile`, with the
+ * flags and include paths the C compiler is given, keeping the #defines (-E -dD).
+ */
+void build_preprocess_arg_list(ArgList *list, const char *outfile, const char *source,
+                               ZenCompiler *compiler);
+
 #endif

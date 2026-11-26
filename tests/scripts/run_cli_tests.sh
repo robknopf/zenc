@@ -292,6 +292,62 @@ fn main() { let c = Counter { value: 0 }; println "{c.get()}"; }' "Redefinition 
 diag_check "enum variant with too few arguments is a Zen C error" 'enum Packet { Wide(int, int), Empty }
 fn main() { let p = Packet::Wide(1); }' "Too few arguments"
 
+# --- C names: what the included C declares is known to zc --------------------------------
+
+# A header with the shapes system and library headers use.
+mkdir -p "$workdir/cnames"
+cat > "$workdir/cnames/lib.h" <<'EOF_H'
+#ifndef LIB_H
+#define LIB_H
+#define LIB_LIMIT 8
+#define LIB_MAX(a, b) ((a) > (b) ? (a) : (b))
+typedef struct lib_vec3_t { float x, y, z; } lib_vec3_t;
+typedef int (*lib_callback_t)(void *user, int code);
+typedef enum { LIB_MODE_A = 1, LIB_MODE_B = 1 << 3, LIB_MODE_C } lib_mode_t;
+struct lib_opaque;
+extern int lib_counter;
+__attribute__((visibility("default"))) int lib_add(int a, int b) __attribute__((nonnull));
+const char *lib_name(const struct lib_opaque *restrict o, lib_callback_t cb, ...);
+static inline int lib_twice(int v) { if (v > 0) { return v * 2; } return 0; }
+#endif
+EOF_H
+cat > "$workdir/cnames/ok.zc" <<'EOF_Z'
+include "lib.h"
+include <stdio.h>
+fn main() {
+    let v: lib_vec3_t;
+    v.x = 1.0;
+    let m: lib_mode_t = LIB_MODE_C;
+    let n = lib_add(LIB_LIMIT, lib_twice(2)) + lib_counter + LIB_MAX(1, 2);
+    printf("%d %d %f\n", n, (int)m, v.x);
+}
+EOF_Z
+out=$("$ZC" transpile "$workdir/cnames/ok.zc" -o "$workdir/cnames/ok.c" 2>&1)
+if ! echo "$out" | grep -q "Undefined\|Unknown type"; then
+    check "names and types a C header declares are known" 1
+else
+    check "names and types a C header declares are known" 0
+    echo "$out" | head -10 | sed 's/^/      /'
+fi
+
+printf 'include "lib.h"\ninclude <stdio.h>\nfn main() {\n    pritnf("hi");\n    let n = LIB_LIMTI;\n    lib_ad(1, 2);\n}\n' > "$workdir/cnames/bad.zc"
+out=$("$ZC" transpile "$workdir/cnames/bad.zc" -o "$workdir/cnames/bad.c" 2>&1)
+if echo "$out" | grep -q "Undefined function 'pritnf'" && echo "$out" | grep -q "Did you mean 'printf'" &&
+    echo "$out" | grep -q "Undefined name 'LIB_LIMTI'" && echo "$out" | grep -q "Did you mean 'LIB_LIMIT'" &&
+    echo "$out" | grep -q "Undefined function 'lib_ad'" && echo "$out" | grep -q "bad.zc:4:5"; then
+    check "a misspelled C function or constant is reported at the .zc line" 1
+else
+    check "a misspelled C function or constant is reported at the .zc line" 0
+    echo "$out" | head -20 | sed 's/^/      /'
+fi
+
+out=$(ZC_NO_C_NAMES=1 "$ZC" transpile "$workdir/cnames/bad.zc" -o "$workdir/cnames/bad.c" 2>&1)
+if ! echo "$out" | grep -q "Undefined"; then
+    check "ZC_NO_C_NAMES=1 turns the C names check off" 1
+else
+    check "ZC_NO_C_NAMES=1 turns the C names check off" 0
+fi
+
 # --- Imported files: diagnostics and #line name the imported file -----------
 
 mkdir -p "$workdir/imported"
