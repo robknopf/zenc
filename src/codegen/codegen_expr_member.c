@@ -77,6 +77,7 @@ void handle_expr_member(ParserContext *ctx, ASTNode *node)
 
         codegen_expression(ctx, node->member.target);
         char *lt = infer_type(ctx, node->member.target);
+        c_decls_check_member(ctx, node, lt);
         int actually_ptr = 0;
         if (lt && (lt[strlen(lt) - 1] == '*' || strstr(lt, "*")))
         {

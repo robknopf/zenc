@@ -2,6 +2,7 @@
 #include "../parser/parser.h"
 
 #include "codegen.h"
+#include "../parser/utils/c_decls.h"
 #include "zprep.h"
 #include "../constants.h"
 #include <ctype.h>
@@ -811,6 +812,129 @@ void c_names_report_call(ParserContext *ctx, ASTNode *callee)
     zerror_with_hints(callee->token, msg, hints);
 }
 
+// Where C declares `d`, as a hint: "declared in wgf_vec3.h:24: wgf_vec3_t wgf_vec3_make(...)".
+static const char *c_decls_where(const CDecl *d, char *buf, size_t n)
+{
+    const char *file = d->file ? d->file : "";
+    const char *slash = strrchr(file, '/');
+    snprintf(buf, n, "Declared in %s:%d: %s", slash ? slash + 1 : file, d->line,
+             d->text ? d->text : d->name);
+    return buf;
+}
+
+// With the program's C read: a call to a function its C declares (and the Zen C doesn't)
+// gets as many arguments as the function takes, and an argument of one C enum isn't passed
+// for a parameter of another (a plain int is, as in C).
+void c_decls_check_call(ParserContext *ctx, ASTNode *node)
+{
+    ASTNode *callee = node->call.callee;
+    if (!ctx->c_names_ready || !callee || callee->kind != NODE_EXPR_VAR)
+    {
+        return;
+    }
+    const char *name = callee->var_ref.name;
+    const CDecl *d = c_decl_find(ctx, name);
+    if (!d || d->kind != CD_FUNCTION || find_func(ctx, name) || find_struct_def(ctx, name) ||
+        find_symbol_entry(ctx, name) || find_symbol_in_all(ctx, name) ||
+        zen_name_declared(ctx, name))
+    {
+        return; // (an `extern fn` is a signature of the Zen C's: find_func has it)
+    }
+    int given = 0;
+    for (ASTNode *a = node->call.args; a; a = a->next)
+    {
+        given++;
+    }
+    char msg[MAX_SHORT_MSG_LEN], where[MAX_SHORT_MSG_LEN];
+    if (d->params_known && (d->variadic ? given < d->nparams : given != d->nparams))
+    {
+        snprintf(msg, sizeof(msg), "'%s' takes %s%d argument%s, but %d %s given", name,
+                 d->variadic ? "at least " : "", d->nparams, d->nparams == 1 ? "" : "s", given,
+                 given == 1 ? "was" : "were");
+        const char *hints[] = {c_decls_where(d, where, sizeof(where)), NULL};
+        zerror_with_hints(callee->token, msg, hints);
+        return;
+    }
+    int i = 0;
+    for (ASTNode *a = node->call.args; a && i < d->nparams; a = a->next, i++)
+    {
+        const char *want = c_decl_enum_of(ctx, d->params[i].type);
+        if (!want)
+        {
+            continue;
+        }
+        const char *have_type = infer_type(ctx, a);
+        const char *have = have_type ? c_decl_enum_of(ctx, have_type) : NULL;
+        if (!have || strcmp(have, want) == 0)
+        {
+            continue;
+        }
+        snprintf(msg, sizeof(msg), "Argument %d of '%s' is a '%s', but the parameter is a '%s'",
+                 i + 1, name, have, want);
+        const char *hints[] = {c_decls_where(d, where, sizeof(where)), NULL};
+        zerror_with_hints(a->token, msg, hints);
+    }
+}
+
+// With the program's C read: `target.field` where target is a C struct or union whose
+// fields are known names one of them.
+void c_decls_check_member(ParserContext *ctx, ASTNode *node, const char *target_type)
+{
+    if (!ctx->c_names_ready || !target_type || !node->member.field)
+    {
+        return;
+    }
+    char base[MAX_TYPE_NAME_LEN];
+    snprintf(base, sizeof(base), "%s", target_type);
+    char *star = strchr(base, '*');
+    if (star)
+    {
+        *star = 0;
+    }
+    if (find_struct_def(ctx, base))
+    {
+        return; // the Zen C's own
+    }
+    const CDecl *agg = c_decl_aggregate(ctx, base);
+    const char *field = node->member.field;
+    if (!agg || c_decl_field(agg, field))
+    {
+        return;
+    }
+    const char *best = NULL;
+    int best_d = 3;
+    for (int i = 0; i < agg->nfields; i++)
+    {
+        int dist = agg->fields[i].name ? levenshtein(field, agg->fields[i].name) : 99;
+        if (dist < best_d)
+        {
+            best_d = dist;
+            best = agg->fields[i].name;
+        }
+    }
+    size_t len = strlen(base);
+    while (len && base[len - 1] == ' ')
+    {
+        base[--len] = 0;
+    }
+    char msg[MAX_TYPE_NAME_LEN + 512], help[MAX_SHORT_MSG_LEN], where[MAX_SHORT_MSG_LEN];
+    snprintf(msg, sizeof(msg), "'%s' has no field '%.255s'", base, field);
+    if (best)
+    {
+        snprintf(help, sizeof(help), "Did you mean '%s'?", best);
+    }
+    else
+    {
+        size_t k = (size_t)snprintf(help, sizeof(help), "Its fields:");
+        for (int i = 0; i < agg->nfields && k < sizeof(help) - 1; i++)
+        {
+            k += (size_t)snprintf(help + k, sizeof(help) - k, " %s", agg->fields[i].name);
+        }
+    }
+    const char *hints[] = {help, c_decls_where(agg, where, sizeof(where)), NULL};
+    zerror_with_hints(node->token, msg, hints);
+}
+
 void handle_expr_call(ParserContext *ctx, ASTNode *node)
 {
     if (emit_call_dropping_temporaries(ctx, node))
@@ -1325,6 +1449,7 @@ skip_callee_gen:
             if (!sig && !find_struct_def(ctx, node->call.callee->var_ref.name))
             {
                 const char *name = node->call.callee->var_ref.name;
+                c_decls_check_call(ctx, node);
 
                 int has_c_interop = ctx->has_external_includes;
                 // With the names the program's C declares known, only those are C's; a

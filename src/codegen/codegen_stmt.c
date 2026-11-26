@@ -281,16 +281,19 @@ void codegen_node_single(ParserContext *ctx, ASTNode *node)
         codegen_loop_enter(ctx, node->for_range.loop_label);
 
         EMIT(ctx, "for (");
-        if (z_path_match_compiler(ctx->config->cc, "tcc"))
+        // The start's type, as `let` gives it (0..n is int), without its qualifiers (the
+        // variable steps): C that tcc compiles without being told it is the compiler (it
+        // has no __auto_type).
+        const char *start_type = infer_type(ctx, node->for_range.start);
+        if (start_type && strncmp(start_type, "const ", 6) == 0 && !strchr(start_type, '*'))
         {
-            EMIT(ctx, "__typeof__((");
-            codegen_expression(ctx, node->for_range.start);
-            EMIT(ctx, ")) %s = ", node->for_range.var_name);
+            EMIT(ctx, "%s", start_type + 6);
         }
         else
         {
-            EMIT(ctx, "ZC_AUTO %s = ", node->for_range.var_name);
+            emit_auto_type(ctx, node->for_range.start, node->token);
         }
+        EMIT(ctx, " %s = ", node->for_range.var_name);
         codegen_expression(ctx, node->for_range.start);
         if (node->for_range.step && node->for_range.step[0] == '-')
         {

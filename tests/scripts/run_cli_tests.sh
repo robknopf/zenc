@@ -437,6 +437,104 @@ else
     check "ZC_NO_C_NAMES=1 turns the C names check off" 0
 fi
 
+# --- C declarations: types, signatures and fields of the included C --------------------
+
+mkdir -p "$workdir/cdecls"
+cat > "$workdir/cdecls/shapes.h" <<'EOF_H'
+#define SHAPES_WIDTH 800
+#define SHAPES_SCALE 0.5f
+typedef struct { float x, y; } vec2;
+struct box { int w, h; union { int id; float weight; }; };
+typedef enum { RED, GREEN } color;
+typedef enum { SMALL, LARGE } size_kind;
+enum shape { CIRCLE, SQUARE };
+vec2 vec2_make(float x, float y);
+const char *shape_name(enum shape s);
+struct box *box_get(void);
+int add3(int a, int b, int c);
+void paint(color c);
+int log_line(const char *fmt, ...);
+int old_style();
+EOF_H
+cat > "$workdir/cdecls/ok.zc" <<'EOF_Z'
+include "shapes.h"
+fn main() {
+    let v = vec2_make(1.0, 2.0);
+    let name = shape_name(SQUARE);
+    let b = box_get();
+    let id = b.id;
+    let w = SHAPES_WIDTH;
+    let s = SHAPES_SCALE;
+    let y = v.y;
+    paint(GREEN);
+    paint(1);
+    log_line("%d %d", 1, 2);
+    old_style(1, 2);
+    for i in 0..w {
+        println "{i} {name} {id} {s} {y}";
+    }
+}
+EOF_Z
+out=$("$ZC" transpile "$workdir/cdecls/ok.zc" -o "$workdir/cdecls/ok.c" 2>&1)
+c="$workdir/cdecls/ok.c"
+if ! echo "$out" | grep -q "^error" && grep -q "vec2 v = vec2_make" "$c" &&
+    grep -q "const char\* name = shape_name" "$c" && grep -q "struct box\* b = box_get" "$c" &&
+    grep -q "int id = " "$c" && grep -q "int32_t w = 800" "$c" &&
+    grep -q "float s = SHAPES_SCALE" "$c" && grep -q "float y = " "$c" &&
+    grep -q "for (int32_t i = 0" "$c" && ! grep -v "define\|undef" "$c" | grep -q "ZC_AUTO"; then
+    check "a C call's result, a C field, a numeric macro and a range have their C types" 1
+else
+    check "a C call's result, a C field, a numeric macro and a range have their C types" 0
+    echo "$out" | head -8 | sed 's/^/      /'
+    grep -n " = \|for (" "$c" | grep -v "^[0-9]*:#\|static" | head -12 | sed 's/^/      /'
+fi
+
+cat > "$workdir/cdecls/bad.zc" <<'EOF_Z'
+include "shapes.h"
+fn main() {
+    let n = add3(1, 2);
+    log_line();
+    paint(LARGE);
+    let k = SMALL;
+    paint(k);
+    let b = box_get();
+    let d = b.wh;
+    let v = vec2_make(1.0, 2.0);
+    let z = v.z;
+}
+EOF_Z
+out=$("$ZC" transpile "$workdir/cdecls/bad.zc" -o "$workdir/cdecls/bad.c" 2>&1)
+if echo "$out" | grep -q "'add3' takes 3 arguments, but 2 were given" && echo "$out" | grep -q "bad.zc:3:13" &&
+    echo "$out" | grep -q "Declared in shapes.h:11: int add3(int a, int b, int c);" &&
+    echo "$out" | grep -q "'log_line' takes at least 1 argument, but 0 were given"; then
+    check "a C call with the wrong number of arguments is a zc error at the .zc line" 1
+else
+    check "a C call with the wrong number of arguments is a zc error at the .zc line" 0
+    echo "$out" | head -12 | sed 's/^/      /'
+fi
+if [ "$(echo "$out" | grep -c "Argument 1 of 'paint' is a 'size_kind', but the parameter is a 'color'")" = 2 ]; then
+    check "a value of one C enum for a parameter of another is an error (an int isn't)" 1
+else
+    check "a value of one C enum for a parameter of another is an error (an int isn't)" 0
+    echo "$out" | grep -i "paint" | head -6 | sed 's/^/      /'
+fi
+if echo "$out" | grep -q "'struct box' has no field 'wh'" && echo "$out" | grep -q "Did you mean 'w'" &&
+    echo "$out" | grep -q "'vec2' has no field 'z'"; then
+    check "a field a C struct doesn't have is an error, with the closest one" 1
+else
+    check "a field a C struct doesn't have is an error, with the closest one" 0
+    echo "$out" | grep -i "field" | head -6 | sed 's/^/      /'
+fi
+
+printf 'include "shapes.h"\nextern fn add3(a: int, b: int) -> int;\nfn main() {\n    let n = add3(1, 2);\n    println "{n}";\n}\n' > "$workdir/cdecls/own.zc"
+out=$("$ZC" transpile "$workdir/cdecls/own.zc" -o "$workdir/cdecls/own.c" 2>&1)
+if ! echo "$out" | grep -q "takes 3 arguments"; then
+    check "a Zen C declaration of a C function takes precedence over the header's" 1
+else
+    check "a Zen C declaration of a C function takes precedence over the header's" 0
+    echo "$out" | head -6 | sed 's/^/      /'
+fi
+
 # --- Imported files: diagnostics and #line name the imported file -----------
 
 mkdir -p "$workdir/imported"

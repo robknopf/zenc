@@ -18,6 +18,8 @@ int is_module_visited(struct VisitedModules *visited, const char *path);
 // The names the program's C declares (utils_c_names.c), as code generation checks them.
 int c_names_call_known(ParserContext *ctx, ASTNode *callee);
 void c_names_report_call(ParserContext *ctx, ASTNode *callee);
+void c_decls_check_call(ParserContext *ctx, ASTNode *node);
+void c_decls_check_member(ParserContext *ctx, ASTNode *node, const char *target_type);
 int c_names_name_unknown(ParserContext *ctx, const char *name);
 void c_names_report_name(ParserContext *ctx, ASTNode *node);
 void c_names_check_raw(ParserContext *ctx, ASTNode *node);

@@ -62,4 +62,28 @@ const CDecl *const *c_decl_all(struct ParserContext *ctx, unsigned *n);
 /// Adds `d` (copied) to the table, as when it is loaded from the cache.
 void c_decl_add(struct ParserContext *ctx, const CDecl *d);
 
+// ---- Types, for zc's inference and checks (NULL: C declares nothing zc can use) ----------
+
+/// A C type as zc writes one ("const char*", "wgf_vec3_t"), or NULL if it can't be written
+/// as `T name` (an array, a function pointer, an anonymous struct).
+const char *c_decl_writable(const char *ctype);
+
+/// The type of the value `name` names: a variable's, an enum constant's enum, a numeric
+/// macro's (`#define W 800` is int). Writable, or NULL.
+const char *c_decl_value_type(struct ParserContext *ctx, const char *name);
+
+/// A C function's return type, writable, or NULL (not a C function, or not writable).
+const char *c_decl_return_type(struct ParserContext *ctx, const char *name);
+
+/// The struct or union declaration whose fields a value of type `type` has ("vec2",
+/// "struct vec2", "const vec2"; typedefs followed to the tag), with its fields read whole;
+/// NULL if it isn't a C struct or union, or its fields aren't known.
+const CDecl *c_decl_aggregate(struct ParserContext *ctx, const char *type);
+
+/// The field `field` of the C aggregate `agg` (anonymous members' included), or NULL.
+const CDeclField *c_decl_field(const CDecl *agg, const char *field);
+
+/// The C enum `type` is ("enum color", or the typedef naming an anonymous one), or NULL.
+const char *c_decl_enum_of(struct ParserContext *ctx, const char *type);
+
 #endif

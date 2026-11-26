@@ -457,6 +457,7 @@ static void cd_name(const CdRead *r, const char *name)
 }
 
 static void cd_aggregate(const CdRead *r, TSNode spec, CDecl *into);
+static char *cd_shown(const CdRead *r, TSNode n);
 
 // The fields of a struct or union body into `d` (anonymous members flattened in).
 static void cd_fields(const CdRead *r, TSNode body, CDecl *d, int depth)
@@ -603,7 +604,8 @@ static void cd_aggregate(const CdRead *r, TSNode spec, CDecl *into)
         *d = agg;
         d->kind = is_struct ? CD_STRUCT : CD_UNION;
         d->name = tag;
-        d->text = cd_cat(is_struct ? "struct " : "union ", tag);
+        d->text = ts_node_is_null(body) ? cd_cat(is_struct ? "struct " : "union ", tag)
+                                        : cd_shown(r, spec);
         cd_locate(r, spec, d);
         cd_put(r->ctx, d);
     }
@@ -726,6 +728,92 @@ static void cd_walk(const CdRead *r, TSNode n, int depth)
 
 // ---- The preprocessor's own lines -----------------------------------------------------------
 
+// The type of a numeric literal that is a macro's whole body (in parentheses, signed or not),
+// as C gives it: 800 int, 800u unsigned int, 800L long, 0.5 double, 0.5f float. NULL if the
+// body is anything else, or a number too big for int with no suffix.
+static char *cd_number_type(const char *p)
+{
+    while (*p == ' ' || *p == '\t' || *p == '(')
+    {
+        p++;
+    }
+    if (*p == '-' || *p == '+')
+    {
+        p++;
+    }
+    if (!isdigit((unsigned char)*p) && !(*p == '.' && isdigit((unsigned char)p[1])))
+    {
+        return NULL;
+    }
+    const char *b = p;
+    int hex = p[0] == '0' && (p[1] == 'x' || p[1] == 'X');
+    int real = 0;
+    if (hex)
+    {
+        p += 2;
+    }
+    while ((hex ? isxdigit((unsigned char)*p) : isdigit((unsigned char)*p)) || *p == '.' ||
+           *p == '\'' ||
+           (!hex && (*p == 'e' || *p == 'E') &&
+            (p[1] == '-' || p[1] == '+' || isdigit((unsigned char)p[1]))))
+    {
+        if (*p == '.' || (!hex && (*p == 'e' || *p == 'E')))
+        {
+            real = 1;
+            if ((*p == 'e' || *p == 'E') && (p[1] == '-' || p[1] == '+'))
+            {
+                p++;
+            }
+        }
+        p++;
+    }
+    const char *suffix = p;
+    while (isalpha((unsigned char)*p))
+    {
+        p++;
+    }
+    size_t ns = (size_t)(p - suffix);
+    while (*p == ' ' || *p == '\t' || *p == ')')
+    {
+        p++;
+    }
+    if (*p)
+    {
+        return NULL;
+    }
+    char sfx[8] = {0};
+    if (ns >= sizeof sfx)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < ns; i++)
+    {
+        sfx[i] = (char)tolower((unsigned char)suffix[i]);
+    }
+    if (real)
+    {
+        return xstrdup(!ns                 ? "double"
+                       : !strcmp(sfx, "f") ? "float"
+                       : !strcmp(sfx, "l") ? "long double"
+                                           : "");
+    }
+    if (!ns)
+    {
+        char *end = NULL;
+        unsigned long long v = strtoull(b, &end, 0);
+        return v <= 0x7fffffffULL ? xstrdup("int") : NULL;
+    }
+    int u = strchr(sfx, 'u') != NULL;
+    int l = (int)(strchr(sfx, 'l') ? (strstr(sfx, "ll") ? 2 : 1) : 0);
+    if (strspn(sfx, "ul") != ns)
+    {
+        return NULL;
+    }
+    static const char *const names[2][3] = {
+        {"int", "long", "long long"}, {"unsigned int", "unsigned long", "unsigned long long"}};
+    return xstrdup(names[u][l]);
+}
+
 // A #define line: the macro, into the table and the names.
 static void cd_define(ParserContext *ctx, const char *line, const char *file, int lineno)
 {
@@ -767,6 +855,10 @@ static void cd_define(ParserContext *ctx, const char *line, const char *file, in
     }
     d->file = file ? xstrdup(file) : NULL;
     d->line = lineno;
+    if (*p == ' ' || *p == '\t') // an object-like macro: its value's type, if a number
+    {
+        d->type = cd_number_type(p);
+    }
     cd_put(ctx, d);
 }
 
@@ -942,4 +1034,170 @@ void c_decls_extract(ParserContext *ctx, const char *text)
     }
     ts_parser_delete(parser);
     zfree(c_only);
+}
+
+// ---- Types, for zc's inference and checks ---------------------------------------------------
+
+const char *c_decl_writable(const char *ctype)
+{
+    if (!ctype || !ctype[0] || strchr(ctype, '(') || strchr(ctype, '[') ||
+        strstr(ctype, "<anonymous>"))
+    {
+        return NULL;
+    }
+    // zc writes "char*", not "char *".
+    char *out = xmalloc(strlen(ctype) + 1);
+    size_t k = 0;
+    for (const char *p = ctype; *p; p++)
+    {
+        if (*p == ' ' && p[1] == '*')
+        {
+            continue;
+        }
+        out[k++] = *p;
+    }
+    out[k] = 0;
+    return out;
+}
+
+// A type with its qualifiers and a struct/union/enum keyword taken off: the name to look
+// up, and the keyword ("struct ", ...) that was on it, if one.
+static const char *cd_bare(const char *type, char *buf, size_t n, const char **keyword)
+{
+    *keyword = NULL;
+    for (;;)
+    {
+        while (*type == ' ')
+        {
+            type++;
+        }
+        if (!strncmp(type, "const ", 6))
+        {
+            type += 6;
+        }
+        else if (!strncmp(type, "volatile ", 9))
+        {
+            type += 9;
+        }
+        else
+        {
+            break;
+        }
+    }
+    static const char *const kws[] = {"struct ", "union ", "enum ", NULL};
+    for (int i = 0; kws[i]; i++)
+    {
+        size_t kn = strlen(kws[i]);
+        if (!strncmp(type, kws[i], kn))
+        {
+            *keyword = kws[i];
+            type += kn;
+            break;
+        }
+    }
+    snprintf(buf, n, "%s", type);
+    size_t len = strlen(buf);
+    while (len && buf[len - 1] == ' ')
+    {
+        buf[--len] = 0;
+    }
+    return buf;
+}
+
+const char *c_decl_value_type(ParserContext *ctx, const char *name)
+{
+    const CDecl *d = c_decl_find(ctx, name);
+    if (!d || (d->kind != CD_VARIABLE && d->kind != CD_ENUM_CONSTANT && d->kind != CD_MACRO))
+    {
+        return NULL;
+    }
+    if (d->kind == CD_ENUM_CONSTANT && d->type && !strncmp(d->type, "enum ", 5))
+    {
+        return d->type; // written as is: "enum color"
+    }
+    return c_decl_writable(d->type);
+}
+
+const char *c_decl_return_type(ParserContext *ctx, const char *name)
+{
+    const CDecl *d = c_decl_find(ctx, name);
+    return d && d->kind == CD_FUNCTION ? c_decl_writable(d->type) : NULL;
+}
+
+const CDecl *c_decl_aggregate(ParserContext *ctx, const char *type)
+{
+    char buf[512], key[530];
+    for (int hops = 0; type && hops < 16; hops++)
+    {
+        const char *kw = NULL;
+        const char *name = cd_bare(type, buf, sizeof buf, &kw);
+        if (strchr(name, '*') || strchr(name, '['))
+        {
+            return NULL;
+        }
+        if (kw)
+        {
+            if (!strcmp(kw, "enum "))
+            {
+                return NULL;
+            }
+            snprintf(key, sizeof key, "%s%s", kw, name);
+            const CDecl *d = c_decl_find(ctx, key);
+            return d && d->complete ? d : NULL;
+        }
+        const CDecl *d = c_decl_find(ctx, name);
+        if (!d || d->kind != CD_TYPEDEF)
+        {
+            return NULL;
+        }
+        if (d->complete && d->aggregate)
+        {
+            return d; // the typedef of a struct body: its fields are its own
+        }
+        type = d->aggregate && d->aggregate[0] ? d->aggregate : d->type;
+    }
+    return NULL;
+}
+
+const CDeclField *c_decl_field(const CDecl *agg, const char *field)
+{
+    for (int i = 0; agg && i < agg->nfields; i++)
+    {
+        if (agg->fields[i].name && !strcmp(agg->fields[i].name, field))
+        {
+            return &agg->fields[i];
+        }
+    }
+    return NULL;
+}
+
+const char *c_decl_enum_of(ParserContext *ctx, const char *type)
+{
+    char buf[512];
+    for (int hops = 0; type && hops < 16; hops++)
+    {
+        const char *kw = NULL;
+        const char *name = cd_bare(type, buf, sizeof buf, &kw);
+        if (kw)
+        {
+            if (strcmp(kw, "enum ") != 0 || !strcmp(name, "<anonymous>"))
+            {
+                return NULL;
+            }
+            char *e = xmalloc(strlen(name) + 6);
+            sprintf(e, "enum %s", name);
+            return e;
+        }
+        const CDecl *d = c_decl_find(ctx, name);
+        if (!d || d->kind != CD_TYPEDEF || !d->type)
+        {
+            return NULL;
+        }
+        if (!strcmp(d->type, "enum <anonymous>"))
+        {
+            return d->name; // the typedef names the enum
+        }
+        type = d->type;
+    }
+    return NULL;
 }
