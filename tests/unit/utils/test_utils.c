@@ -68,7 +68,7 @@ static ZenCompiler *scan(const char *src)
     memset(&ctx, 0, sizeof(ctx));
     ctx.compiler = &compiler;
     ctx.config = &compiler.config;
-    scan_build_directives(&ctx, src, NULL);
+    scan_build_directives(&ctx, src);
     return &compiler;
 }
 
