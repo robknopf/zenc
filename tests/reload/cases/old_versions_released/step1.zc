@@ -1,8 +1,8 @@
 // Version 1. Pointers from version 1 kept where the Reloader can't see them (void* in the
-// host's block): a string literal, a module function (forwarded to the newest version's)
-// and a C static function (not forwarded: it runs version 1's code). From version 3 on,
-// version 1 is shrunk (zr_tombstone): its file emptied, its tables dropped; all three
-// still work.
+// host's block): a string literal (the pool's), a module function (its stub, which follows
+// its name) and a C static function, renamed in every version (its stub stays on version 1's,
+// which is copied out of it). Only two versions stay loaded: from version 3 on, version 1 is
+// released whole, and all three still work.
 raw {
     static void legacy_v1(void) { printf("legacy, version 1\n"); }
     static void *legacy_addr(void) { return (void *)legacy_v1; }

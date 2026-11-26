@@ -117,6 +117,7 @@ raw {
         int owns_globals; // compiled with ZC_RELOAD_OWN_GLOBALS: the globals' storage is here
         struct ZlImage *im; // loaded by the Reloader itself (zl_load), or NULL: by libtcc
         int loaded;       // compiled and loaded (tcc is freed once the Reloader loads it)
+        int number;       // which version it is (ZrReloader.version when it loaded)
     } ZrVersion;
 
     typedef struct
@@ -204,6 +205,13 @@ raw {
         unsigned nfs, fs_cap;
         unsigned *fs_by_name, *fs_by_addr; // index + 1, or 0
         unsigned fs_name_cap, fs_addr_cap;
+        // Old versions released (zr_release): what was copied out of them, the writable
+        // data kept of those whose globals are the store's (given back at free()).
+        unsigned released;
+        unsigned copied_fns;
+        size_t copied_bytes;
+        unsigned char **kept_data;
+        unsigned nkept_data;
     } ZrReloader;
 
     static char *zr_strdup(const char *s)
@@ -1202,6 +1210,136 @@ raw {
         return NULL;
     }
 
+    // ---- Keeping part of a version past it ----
+    //
+    // When a version is released, a function of it that something can still call (a stub
+    // pinned to it: its signature changed, or a lambda) is copied out first: its bytes into
+    // kept memory, its relocations applied again there. What it calls is decided by `callee`
+    // (a stub, for what still means the same as when this version ran), or copied out too;
+    // what it reads is the pool's or the store's, as before, or copied out with it (a
+    // version's own data, unless its writable data stays: `data_stays`). Copies are made once
+    // (`memo`, by symbol) and are never released.
+
+    // The address to use for a reference from copied code to function `sym` of `im`, or 0:
+    // copy it too.
+    typedef uint64_t (*ZlCallee)(void *ctx, ZlImage *im, unsigned sym);
+
+    static int zl_in(const ZlImage *im, uint64_t a)
+    {
+        uint64_t m = (uint64_t)(uintptr_t)im->mem, d = (uint64_t)(uintptr_t)im->data;
+        return (a >= m && a < m + im->mem_size) || (d && a >= d && a < d + im->data_size);
+    }
+
+    // A far jump in kept memory to `to`, for a call from copied code that wouldn't reach.
+    static uint64_t zl_far_jump(uint64_t to)
+    {
+        unsigned char *st = (unsigned char *)zl_keep(16, 16);
+        if (!st) return 0;
+        static const unsigned char jmp[6] = {0xFF, 0x25, 0, 0, 0, 0}; // jmp *0(%rip)
+        memcpy(st, jmp, 6);
+        memcpy(st + 6, &to, 8);
+        return (uint64_t)(uintptr_t)st;
+    }
+
+    // The address of a copy of symbol `sym` of `im` (a function or an object) in kept memory,
+    // or its own address if it needn't be copied (in the pool, or in data that stays), or 0
+    // if it can't be. `bytes` counts what was copied.
+    static uint64_t zl_copy_out(ZlImage *im, unsigned sym, ZlCallee callee, void *ctx, int data_stays,
+                                uint64_t *memo, size_t *bytes, int depth)
+    {
+        if (sym >= im->nsyms || depth > 256) return 0;
+        if (memo[sym]) return memo[sym];
+        ZlSym *y = &im->syms[sym];
+        uint64_t a = im->addr[sym];
+        if (!zl_in(im, a)) return a; // the pool's, the store's, the host's
+        uint64_t d = (uint64_t)(uintptr_t)im->data;
+        if (data_stays && d && a >= d && a < d + im->data_size) return a;
+        unsigned ty = ZL_TYPE(y->st_info);
+        if ((ty != ZL_STT_FUNC && ty != ZL_STT_OBJECT) || !y->st_size || y->st_shndx >= im->nsh) return 0;
+        ZlShdr *ys = &im->sh[y->st_shndx];
+        unsigned char *to = (unsigned char *)zl_keep((size_t)y->st_size, 16);
+        if (!to) return 0;
+        if (ys->sh_type == ZL_SHT_NOBITS) memset(to, 0, (size_t)y->st_size);
+        else memcpy(to, (const void *)(uintptr_t)a, (size_t)y->st_size); // as it is now
+        memo[sym] = (uint64_t)(uintptr_t)to;
+        *bytes += (size_t)y->st_size;
+        for (unsigned i = 0; i < im->nsh; i++)
+        {
+            ZlShdr *rs = &im->sh[i];
+            if (rs->sh_info != y->st_shndx) continue;
+            // (zl_load hid the debug sections' relocations; these are the loaded ones')
+            if (rs->sh_type != ZL_SHT_RELA) continue;
+            ZlRela *ra = (ZlRela *)(im->img + rs->sh_offset);
+            for (size_t k = 0; k < rs->sh_size / sizeof(ZlRela); k++)
+            {
+                if (ra[k].r_offset < y->st_value || ra[k].r_offset >= y->st_value + y->st_size) continue;
+                unsigned t = (unsigned)(ra[k].r_info >> 32), type = (unsigned)ra[k].r_info;
+                if (t >= im->nsyms) return 0;
+                unsigned char *P = to + (ra[k].r_offset - y->st_value);
+                uint64_t Pa = (uint64_t)(uintptr_t)P;
+                int64_t A = ra[k].r_addend;
+                const ZlSym *ts = &im->syms[t];
+                uint64_t T;
+                if (ts->st_shndx == ZL_SHN_UNDEF || ts->st_shndx >= ZL_SHN_LORESERVE)
+                    T = im->addr[t];
+                else if (ZL_TYPE(ts->st_info) == ZL_STT_SECTION)
+                    return 0; // a reference by section and offset: which object isn't known
+                else
+                {
+                    T = ZL_TYPE(ts->st_info) == ZL_STT_FUNC && callee ? callee(ctx, im, t) : 0;
+                    if (!T) T = zl_copy_out(im, t, callee, ctx, data_stays, memo, bytes, depth + 1);
+                    if (!T) return 0;
+                }
+                int64_t dd;
+                switch (type)
+                {
+                case ZL_R_64:
+                    memcpy(P, &(uint64_t){T + (uint64_t)A}, 8);
+                    break;
+                case ZL_R_PC64:
+                    memcpy(P, &(uint64_t){T + (uint64_t)A - Pa}, 8);
+                    break;
+                case ZL_R_PC32:
+                case ZL_R_PLT32:
+                    dd = (int64_t)(T + (uint64_t)A - Pa);
+                    if (!zl_fits32(dd))
+                    {
+                        uint64_t far = zl_far_jump(T);
+                        if (!far) return 0;
+                        dd = (int64_t)(far + (uint64_t)A - Pa);
+                    }
+                    if (!zl_fits32(dd)) return 0;
+                    memcpy(P, &(int32_t){(int32_t)dd}, 4);
+                    break;
+                case ZL_R_GOTPCREL:
+                case ZL_R_GOTPCRELX:
+                case ZL_R_REX_GOTPCRELX:
+                {
+                    uint64_t *g = (uint64_t *)zl_keep(8, 8);
+                    if (!g) return 0;
+                    *g = T;
+                    dd = (int64_t)((uint64_t)(uintptr_t)g + (uint64_t)A - Pa);
+                    if (!zl_fits32(dd)) return 0;
+                    memcpy(P, &(int32_t){(int32_t)dd}, 4);
+                    break;
+                }
+                default:
+                    return 0;
+                }
+            }
+        }
+        return memo[sym];
+    }
+
+    // The function of `im` at `addr`, or 0.
+    static unsigned zl_func_at(const ZlImage *im, uint64_t addr)
+    {
+        for (unsigned s = 1; s < im->nsyms; s++)
+            if (ZL_TYPE(im->syms[s].st_info) == ZL_STT_FUNC && im->addr[s] == addr && im->syms[s].st_shndx != ZL_SHN_UNDEF)
+                return s;
+        return 0;
+    }
+
     static unsigned char *zl_read_file(const char *path, size_t *size)
     {
         FILE *f = fopen(path, "rb");
@@ -1408,12 +1546,16 @@ raw {
             if (!b) known = 0;
             bytes += b;
         }
+        char copied[96] = "";
+        if (r->copied_fns)
+            snprintf(copied, sizeof copied, "; %u old function%s kept, copied out of %s (%zu KB)", r->copied_fns,
+                     r->copied_fns == 1 ? "" : "s", r->copied_fns == 1 ? "its version" : "their versions", (r->copied_bytes + 1023) / 1024);
         if (known)
-            fprintf(stderr, "reload: %d old version%s kept loaded (%zu KB)\n", r->old_count,
-                    r->old_count == 1 ? "" : "s", bytes / 1024);
+            fprintf(stderr, "reload: %d old version%s kept loaded (%zu KB)%s\n", r->old_count,
+                    r->old_count == 1 ? "" : "s", bytes / 1024, copied);
         else
-            fprintf(stderr, "reload: %d old version%s kept loaded\n", r->old_count,
-                    r->old_count == 1 ? "" : "s");
+            fprintf(stderr, "reload: %d old version%s kept loaded%s\n", r->old_count,
+                    r->old_count == 1 ? "" : "s", copied);
     }
 
     // ---- Comparing versions' manifests ------------------------------------------------
@@ -3283,21 +3425,31 @@ raw {
 
     // Why a call to `now` (the new version's function) can't mean what a call to the old
     // one of the same signature meant: a type it takes or returns changed. NULL if none did.
+    static const char *zr_types_why(ZrReloader *r, const ZcManifest *was_m, const ZcManifest *now_m,
+                                    const ZcMfFunc *now, char *why, size_t n);
+
     static const char *zr_fwd_types_why(ZrReloader *r, const ZcMfFunc *now, char *why, size_t n)
     {
-        if (!r->types_prev || !r->types_now) return NULL;
+        return zr_types_why(r, r->types_prev, r->types_now, now, why, n);
+    }
+
+    // The same between any two versions' manifests (sorted copies, zr_mf_copy).
+    static const char *zr_types_why(ZrReloader *r, const ZcManifest *was_m, const ZcManifest *now_m,
+                                    const ZcMfFunc *now, char *why, size_t n)
+    {
+        if (!was_m || !now_m) return NULL;
         // The host's block is moved to the new layout in place: a pointer to it is right for
         // the new code. Any other changed type, or one passed by value, isn't.
         int amb = 0;
-        const char *st = r->state ? zr_state_type(r, r->types_now, &amb) : NULL;
+        const char *st = r->state ? zr_state_type(r, now_m, &amb) : NULL;
         char base[256];
         for (unsigned j = 0; j <= now->nparams; j++)
         {
             const char *ctype = j < now->nparams ? now->params[j] : now->ret;
             zr_base_type(ctype, base, sizeof base);
             if (st && !amb && !strcmp(base, st) && strchr(zr_s(ctype), '*')) continue;
-            if (base[0] && zr_mf_find(r->types_now, base) &&
-                zr_mf_changed(r->types_prev, r->types_now, base, 0, NULL))
+            if (base[0] && zr_mf_find(now_m, base) &&
+                zr_mf_changed(was_m, now_m, base, 0, NULL))
             {
                 snprintf(why, n, "it takes or returns a %s, which changed", base);
                 return why;
@@ -3574,6 +3726,174 @@ raw {
         }
         free(to.slot);
     }
+
+    #ifdef ZR_LOADER
+    // ---- Old versions released ----------------------------------------------------------
+    //
+    // After a reload only two versions stay whole: the one running and the one a crash goes
+    // back to (with keep_old(false), not even that one). Each other is released, all of it:
+    // its memory, its object file, its registration with debuggers. Nothing else can still
+    // reach it. Function pointers are stubs; literals are the pool's; globals the store's
+    // (whose storage in it, the writable data of a version that defined the globals, stays).
+    // Only a stub pinned to one of its functions still calls it (that function's signature
+    // changed, or it's a lambda), and that function is copied out first (zl_copy_out): what
+    // it calls through a name that still means the same calls the newest code, the rest is
+    // copied with it. A version that can't be released that way is kept whole.
+
+    struct ZrCalleeCtx
+    {
+        ZrReloader *r;
+        int number;          // the version released
+        const ZcManifest *m; // its manifest (a sorted copy)
+        ZrFnTable was, now;  // its functions, and the current version's, by name
+    };
+
+    // From code copied out of version `number`, a call to its function `sym`: through the
+    // stub of that name if a call to the current version's means the same (the same
+    // signature, no type it takes or returns changed since), else 0 (copy it too).
+    static uint64_t zr_callee(void *ctx, ZlImage *im, unsigned sym)
+    {
+        struct ZrCalleeCtx *c = (struct ZrCalleeCtx *)ctx;
+        ZrReloader *r = c->r;
+        void *a = (void *)(uintptr_t)im->addr[sym];
+        for (unsigned i = 0; i < r->nfs; i++)
+            if (r->fs[i].pinned && zr_stub_target(&r->fs[i]) == a) return 0; // pinned there
+        const char *name = zl_name(im, sym);
+        const char *in = zr_intern(r, zr_strdup(name));
+        if (!in) return 0;
+        int l = zr_stub_live(r, in);
+        if (l >= 0 && r->fs[l].made_in <= c->number) return (uint64_t)(uintptr_t)r->fs[l].code;
+        const ZcMfFunc *fv = zr_fntab_get(&c->was, name), *fn = zr_fntab_get(&c->now, name);
+        ZlImage *cur = r->current.im;
+        void *to = fn && fn->addr ? fn->addr : cur && zl_is_func(cur, name) ? zl_sym(cur, name) : NULL;
+        if (!to) return 0;
+        char why[320];
+        if (fv || fn)
+        {
+            if (!fv || !fn) return 0;
+            char *x = zr_fn_sig(fv), *y = zr_fn_sig(fn);
+            int same = x && y && !strcmp(x, y);
+            free(x);
+            free(y);
+            if (!same || zr_types_why(r, c->m, r->types_now, fn, why, sizeof why)) return 0;
+        }
+        else
+        {
+            // Not in a manifest: a lambda is copied; an enum's constructor follows while its
+            // type is the same; zc's helpers follow.
+            if (!strncmp(name, "_lambda_", 8)) return 0;
+            const char *sep = strstr(name, "__");
+            if (sep && sep > name && (size_t)(sep - name) < 256)
+            {
+                char base[256];
+                memcpy(base, name, (size_t)(sep - name));
+                base[sep - name] = 0;
+                if (zr_mf_find(r->types_now, base) && zr_mf_changed(c->m, r->types_now, base, 0, NULL)) return 0;
+            }
+        }
+        return (uint64_t)(uintptr_t)zr_stub_for(r, r->types_now, name, to);
+    }
+
+    // Copies out of version `v` the functions stubs call in it (only those pinned by the
+    // reload of version `pinned_in`, if it isn't 0), and points the stubs at the copies; 0 if
+    // one can't be copied (the stubs stay as they were).
+    static int zr_copy_called(ZrReloader *r, ZrVersion *v, int pinned_in)
+    {
+        ZlImage *im = v->im;
+        if (!im) return 0;
+        int any = 0;
+        for (unsigned i = 0; i < r->nfs && !any; i++)
+            any = zl_in(im, (uint64_t)(uintptr_t)zr_stub_target(&r->fs[i])) &&
+                  (!pinned_in || (r->fs[i].pinned && r->fs[i].changed_in == pinned_in));
+        if (!any) return 1;
+        uint64_t *memo = (uint64_t *)calloc(im->nsyms, sizeof(uint64_t));
+        if (!memo) return 0;
+        struct ZrCalleeCtx c;
+        memset(&c, 0, sizeof c);
+        c.r = r;
+        c.number = v->number;
+        ZcManifest *vm = zr_mf_copy(zr_version_manifest(v));
+        c.m = vm;
+        zr_fntab_init(&c.was, vm);
+        zr_fntab_init(&c.now, r->types_now);
+        size_t bytes = 0;
+        int ok = 1;
+        for (unsigned i = 0; i < r->nfs && ok; i++)
+        {
+            struct ZrStub *st = &r->fs[i];
+            uint64_t t = (uint64_t)(uintptr_t)zr_stub_target(st);
+            if (!zl_in(im, t) || (pinned_in && !(st->pinned && st->changed_in == pinned_in))) continue;
+            unsigned sym = zl_func_at(im, t);
+            ok = sym && zl_copy_out(im, sym, zr_callee, &c, v->owns_globals, memo, &bytes, 0);
+        }
+        free(c.was.slot);
+        free(c.now.slot);
+        zr_mf_free(vm);
+        if (ok)
+        {
+            for (unsigned i = 0; i < r->nfs; i++)
+            {
+                struct ZrStub *st = &r->fs[i];
+                uint64_t t = (uint64_t)(uintptr_t)zr_stub_target(st);
+                if (!zl_in(im, t) || (pinned_in && !(st->pinned && st->changed_in == pinned_in))) continue;
+                zr_stub_point(st, (void *)(uintptr_t)memo[zl_func_at(im, t)]);
+            }
+            for (unsigned s = 1; s < im->nsyms; s++)
+                if (memo[s] && memo[s] != im->addr[s] && ZL_TYPE(im->syms[s].st_info) == ZL_STT_FUNC) r->copied_fns++;
+            r->copied_bytes += bytes;
+        }
+        free(memo);
+        return ok;
+    }
+
+    // After zr_stubs_follow: each function a stub was pinned to by this reload, copied out of
+    // its version (which stays, for now: the one a crash goes back to), so it calls through
+    // stubs from the start what it calls by name, as it will once its version is released.
+    static void zr_copy_pinned(ZrReloader *r)
+    {
+        for (int i = 0; i < r->old_count; i++)
+            if (r->old[i].im) zr_copy_called(r, &r->old[i], r->version);
+    }
+
+    // Releases old version `v` whole, what stubs still call in it copied out first; 0 (and it
+    // stays) if something can't be.
+    static int zr_release(ZrReloader *r, ZrVersion *v)
+    {
+        ZlImage *im = v->im;
+        if (!im || !zr_copy_called(r, v, 0)) return 0;
+        if (v->owns_globals && im->data)
+        {
+            unsigned char **grown = (unsigned char **)realloc(r->kept_data, (r->nkept_data + 1) * sizeof(*grown));
+            if (!grown) return 0; // (copies made are kept; the version stays)
+            r->kept_data = grown;
+            r->kept_data[r->nkept_data++] = im->data;
+            im->data = NULL;
+        }
+        zl_free(im);
+        memset(v, 0, sizeof(*v));
+        r->released++;
+        return 1;
+    }
+
+    // After a reload: every old version but the one a crash goes back to (and that one too
+    // with keep_old(false)), released.
+    static void zr_release_old(ZrReloader *r)
+    {
+        int w = 0;
+        for (int i = 0; i < r->old_count; i++)
+        {
+            ZrVersion o = r->old[i];
+            int fallback = i == r->old_count - 1 && r->keep_old;
+            if (!fallback && o.im && zr_release(r, &o))
+            {
+                if (i == r->old_count - 1) r->can_roll_back = 0;
+                continue;
+            }
+            r->old[w++] = o;
+        }
+        r->old_count = w;
+    }
+    #endif
 
     #ifdef ZR_FORWARD
     // Room for a 14-byte absolute jump within 2 GB of `near`, or NULL.
@@ -4214,7 +4534,9 @@ raw {
             free(why);
         }
 
-        int keep_current = r->current.loaded && (r->keep_old || r->current.owns_globals);
+        // (A version the Reloader loaded is kept until the stubs have followed, then released:
+        // zr_release_old.)
+        int keep_current = r->current.loaded && (r->keep_old || r->current.owns_globals || r->current.im);
         if (keep_current && r->old_count == r->old_cap)
         {
             int cap = r->old_cap ? r->old_cap * 2 : 8;
@@ -4265,6 +4587,7 @@ raw {
         }
         r->current = next;
         r->version++;
+        r->current.number = r->version;
 
         // The new version's types, to compare with the one it replaces.
         zr_mf_free(r->types_prev);
@@ -4282,7 +4605,9 @@ raw {
         zr_store_settle(r, 1); // the values are in the storage they keep from now on
         if (r->current.owns_globals && r->store) zr_keep_old_vtables(r);
         if (r->types_prev && r->types_now && log) zr_reset_globals(r, log);
-        zr_note_fns(r, r->types_now);
+        // (Functions by address are for libtcc's loading: with the Reloader's, a function
+        // pointer is a stub, which knows its name.)
+        if (!r->current.im) zr_note_fns(r, r->types_now);
         // Stubs first (what the state's function pointers are, reported next); old code made
         // to jump to new code only between versions libtcc loaded.
         ZrVersion *replaced = keep_current ? &r->old[r->old_count - 1] : NULL;
@@ -4291,6 +4616,9 @@ raw {
         FILE *kept_log = open_memstream(&kept_text, &kept_len);
         if (kept_log) zr_stubs_follow(r, kept_log);
         if (kept_log) fclose(kept_log);
+    #ifdef ZR_LOADER
+        zr_copy_pinned(r);
+    #endif
         if (r->types_prev && r->types_now && log) zr_repoint_state(r, log);
         if (kept_text && log) fputs(kept_text, log);
         free(kept_text);
@@ -4300,6 +4628,9 @@ raw {
         if (r->current.owns_globals) zr_store_set(r, zr_version_manifest(&r->current));
 
         zr_version_call(&r->current, first ? "_zc_module_init" : "_zc_module_after_reload");
+    #ifdef ZR_LOADER
+        zr_release_old(r);
+    #endif
         if (r->verbose)
         {
             fprintf(stderr, "reload: version %d of %s loaded (zc %.0f ms, tcc %.0f ms, reload %.1f ms)\n",
@@ -4403,6 +4734,10 @@ raw {
         for (unsigned i = 0; i < r->nstubs; i++) munmap(r->stubs[i].page, r->stubs[i].size);
     #endif
         free(r->stubs);
+    #ifdef ZR_LOADER
+        for (unsigned i = 0; i < r->nkept_data; i++) zl_ring_give(r->kept_data[i]);
+    #endif
+        free(r->kept_data);
         free(r->fs); // the stubs' code is in kept memory, for the process
         free(r->fs_by_name);
         free(r->fs_by_addr);

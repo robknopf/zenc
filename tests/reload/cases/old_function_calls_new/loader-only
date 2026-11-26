@@ -1,0 +1,1 @@
+Needs stubs and copying out: under libtcc's loading (ZC_RELOAD_MEMORY) old functions are patched instead.
