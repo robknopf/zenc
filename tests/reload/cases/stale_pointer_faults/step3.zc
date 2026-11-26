@@ -1,0 +1,8 @@
+// Version 3. (See step1.zc.) Version 1 is released: the pointer is stale.
+struct State { p: void*; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    println "version 3 reads it";
+    let v = *(int*)state.p;
+    println "read {v}";
+}

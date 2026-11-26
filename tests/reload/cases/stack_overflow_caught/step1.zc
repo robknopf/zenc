@@ -1,0 +1,6 @@
+// Version 1. Version 2 recurses without end: the stack overflows, which call() catches (on
+// a stack of its own, as the thread's has no room left), and version 1 comes back.
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "version 1";
+}

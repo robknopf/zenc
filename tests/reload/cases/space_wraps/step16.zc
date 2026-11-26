@@ -1,0 +1,25 @@
+// Version 16. The Reloader's address space made small (env: 2 MB, a quarter of it kept
+// memory), and each version about 200 KB (pad), so it goes round twice in 16 versions,
+// reusing the ranges of versions released long before. A function pointer and a literal kept
+// from version 1 still work, and each version runs its own code.
+raw {
+    static char pad[150000] = {1};
+    static int pad_first(void) { return pad[0]; }
+}
+extern fn pad_first() -> int;
+struct Box { cb: fn*() -> int; }
+struct State { kept: void*; msg: string; }
+fn value() -> int { return 16; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.kept == NULL {
+        let b = (Box*)malloc(sizeof(Box));
+        b.cb = value;
+        state.kept = (void*)b;
+        state.msg = "a literal from version 1";
+    }
+    let b = (Box*)state.kept;
+    let v = b.cb();
+    let p = pad_first();
+    println "version 16: the kept pointer gives {v}, {state.msg}, pad {p}";
+}

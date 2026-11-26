@@ -1,0 +1,16 @@
+// Version 1. A pointer the Reloader can't see into version 1's own data (a C static in a raw
+// block: not a global the store keeps, nor a constant the pool keeps), kept in the host's
+// block. Version 3's reload releases version 1, so reading through the pointer then faults:
+// in code called through call(), a crash like any other, and the version before comes back.
+raw {
+    static int v1_value = 41;
+    static void *v1_addr(void) { return &v1_value; }
+}
+extern fn v1_addr() -> void*;
+struct State { p: void*; }
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.p == NULL { state.p = v1_addr(); }
+    let v = *(int*)state.p;
+    println "version 1: {v}";
+}

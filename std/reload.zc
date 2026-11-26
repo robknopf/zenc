@@ -547,11 +547,20 @@ raw {
     {
         if (zl_space.base) return 1;
         if (zl_space.failed) return 0;
+        // ZC_RELOAD_SPACE_KB: a smaller space (a quarter of it kept memory), for tests of
+        // what happens when it goes round or fills up.
+        size_t size = ZL_SPACE_SIZE, keep = ZL_KEEP_SIZE;
+        const char *env = getenv("ZC_RELOAD_SPACE_KB");
+        if (env && atol(env) >= 256)
+        {
+            size = ((size_t)atol(env) * 1024) & ~(size_t)(ZL_CHUNK - 1);
+            keep = (size / 4) & ~(size_t)(ZL_CHUNK - 1);
+        }
     #ifdef _WIN32
-        void *p = VirtualAlloc(NULL, ZL_SPACE_SIZE, MEM_RESERVE, PAGE_NOACCESS);
+        void *p = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
         if (!p)
     #else
-        void *p = mmap(NULL, ZL_SPACE_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        void *p = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (p == MAP_FAILED)
     #endif
         {
@@ -559,9 +568,9 @@ raw {
             return 0;
         }
         zl_space.base = (unsigned char *)p;
-        zl_space.size = ZL_SPACE_SIZE;
-        zl_space.keep_end = ZL_KEEP_SIZE;
-        zl_space.ring_next = ZL_KEEP_SIZE;
+        zl_space.size = size;
+        zl_space.keep_end = keep;
+        zl_space.ring_next = keep;
         return 1;
     }
 
@@ -589,6 +598,12 @@ raw {
         }
         zl_space.keep_used = at + size;
         return zl_space.base + at;
+    }
+
+    // Kept memory not yet given out.
+    static size_t zl_keep_room(void)
+    {
+        return zl_space_ready() ? zl_space.keep_end - zl_space.keep_used : 0;
     }
 
     static int zl_overlaps(size_t start, size_t end)
@@ -1284,7 +1299,15 @@ raw {
                     while (align > 1 && (y->st_value & (align - 1))) align >>= 1;
                     unsigned char *at = zl_pool((const unsigned char *)(uintptr_t)im->addr[s], (size_t)y->st_size,
                                                 !strncmp(nm, "L.", 2) ? NULL : nm, align);
-                    if (at) im->addr[s] = (uint64_t)(uintptr_t)at;
+                    if (!at)
+                    {
+                        // (the version's own copy would be gone when it is released)
+                        free(cand);
+                        zl_err(err, errn, "the Reloader's kept memory is full (%zu KB): restart the program to load it",
+                               zl_space.keep_end / 1024);
+                        goto fail;
+                    }
+                    im->addr[s] = (uint64_t)(uintptr_t)at;
                 }
             }
             free(cand);
@@ -5088,6 +5111,23 @@ raw {
             }
             free(why);
         }
+
+    #ifdef ZR_LOADER
+        // Room in kept memory for its stubs and what is copied out at the switch (which can't
+        // fail halfway): else it isn't loaded.
+        if (next.im && zl_keep_room() < (size_t)next.im->nrefs * 16 + 65536)
+        {
+            fprintf(stderr,
+                    "reload: this version is not loaded: the Reloader's kept memory is full (%zu KB "
+                    "left). Restart the program to use it; still running version %d\n",
+                    zl_keep_room() / 1024, r->version);
+            zr_mf_free(nm);
+            zr_version_delete(&next);
+            zr_store_settle(r, 0);
+            r->refused++;
+            return 0;
+        }
+    #endif
 
         // (A version the Reloader loaded is kept until the stubs have followed, then released:
         // zr_release_old.)

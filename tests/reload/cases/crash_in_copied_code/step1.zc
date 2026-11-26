@@ -1,0 +1,25 @@
+// Version 1. A function pointer kept in the heap whose function's signature then changes
+// (version 2): the old function is copied out of its version and keeps running. In version 3
+// it crashes (given 99): code copied out of a version has no unwind information, and a crash
+// in it is caught by call() all the same, and the version before comes back.
+struct Box { cb: fn*(int) -> int; }
+struct State { kept: void*; }
+fn greet(x: int) -> int {
+    if x == 99 {
+        let p = (int*)(usize)0;
+        *p = 1;
+    }
+    println "greet version 1: {x}";
+    return x + 1;
+}
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if state.kept == NULL {
+        let b = (Box*)malloc(sizeof(Box));
+        b.cb = (fn*(int) -> int)greet;
+        state.kept = (void*)b;
+    }
+    let b = (Box*)state.kept;
+    let r = b.cb(10);
+    println "version 1 returned {r}";
+}

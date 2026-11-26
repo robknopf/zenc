@@ -1,0 +1,15 @@
+--- step 1
+version 1: a literal of 60000 bytes
+--- step 2
+version 2: a literal of 60000 bytes
+--- step 3
+version 3: a literal of 60000 bytes
+--- step 4
+(build failed, running the previous module)
+version 3: a literal of 60000 bytes
+--- step 5
+(build failed, running the previous module)
+version 3: a literal of 60000 bytes
+--- step 6
+(build failed, running the previous module)
+version 3: a literal of 60000 bytes

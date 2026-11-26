@@ -1,0 +1,5 @@
+// Version 3. (See step1.zc.)
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "version 3";
+}

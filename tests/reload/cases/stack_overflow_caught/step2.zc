@@ -1,0 +1,12 @@
+// Version 2. (See step1.zc.)
+fn down(n: int) -> int {
+    let buf: char[256];
+    buf[0] = (char)n;
+    return down(n + 1) + (int)buf[0];
+}
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "version 2 recurses";
+    let r = down(0);
+    println "never {r}";
+}

@@ -210,6 +210,8 @@ reload: version 2 crashed (SIGSEGV, a bad memory access); back to version 1. Wha
 - The next save that loads replaces it, as usual.
 - With nothing to go back to (the first version, or one already gone back from), calls
   are skipped until a version that loads replaces it [`crash_first_version`].
+- A stack overflow is caught too [`stack_overflow_caught`], and a crash in a function
+  copied out of an old version [`crash_in_copied_code`].
 
 This is best effort: what the crashed code did to the heap, to globals and to libraries
 (libwgf's state, a half-drawn frame) isn't undone, and a crash inside a library called by
@@ -289,7 +291,8 @@ kept into an old version's own data other than the above (a C `static` in a `raw
 const table that holds pointers), and the address of something by section and offset
 rather than by name (C the Reloader didn't see, assembly). A released version's addresses
 stay reserved for a long while (the space goes round once before reusing them), so using
-one faults, and in code called through `call()` that is a crash rolled back like any other.
+one faults, and in code called through `call()` that is a crash rolled back like any other
+[`stale_pointer_faults`].
 
 **Values that are not carried** when a type's layout changes, and are left at zero (or a
 global's initial value); each is in the "moved" line [`state_converted`]. Zero is a real
@@ -399,7 +402,9 @@ pending on` lets a breakpoint wait for the module. lldb reads the same interface
   two reaches. Its first 256 MB are kept memory, never released: the stubs, the pool, the
   functions copied out of old versions. The versions go in the rest, each where the last
   one ended, around and around, so a released version's addresses aren't reused until the
-  space has gone round once.
+  space has gone round once [`space_wraps`]. When kept memory has no room for a version's
+  stubs or literals, that version isn't loaded and the reload says so
+  [`kept_memory_full`]. (`ZC_RELOAD_SPACE_KB` makes the space smaller, for those tests.)
 - **Storage.** Each mutable global, `static` local and vtable is emitted twice, behind
   `ZC_RELOAD_OWN_GLOBALS`: defined, and `extern`. The `Reloader` compiles the first
   version to define them, and every later version with them `extern`, pointed at the

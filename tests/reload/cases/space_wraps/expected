@@ -1,0 +1,32 @@
+--- step 1
+version 1: the kept pointer gives 1, a literal from version 1, pad 1
+--- step 2
+version 2: the kept pointer gives 2, a literal from version 1, pad 1
+--- step 3
+version 3: the kept pointer gives 3, a literal from version 1, pad 1
+--- step 4
+version 4: the kept pointer gives 4, a literal from version 1, pad 1
+--- step 5
+version 5: the kept pointer gives 5, a literal from version 1, pad 1
+--- step 6
+version 6: the kept pointer gives 6, a literal from version 1, pad 1
+--- step 7
+version 7: the kept pointer gives 7, a literal from version 1, pad 1
+--- step 8
+version 8: the kept pointer gives 8, a literal from version 1, pad 1
+--- step 9
+version 9: the kept pointer gives 9, a literal from version 1, pad 1
+--- step 10
+version 10: the kept pointer gives 10, a literal from version 1, pad 1
+--- step 11
+version 11: the kept pointer gives 11, a literal from version 1, pad 1
+--- step 12
+version 12: the kept pointer gives 12, a literal from version 1, pad 1
+--- step 13
+version 13: the kept pointer gives 13, a literal from version 1, pad 1
+--- step 14
+version 14: the kept pointer gives 14, a literal from version 1, pad 1
+--- step 15
+version 15: the kept pointer gives 15, a literal from version 1, pad 1
+--- step 16
+version 16: the kept pointer gives 16, a literal from version 1, pad 1

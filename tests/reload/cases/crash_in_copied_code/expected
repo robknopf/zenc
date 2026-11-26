@@ -1,0 +1,13 @@
+--- step 1
+greet version 1: 10
+version 1 returned 11
+--- step 2
+version 2 calls the kept pointer with 10
+greet version 1: 10
+version 2 returned 11
+--- step 3
+version 3 calls the kept pointer with 99
+(crashed)
+version 2 calls the kept pointer with 10
+greet version 1: 10
+version 2 returned 11

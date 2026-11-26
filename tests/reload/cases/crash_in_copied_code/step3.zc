@@ -1,0 +1,14 @@
+// Version 3. (See step1.zc.) greet takes two now.
+struct Box { cb: fn*(int) -> int; }
+struct State { kept: void*; }
+fn greet(x: int, y: int) -> int {
+    println "greet version 3: {x} {y}";
+    return x + y;
+}
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    let b = (Box*)state.kept;
+    println "version 3 calls the kept pointer with 99";
+    let r = b.cb(99);
+    println "version 3 returned {r}";
+}

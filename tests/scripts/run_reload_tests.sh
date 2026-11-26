@@ -8,6 +8,8 @@
 # starts to pass, which means its xfail file can go. The host keeps every previous module
 # loaded; a case with a `delete-old` file is run with it deleting them instead.
 #
+# A case with an `env` file runs its host with those NAME=VALUE settings.
+#
 # A step that does not build fails the case, even an xfail one, unless `expected` says it
 # does not build.
 #
@@ -67,12 +69,15 @@ for dir in "$CASES"/*/; do
     fi
     mkdir -p "$WORK/$name"
     export ERR="$WORK/$name/err"
+    # A case's `env` file: NAME=VALUE lines for its host (ZC_RELOAD_SPACE_KB, ...).
+    case_env=()
+    [ -f "$dir/env" ] && mapfile -t case_env < <(grep -v '^#' "$dir/env" | grep '=')
     flag=""
     [ -f "$dir/delete-old" ] && flag="--delete-old"
     # A crash is the expected result of some xfail cases. The inner bash, which waits for
     # the host instead of becoming it ("; exit"), reports it on its own stderr, discarded,
     # so it does not appear in the output; the host's stderr still goes to err.
-    bash -c '"$@" 2> "$ERR"; exit $?' _ timeout 60 "$WORK/host" "$ZC" "$dir" "$WORK/$name" \
+    bash -c '"$@" 2> "$ERR"; exit $?' _ env "${case_env[@]}" timeout 60 "$WORK/host" "$ZC" "$dir" "$WORK/$name" \
         $flag > "$WORK/$name/out" 2> /dev/null
     rc=$?
     want="$dir/expected"
