@@ -1,21 +1,19 @@
 // SPDX-License-Identifier: MIT
 //
 // The names the program's C declares: its #includes and raw blocks, run through the C
-// preprocessor with the flags the C compiler gets (-E -dD), then scanned for every name
-// declared at file scope: functions, variables, typedefs, struct, union and enum tags, enum
-// constants, and macros. Struct fields and parameters aren't names of their own.
+// preprocessor with the flags the C compiler gets (-E -dD), then read with tree-sitter's C
+// grammar (utils_c_decls.c), which gives every declaration at file scope: functions,
+// variables, typedefs, struct, union and enum tags, enum constants and macros, with their
+// types, parameters and fields.
 //
 // With them, a name the Zen C code uses that neither it nor its C declares is an error at
 // the .zc line ("Undefined function 'pritnf'; did you mean 'printf'?"), and a C type isn't
 // "assumed". Without them (no C compiler, a header that doesn't preprocess, MISRA mode,
 // the LSP, C++ or Objective-C output), every name C might declare is taken on trust, as
 // before.
-//
-// The scan is tolerant: what it doesn't understand it skips, so a name can at worst be
-// missed, and a missed name would be reported as undefined. It reads declarations, not
-// expressions, and knows C's keywords and GCC's extensions that appear in system headers.
 
 #include "../parser.h"
+#include "c_decls.h"
 #include "../../codegen/codegen.h"
 #include "../../platform/os.h"
 #include "../../utils/cmd.h"
@@ -51,7 +49,7 @@ static unsigned c_name_slot(char **names, unsigned cap, const char *s, size_t n)
     return i;
 }
 
-static void c_name_add(ParserContext *ctx, const char *s, size_t n)
+void c_name_note(ParserContext *ctx, const char *s, size_t n)
 {
     if (n == 0)
     {
@@ -123,602 +121,6 @@ const char *c_name_closest(ParserContext *ctx, const char *name)
         }
     }
     return best;
-}
-
-// ---- Tokens -------------------------------------------------------------------------------
-
-typedef enum
-{
-    CT_EOF,
-    CT_IDENT,
-    CT_PUNCT, // one character, in `c`
-    CT_OTHER  // a number, string or character literal
-} CTokKind;
-
-typedef struct
-{
-    CTokKind kind;
-    const char *s; // an identifier's text
-    size_t n;
-    char c;
-} CTok;
-
-typedef struct
-{
-    ParserContext *ctx;
-    const char *p;
-    int line_start;
-} CScan;
-
-// The next token; a preprocessor line (a #define, a line marker) is read as it is met.
-static CTok c_next(CScan *sc)
-{
-    CTok t = {CT_EOF, NULL, 0, 0};
-    const char *p = sc->p;
-    for (;;)
-    {
-        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\f' || *p == '\v')
-        {
-            p++;
-        }
-        if (*p == '\n')
-        {
-            p++;
-            sc->line_start = 1;
-            continue;
-        }
-        if (*p == '#' && sc->line_start)
-        {
-            const char *d = p + 1;
-            while (*d == ' ' || *d == '\t')
-            {
-                d++;
-            }
-            if (strncmp(d, "define", 6) == 0 && (d[6] == ' ' || d[6] == '\t'))
-            {
-                d += 6;
-                while (*d == ' ' || *d == '\t')
-                {
-                    d++;
-                }
-                const char *b = d;
-                while (isalnum((unsigned char)*d) || *d == '_' || *d == '$')
-                {
-                    d++;
-                }
-                c_name_add(sc->ctx, b, (size_t)(d - b));
-            }
-            // To the end of the line, with its continuations.
-            while (*p && *p != '\n')
-            {
-                if (*p == '\\' && p[1] == '\n')
-                {
-                    p++;
-                }
-                p++;
-            }
-            continue;
-        }
-        if (p[0] == '/' && p[1] == '/') // -dD keeps macro bodies as written; none outside
-        {
-            while (*p && *p != '\n')
-            {
-                p++;
-            }
-            continue;
-        }
-        if (p[0] == '/' && p[1] == '*')
-        {
-            p += 2;
-            while (*p && !(p[0] == '*' && p[1] == '/'))
-            {
-                p++;
-            }
-            if (*p)
-            {
-                p += 2;
-            }
-            continue;
-        }
-        break;
-    }
-    sc->line_start = 0;
-    if (!*p)
-    {
-        sc->p = p;
-        return t;
-    }
-    if (isalpha((unsigned char)*p) || *p == '_' || *p == '$')
-    {
-        const char *b = p;
-        while (isalnum((unsigned char)*p) || *p == '_' || *p == '$')
-        {
-            p++;
-        }
-        // A prefixed literal (L"...", u8'x') is a literal.
-        if ((*p == '"' || *p == '\'') && p - b <= 2)
-        {
-            char q = *p++;
-            while (*p && *p != q && *p != '\n')
-            {
-                p += (*p == '\\' && p[1]) ? 2 : 1;
-            }
-            if (*p == q)
-            {
-                p++;
-            }
-            t.kind = CT_OTHER;
-        }
-        else
-        {
-            t.kind = CT_IDENT;
-            t.s = b;
-            t.n = (size_t)(p - b);
-        }
-    }
-    else if (isdigit((unsigned char)*p) || (*p == '.' && isdigit((unsigned char)p[1])))
-    {
-        while (isalnum((unsigned char)*p) || *p == '.' || *p == '_' ||
-               ((*p == '+' || *p == '-') &&
-                (p[-1] == 'e' || p[-1] == 'E' || p[-1] == 'p' || p[-1] == 'P')))
-        {
-            p++;
-        }
-        t.kind = CT_OTHER;
-    }
-    else if (*p == '"' || *p == '\'')
-    {
-        char q = *p++;
-        while (*p && *p != q && *p != '\n')
-        {
-            p += (*p == '\\' && p[1]) ? 2 : 1;
-        }
-        if (*p == q)
-        {
-            p++;
-        }
-        t.kind = CT_OTHER;
-    }
-    else
-    {
-        t.kind = CT_PUNCT;
-        t.c = *p++;
-    }
-    sc->p = p;
-    return t;
-}
-
-static int c_is(const CTok *t, const char *word)
-{
-    return t->kind == CT_IDENT && t->n == strlen(word) && memcmp(t->s, word, t->n) == 0;
-}
-
-static int c_is_any(const CTok *t, const char *const *words)
-{
-    for (; *words; words++)
-    {
-        if (c_is(t, *words))
-        {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-// Words that are never a declared name.
-static const char *const c_specifiers[] = {"void",
-                                           "char",
-                                           "short",
-                                           "int",
-                                           "long",
-                                           "float",
-                                           "double",
-                                           "signed",
-                                           "unsigned",
-                                           "__signed__",
-                                           "__signed",
-                                           "_Bool",
-                                           "bool",
-                                           "_Complex",
-                                           "__complex__",
-                                           "_Imaginary",
-                                           "__int128",
-                                           "__int128_t",
-                                           "__uint128_t",
-                                           "_Float16",
-                                           "_Float32",
-                                           "_Float64",
-                                           "_Float128",
-                                           "_Float32x",
-                                           "_Float64x",
-                                           "__float128",
-                                           "__float80",
-                                           "__fp16",
-                                           "_Decimal32",
-                                           "_Decimal64",
-                                           "_Decimal128",
-                                           "auto",
-                                           "register",
-                                           "static",
-                                           "extern",
-                                           "inline",
-                                           "__inline",
-                                           "__inline__",
-                                           "_Noreturn",
-                                           "noreturn",
-                                           "typedef",
-                                           "const",
-                                           "__const",
-                                           "__const__",
-                                           "volatile",
-                                           "__volatile__",
-                                           "restrict",
-                                           "__restrict",
-                                           "__restrict__",
-                                           "_Atomic",
-                                           "_Thread_local",
-                                           "__thread",
-                                           "thread_local",
-                                           "__extension__",
-                                           "_Nullable",
-                                           "_Nonnull",
-                                           "_Null_unspecified",
-                                           "__unaligned",
-                                           "__w64",
-                                           "__ptr32",
-                                           "__ptr64",
-                                           "__cdecl",
-                                           "__stdcall",
-                                           "__fastcall",
-                                           NULL};
-
-// Words followed by a parenthesised part to skip.
-static const char *const c_wrappers[] = {
-    "__attribute__", "__attribute", "__declspec", "_Alignas", "alignas", "__asm__",
-    "__asm",         "asm",         "__typeof__", "__typeof", "typeof",  "typeof_unqual",
-    "_Generic",      "__alignof__", "_Alignof",   NULL};
-
-// ---- Declarations ---------------------------------------------------------------------------
-
-#define C_MAX_TOKS 4096
-
-typedef struct
-{
-    CTok t[C_MAX_TOKS];
-    int n;
-    int truncated;
-} CDecl;
-
-// Index of the token after the parenthesised part starting at t[i] (a '(' ), or n.
-static int c_skip_parens(const CDecl *d, int i)
-{
-    int depth = 0;
-    for (; i < d->n; i++)
-    {
-        if (d->t[i].kind != CT_PUNCT)
-        {
-            continue;
-        }
-        if (d->t[i].c == '(')
-        {
-            depth++;
-        }
-        else if (d->t[i].c == ')' && --depth == 0)
-        {
-            return i + 1;
-        }
-    }
-    return d->n;
-}
-
-// Index of the token after the braced part starting at t[i] (a '{'), or n.
-static int c_skip_braces(const CDecl *d, int i)
-{
-    int depth = 0;
-    for (; i < d->n; i++)
-    {
-        if (d->t[i].kind != CT_PUNCT)
-        {
-            continue;
-        }
-        if (d->t[i].c == '{')
-        {
-            depth++;
-        }
-        else if (d->t[i].c == '}' && --depth == 0)
-        {
-            return i + 1;
-        }
-    }
-    return d->n;
-}
-
-// Tags and enum constants anywhere in the declaration (a nested struct's too: C puts
-// them all at file scope).
-static void c_scan_tags(ParserContext *ctx, const CDecl *d)
-{
-    for (int i = 0; i < d->n; i++)
-    {
-        int is_enum = c_is(&d->t[i], "enum");
-        if (!is_enum && !c_is(&d->t[i], "struct") && !c_is(&d->t[i], "union"))
-        {
-            continue;
-        }
-        int j = i + 1;
-        while (j < d->n && c_is_any(&d->t[j], c_wrappers))
-        {
-            j = j + 1 < d->n && d->t[j + 1].kind == CT_PUNCT && d->t[j + 1].c == '('
-                    ? c_skip_parens(d, j + 1)
-                    : j + 1;
-        }
-        if (j < d->n && d->t[j].kind == CT_IDENT && !c_is_any(&d->t[j], c_specifiers))
-        {
-            c_name_add(ctx, d->t[j].s, d->t[j].n);
-            j++;
-        }
-        if (is_enum && j < d->n && d->t[j].kind == CT_PUNCT && d->t[j].c == ':')
-        {
-            while (j < d->n && !(d->t[j].kind == CT_PUNCT && d->t[j].c == '{'))
-            {
-                j++; // enum E : int { ... } (C23)
-            }
-        }
-        if (!is_enum || j >= d->n || d->t[j].kind != CT_PUNCT || d->t[j].c != '{')
-        {
-            continue;
-        }
-        // Each enumerator: the identifier after '{' or ',' at the body's own depth.
-        int end = c_skip_braces(d, j), depth = 0, expect = 1;
-        for (int k = j + 1; k < end - 1; k++)
-        {
-            const CTok *t = &d->t[k];
-            if (t->kind == CT_PUNCT)
-            {
-                if (t->c == '(' || t->c == '[' || t->c == '{')
-                {
-                    depth++;
-                }
-                else if (t->c == ')' || t->c == ']' || t->c == '}')
-                {
-                    depth--;
-                }
-                else if (t->c == ',' && depth == 0)
-                {
-                    expect = 1;
-                }
-                continue;
-            }
-            if (expect && depth == 0 && t->kind == CT_IDENT && !c_is_any(t, c_wrappers))
-            {
-                c_name_add(ctx, t->s, t->n);
-            }
-            if (!c_is_any(t, c_wrappers))
-            {
-                expect = 0;
-            }
-        }
-    }
-}
-
-// The name a declarator declares: its first identifier that isn't a qualifier or an
-// attribute (`*const p`, `(*fp)(int)`, `f(int x)`, `a[N]`), before any initializer.
-static void c_scan_declarator(ParserContext *ctx, const CDecl *d, int i, int end)
-{
-    while (i < end)
-    {
-        const CTok *t = &d->t[i];
-        if (t->kind == CT_PUNCT && (t->c == '=' || t->c == ':' || t->c == '{'))
-        {
-            return;
-        }
-        if (t->kind == CT_IDENT)
-        {
-            if (c_is_any(t, c_wrappers))
-            {
-                i = i + 1 < end && d->t[i + 1].kind == CT_PUNCT && d->t[i + 1].c == '('
-                        ? c_skip_parens(d, i + 1)
-                        : i + 1;
-                continue;
-            }
-            if (!c_is_any(t, c_specifiers))
-            {
-                c_name_add(ctx, t->s, t->n);
-                return;
-            }
-        }
-        i++;
-    }
-}
-
-static void c_scan_decl(ParserContext *ctx, const CDecl *d)
-{
-    if (d->n == 0 || d->truncated)
-    {
-        return;
-    }
-    if (c_is(&d->t[0], "_Static_assert") || c_is(&d->t[0], "static_assert"))
-    {
-        return;
-    }
-    c_scan_tags(ctx, d);
-    // The specifiers: keywords, a struct/union/enum with its tag and body, wrapped parts,
-    // and one typedef name if no other type has been named.
-    int i = 0, have_type = 0;
-    while (i < d->n)
-    {
-        const CTok *t = &d->t[i];
-        if (t->kind == CT_IDENT && c_is_any(t, c_wrappers))
-        {
-            i = i + 1 < d->n && d->t[i + 1].kind == CT_PUNCT && d->t[i + 1].c == '('
-                    ? c_skip_parens(d, i + 1)
-                    : i + 1;
-            continue;
-        }
-        if (t->kind == CT_IDENT && c_is_any(t, c_specifiers))
-        {
-            if (!c_is(t, "const") && !c_is(t, "volatile") && !c_is(t, "static") &&
-                !c_is(t, "extern") && !c_is(t, "typedef") && !c_is(t, "inline") &&
-                !c_is(t, "__extension__") && !c_is(t, "register"))
-            {
-                have_type = 1;
-            }
-            i++;
-            continue;
-        }
-        if (c_is(t, "struct") || c_is(t, "union") || c_is(t, "enum"))
-        {
-            have_type = 1;
-            i++;
-            while (i < d->n && c_is_any(&d->t[i], c_wrappers))
-            {
-                i = i + 1 < d->n && d->t[i + 1].kind == CT_PUNCT && d->t[i + 1].c == '('
-                        ? c_skip_parens(d, i + 1)
-                        : i + 1;
-            }
-            if (i < d->n && d->t[i].kind == CT_IDENT)
-            {
-                i++;
-            }
-            if (i < d->n && d->t[i].kind == CT_PUNCT && d->t[i].c == ':')
-            {
-                while (i < d->n && !(d->t[i].kind == CT_PUNCT && d->t[i].c == '{'))
-                {
-                    i++;
-                }
-            }
-            if (i < d->n && d->t[i].kind == CT_PUNCT && d->t[i].c == '{')
-            {
-                i = c_skip_braces(d, i);
-            }
-            continue;
-        }
-        if (t->kind == CT_IDENT && !have_type && i + 1 < d->n &&
-            !(d->t[i + 1].kind == CT_PUNCT && (d->t[i + 1].c == '(' || d->t[i + 1].c == ';' ||
-                                               d->t[i + 1].c == ',' || d->t[i + 1].c == '=')))
-        {
-            have_type = 1; // a typedef name: size_t n
-            i++;
-            continue;
-        }
-        break;
-    }
-    // The declarators, split at the top-level commas.
-    int start = i, depth = 0;
-    for (int k = i; k <= d->n; k++)
-    {
-        int at_end = k == d->n;
-        const CTok *t = at_end ? NULL : &d->t[k];
-        if (t && t->kind == CT_PUNCT)
-        {
-            if (t->c == '(' || t->c == '[' || t->c == '{')
-            {
-                depth++;
-            }
-            else if (t->c == ')' || t->c == ']' || t->c == '}')
-            {
-                depth--;
-            }
-        }
-        if (at_end || (t->kind == CT_PUNCT && t->c == ',' && depth == 0))
-        {
-            c_scan_declarator(ctx, d, start, k);
-            start = k + 1;
-        }
-    }
-}
-
-static void c_scan_text(ParserContext *ctx, const char *text)
-{
-    CScan sc = {ctx, text, 1};
-    CDecl *d = xcalloc(1, sizeof(CDecl));
-    int paren = 0, brace = 0;
-    CTok prev = {CT_EOF, NULL, 0, 0};
-    for (;;)
-    {
-        CTok t = c_next(&sc);
-        if (t.kind == CT_EOF)
-        {
-            break;
-        }
-        if (t.kind == CT_PUNCT)
-        {
-            if (t.c == '(')
-            {
-                paren++;
-            }
-            else if (t.c == ')')
-            {
-                paren = paren > 0 ? paren - 1 : 0;
-            }
-            else if (t.c == ';' && paren == 0 && brace == 0)
-            {
-                c_scan_decl(ctx, d);
-                d->n = 0;
-                d->truncated = 0;
-                prev = t;
-                continue;
-            }
-            else if (t.c == '{' && paren == 0 && brace == 0 && prev.kind == CT_PUNCT &&
-                     prev.c == ')')
-            {
-                // A function's body (an inline function in a header): its name, then the
-                // body skipped. (A struct's body follows its tag or the keyword instead.)
-                int has_eq = 0;
-                for (int k = 0; k < d->n; k++)
-                {
-                    has_eq |= d->t[k].kind == CT_PUNCT && d->t[k].c == '=';
-                }
-                if (!has_eq)
-                {
-                    c_scan_decl(ctx, d);
-                    d->n = 0;
-                    d->truncated = 0;
-                    int depth = 1;
-                    while (depth > 0)
-                    {
-                        CTok b = c_next(&sc);
-                        if (b.kind == CT_EOF)
-                        {
-                            break;
-                        }
-                        if (b.kind == CT_PUNCT && b.c == '{')
-                        {
-                            depth++;
-                        }
-                        else if (b.kind == CT_PUNCT && b.c == '}')
-                        {
-                            depth--;
-                        }
-                    }
-                    prev.kind = CT_PUNCT;
-                    prev.c = '}';
-                    continue;
-                }
-            }
-            if (t.c == '{')
-            {
-                brace++;
-            }
-            else if (t.c == '}')
-            {
-                brace = brace > 0 ? brace - 1 : 0;
-            }
-        }
-        if (d->n < C_MAX_TOKS)
-        {
-            d->t[d->n++] = t;
-        }
-        else
-        {
-            d->truncated = 1;
-        }
-        prev = t;
-    }
-    if (d->n)
-    {
-        c_scan_decl(ctx, d);
-    }
-    zfree(d);
 }
 
 // ---- Running the preprocessor ---------------------------------------------------------------
@@ -818,7 +220,145 @@ static int c_stat(const char *path, long long *mtime, long long *size)
     return 1;
 }
 
-// Loads the names of `path` if every file it lists is unchanged.
+// The declarations, after the files: a line a declaration, its strings separated by tabs
+// (C's text holds none: it is read with white space made single spaces), each "=" and the
+// string, or empty for none; then a line for each parameter (P) and field (F).
+//   D kind line variadic params_known complete \t name \t file \t type \t text \t aggregate
+
+static void c_cache_put(FILE *f, const char *s)
+{
+    fputc('\t', f);
+    if (s)
+    {
+        fputc('=', f);
+        for (; *s; s++)
+        {
+            fputc(*s == '\t' || *s == '\n' ? ' ' : *s, f);
+        }
+    }
+}
+
+static void c_cache_write_decls(ParserContext *ctx, FILE *f)
+{
+    unsigned n = 0;
+    const CDecl *const *all = c_decl_all(ctx, &n);
+    for (unsigned i = 0; i < n; i++)
+    {
+        const CDecl *d = all[i];
+        fprintf(f, "D %d %d %d %d %d", (int)d->kind, d->line, d->variadic, d->params_known,
+                d->complete);
+        c_cache_put(f, d->name);
+        c_cache_put(f, d->file);
+        c_cache_put(f, d->type);
+        c_cache_put(f, d->text);
+        c_cache_put(f, d->aggregate);
+        fputc('\n', f);
+        for (int k = 0; k < d->nparams; k++)
+        {
+            fputc('P', f);
+            c_cache_put(f, d->params[k].name);
+            c_cache_put(f, d->params[k].type);
+            fputc('\n', f);
+        }
+        for (int k = 0; k < d->nfields; k++)
+        {
+            fputc('F', f);
+            c_cache_put(f, d->fields[k].name);
+            c_cache_put(f, d->fields[k].type);
+            fputc('\n', f);
+        }
+    }
+}
+
+// The next tab-separated string of the line at *p (NULL if it was empty), ending it there.
+static char *c_cache_get(char **p)
+{
+    if (**p != '\t')
+    {
+        return NULL;
+    }
+    char *s = ++*p;
+    char *e = s;
+    while (*e && *e != '\t')
+    {
+        e++;
+    }
+    *p = e;
+    if (*s != '=')
+    {
+        return NULL;
+    }
+    char *out = xmalloc((size_t)(e - s));
+    memcpy(out, s + 1, (size_t)(e - s - 1));
+    out[e - s - 1] = 0;
+    return out;
+}
+
+static int c_cache_read_decls(ParserContext *ctx, char *p)
+{
+    CDecl d = {0};
+    int have = 0;
+    while (*p)
+    {
+        char *nl = strchr(p, '\n');
+        if (!nl)
+        {
+            return 0;
+        }
+        *nl = 0;
+        if (p[0] == 'D')
+        {
+            if (have)
+            {
+                c_decl_add(ctx, &d);
+                c_name_note(ctx, d.name, strlen(d.name));
+            }
+            memset(&d, 0, sizeof d);
+            int kind = 0, used = 0;
+            if (sscanf(p, "D %d %d %d %d %d%n", &kind, &d.line, &d.variadic, &d.params_known,
+                       &d.complete, &used) < 5)
+            {
+                return 0;
+            }
+            d.kind = (CDeclKind)kind;
+            char *q = p + used;
+            d.name = c_cache_get(&q);
+            d.file = c_cache_get(&q);
+            d.type = c_cache_get(&q);
+            d.text = c_cache_get(&q);
+            d.aggregate = c_cache_get(&q);
+            if (!d.name)
+            {
+                return 0;
+            }
+            have = 1;
+        }
+        else if ((p[0] == 'P' || p[0] == 'F') && have)
+        {
+            char *q = p + 1;
+            CDeclField fl;
+            fl.name = c_cache_get(&q);
+            fl.type = c_cache_get(&q);
+            CDeclField **list = p[0] == 'P' ? &d.params : &d.fields;
+            int *count = p[0] == 'P' ? &d.nparams : &d.nfields;
+            *list = xrealloc(*list, (size_t)(*count + 1) * sizeof(CDeclField));
+            (*list)[(*count)++] = fl;
+        }
+        else
+        {
+            return 0;
+        }
+        p = nl + 1;
+    }
+    if (have)
+    {
+        c_decl_add(ctx, &d);
+        c_name_note(ctx, d.name, strlen(d.name));
+    }
+    return 1;
+}
+
+// Loads the declarations of `path` if every file it lists is unchanged.
 static int c_cache_load(ParserContext *ctx, const char *path)
 {
     char *text = c_read_file(path);
@@ -826,7 +366,7 @@ static int c_cache_load(ParserContext *ctx, const char *path)
     {
         return 0;
     }
-    if (strncmp(text, "zc-c-names 2\n", 13) != 0)
+    if (strncmp(text, "zc-c-names 3\n", 13) != 0)
     {
         zfree(text);
         return 0;
@@ -860,15 +400,9 @@ static int c_cache_load(ParserContext *ctx, const char *path)
         zfree(text);
         return 0;
     }
-    for (p += 4; *p;)
-    {
-        char *nl = strchr(p, '\n');
-        size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        c_name_add(ctx, p, n);
-        p += n + (nl ? 1 : 0);
-    }
+    int ok = c_cache_read_decls(ctx, p + 4);
     zfree(text);
-    return 1;
+    return ok;
 }
 
 // Writes the names, and the files the preprocessed `text` came from, to `path`.
@@ -881,7 +415,7 @@ static void c_cache_save(ParserContext *ctx, const char *path, const char *text)
     {
         return;
     }
-    fputs("zc-c-names 2\n", f);
+    fputs("zc-c-names 3\n", f);
     // The line markers: `# 1 "/usr/include/stdio.h" 1 3 4`.
     char **seen = NULL;
     size_t nseen = 0;
@@ -918,13 +452,7 @@ static void c_cache_save(ParserContext *ctx, const char *path, const char *text)
         p = nl ? nl + 1 : NULL;
     }
     fputs("---\n", f);
-    for (unsigned i = 0; i < ctx->c_names_cap; i++)
-    {
-        if (ctx->c_names[i])
-        {
-            fprintf(f, "%s\n", ctx->c_names[i]);
-        }
-    }
+    c_cache_write_decls(ctx, f);
     int ok = fclose(f) == 0;
     if (ok)
     {
@@ -1002,7 +530,7 @@ void c_names_scan(ParserContext *ctx, ASTNode *root)
     {
         return;
     }
-    c_scan_text(ctx, text);
+    c_decls_extract(ctx, text);
     ctx->c_names_ready = ctx->c_names_count > 0;
     if (ctx->c_names_ready && have_dir)
     {
