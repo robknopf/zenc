@@ -287,6 +287,11 @@ impl Counter { fn get(self) -> int { return 1; } }
 impl Counter { fn get(self) -> int { return 2; } }
 fn main() { let c = Counter { value: 0 }; println "{c.get()}"; }' "Redefinition of method 'Counter::get'"
 
+# An enum variant's constructor has no default values; too few arguments to it
+# used to read the missing list and crash.
+diag_check "enum variant with too few arguments is a Zen C error" 'enum Packet { Wide(int, int), Empty }
+fn main() { let p = Packet::Wide(1); }' "Too few arguments"
+
 # --- Imported files: diagnostics and #line name the imported file -----------
 
 mkdir -p "$workdir/imported"
