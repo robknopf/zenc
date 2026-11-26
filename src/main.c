@@ -487,9 +487,10 @@ int main(int argc, char **argv)
             }
             if (i_path)
             {
-                // "-I" and the path as one flag: given as `-I dir`, the C compiler's flags got
-                // a bare -I, which took the next flag as its directory.
-                append_flag(cfg->gcc_flags, sizeof(cfg->gcc_flags), "-I", i_path);
+                // Only in the include paths: the C compiler is given each as an argument of
+                // its own (add_include_args). Copied into its flags too, as they were, `-I dir`
+                // left a bare -I there, which took the next flag as its directory, and a
+                // directory with a space in its name was split in two.
                 zvec_push_Str(&cfg->include_paths, xstrdup(i_path));
             }
         }
