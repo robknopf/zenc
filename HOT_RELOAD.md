@@ -319,6 +319,16 @@ stay reserved for a long while (the space goes round once before reusing them), 
 one faults, and in code called through `call()` that is a crash rolled back like any other
 [`stale_pointer_faults`].
 
+This is about C compiled into each version, not C in general. A linked C file (`//> link:`,
+`@link`) is compiled once and kept for the session, so its statics and pointers into them
+stay valid [`module_c_library_once`]; a library the host links (libwgf, say) is never
+reloaded at all. What is recompiled with every version, and so has a copy of its data per
+version, is a `raw` block's C and a linked C file that calls back into the module (it is
+compiled with the module [`module_c_calls_module`]). Each new version's copy also starts
+from its initial value: only Zen C globals and statics are carried. To keep such data, or a
+pointer into it, across reloads, move the C into a linked `.c` file that doesn't call the
+module, or make the variable a Zen C global.
+
 **Values that are not carried** when a type's layout changes, and are left at zero (or a
 global's initial value); each is in the "moved" line [`state_converted`]. Zero is a real
 value: for an enum, the variant numbered 0.
