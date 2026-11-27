@@ -840,6 +840,39 @@ static const char *c_decls_where(const CDecl *d, char *buf, size_t n)
     return buf;
 }
 
+// With the program's C read: a call to a function the Zen C declares (an `extern fn`, as a
+// binding's, or its own) whose parameter is a C enum gets that enum, or a plain int (as in
+// C): not another C enum, as for a function its C declares (below; task 34).
+static void c_decls_check_sig_enums(ParserContext *ctx, ASTNode *node, FuncSig *sig,
+                                    const char *name)
+{
+    int i = 0;
+    for (ASTNode *a = node->call.args; a && i < sig->total_args; a = a->next, i++)
+    {
+        if (!sig->arg_types || !sig->arg_types[i])
+        {
+            continue;
+        }
+        char *param_c = type_to_c_string(sig->arg_types[i], 0);
+        const char *want = param_c ? c_decl_enum_of(ctx, param_c) : NULL;
+        zfree(param_c);
+        if (!want)
+        {
+            continue;
+        }
+        const char *have_type = infer_type(ctx, a);
+        const char *have = have_type ? c_decl_enum_of(ctx, have_type) : NULL;
+        if (!have || strcmp(have, want) == 0)
+        {
+            continue;
+        }
+        char msg[MAX_SHORT_MSG_LEN];
+        snprintf(msg, sizeof(msg), "Argument %d of '%s' is a '%s', but the parameter is a '%s'",
+                 i + 1, name, have, want);
+        zerror_at(a->token, "%s", msg);
+    }
+}
+
 // With the program's C read: a call to a function its C declares (and the Zen C doesn't)
 // gets as many arguments as the function takes, and an argument of one C enum isn't passed
 // for a parameter of another (a plain int is, as in C).
@@ -851,6 +884,12 @@ void c_decls_check_call(ParserContext *ctx, ASTNode *node)
         return;
     }
     const char *name = callee->var_ref.name;
+    FuncSig *sig = find_func(ctx, name);
+    if (sig)
+    {
+        c_decls_check_sig_enums(ctx, node, sig, name);
+        return;
+    }
     const CDecl *d = c_decl_find(ctx, name);
     if (!d || d->kind != CD_FUNCTION || find_func(ctx, name) || find_struct_def(ctx, name) ||
         find_symbol_entry(ctx, name) || find_symbol_in_all(ctx, name) ||
@@ -1464,6 +1503,10 @@ skip_callee_gen:
         if (node->call.callee->kind == NODE_EXPR_VAR)
         {
             sig = find_func(ctx, node->call.callee->var_ref.name);
+            if (sig)
+            {
+                c_decls_check_call(ctx, node); // (its C enum parameters: an extern fn's)
+            }
             if (!sig && !find_struct_def(ctx, node->call.callee->var_ref.name))
             {
                 const char *name = node->call.callee->var_ref.name;

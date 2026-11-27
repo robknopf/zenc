@@ -535,6 +535,17 @@ else
     echo "$out" | head -6 | sed 's/^/      /'
 fi
 
+# (an extern fn's C enum parameters are checked as the header's are: a binding's)
+printf 'include "shapes.h"\nextern fn paint(c: color);\nfn main() {\n    paint(LARGE);\n    let k = SMALL;\n    paint(k);\n    paint(GREEN);\n    paint(1);\n}\n' > "$workdir/cdecls/own_enum.zc"
+out=$("$ZC" transpile "$workdir/cdecls/own_enum.zc" -o "$workdir/cdecls/own_enum.c" 2>&1)
+if [ "$(echo "$out" | grep -c "Argument 1 of 'paint' is a 'size_kind', but the parameter is a 'color'")" = 2 ] &&
+    echo "$out" | grep -q "own_enum.zc:4:"; then
+    check "an extern fn's C enum parameter takes that enum or an int, not another C enum" 1
+else
+    check "an extern fn's C enum parameter takes that enum or an int, not another C enum" 0
+    echo "$out" | head -6 | sed 's/^/      /'
+fi
+
 # --- Imported files: diagnostics and #line name the imported file -----------
 
 mkdir -p "$workdir/imported"
