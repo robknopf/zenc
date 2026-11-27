@@ -20,12 +20,12 @@ To update: download the release tarballs, check them, and copy the same files ov
 
 ## tinycc
 
-zc's own tcc. `make` and CMake (`cmake/ZcTcc.cmake`) build it the same way, from tinycc's
+zc's own tcc. `make`, CMake (`cmake/ZcTcc.cmake`) and `build.bat` build it the same way, from tinycc's
 sources without its `configure` and Makefile (they need a Unix shell; CMake builds it from
 PowerShell or cmd): a `config.h` (the target, and on Linux the multiarch triplet and the
 directory tcc looks in, found as `configure` finds them), `tccdefs.h` made into C (by
 `conftest.c` as `c2str`), `libtcc.c` compiled as one source, `tcc.c` linked with it, and
-`libtcc1.a` and the runtime's objects compiled by that tcc. Keep the two in step.
+`libtcc1.a` and the runtime's objects compiled by that tcc. Keep the three in step.
 
 They gather libtcc, tcc and tcc's runtime in `tcc/`, beside zc (make's: in the source tree;
 CMake's: in its build directory; installed: SHAREDIR/tcc), which `zc --tcc-dir` names. The

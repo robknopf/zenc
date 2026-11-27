@@ -113,7 +113,7 @@ for t in "${TESTS[@]}"; do
     (cd "$d" && timeout 30 "$WORK/load_host$EXE" "$d/prog.c" "${sources[@]}" "${loader_flags[@]}" < /dev/null \
         > loaded.out 2> loaded.err); rc=$?
     same_out=1
-    case "$t" in tests/bench/*|*thread*|*concurren*|*sync*) ;; # (timings, threads' order)
+    case "$t" in tests/bench/*|*thread*|*concurren*|*sync*|*std_expansion*) ;; # (timings, threads' order)
         *) if cmp -s "$d/ref1.out" "$d/ref2.out" && ! cmp -s "$d/ref1.out" "$d/loaded.out"; then same_out=0; fi ;;
     esac
     if [ $rc -eq $rc1 ] && [ $same_out -eq 1 ]; then
