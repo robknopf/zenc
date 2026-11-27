@@ -1,0 +1,14 @@
+// EXPECT: FAIL
+// compiler/diagnostics: a number for a struct parameter (by value) is a zc error (task 35).
+struct Point {
+    x: f32;
+    y: f32;
+}
+
+fn length(p: Point) -> f32 {
+    return p.x + p.y;
+}
+
+fn main() {
+    println "{length(3)}";
+}

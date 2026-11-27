@@ -1,0 +1,16 @@
+// EXPECT: FAIL
+// compiler/diagnostics: a struct for a number in a typed `let` is a zc error (a struct on
+// either side used to pass, for structs whose names are spelt two ways; task 35).
+struct Point {
+    x: f32;
+    y: f32;
+}
+
+fn origin() -> Point {
+    return Point { x: 0.0, y: 0.0 };
+}
+
+fn main() {
+    let d: f32 = origin();
+    println "{d}";
+}

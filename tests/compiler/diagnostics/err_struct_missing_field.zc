@@ -1,0 +1,12 @@
+// EXPECT: FAIL
+// compiler/diagnostics: a field a Zen C struct doesn't have is a zc error in a build, with the
+// closest one ("Did you mean 'y'?"), as for a C struct (task 26); not only in `zc check`.
+struct Point {
+    x: f32;
+    y: f32;
+}
+
+fn main() {
+    let p = Point { x: 1.0, y: 2.0 };
+    println "{p.yy}";
+}

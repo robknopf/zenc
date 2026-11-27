@@ -624,7 +624,9 @@ ASTNode *parse_var_decl(ParserContext *ctx, Lexer *l, int is_export)
                              (is_integer_type(t) || is_float_type(t));
             int is_pointer = (type_obj->kind == TYPE_POINTER) || (t->kind == TYPE_POINTER);
             int is_function = (type_obj->kind == TYPE_FUNCTION) || (t->kind == TYPE_FUNCTION);
-            int is_struct = (type_obj->kind == TYPE_STRUCT) || (t->kind == TYPE_STRUCT);
+            // (both structs, of names spelt differently; not a struct for a number: task 35)
+            int is_struct = ((type_obj->kind == TYPE_STRUCT) || (t->kind == TYPE_STRUCT)) &&
+                            !value_kinds_clash(ctx, type_obj, t);
             int is_array = (type_obj->kind == TYPE_ARRAY) || (t->kind == TYPE_ARRAY);
             int is_opaque = (type_obj->kind == TYPE_ALIAS && type_obj->alias.is_opaque_alias) ||
                             (t->kind == TYPE_ALIAS && t->alias.is_opaque_alias);

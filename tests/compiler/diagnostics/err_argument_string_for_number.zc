@@ -1,0 +1,10 @@
+// EXPECT: FAIL
+// compiler/diagnostics: a string for a number parameter is a zc error at the .zc line (a
+// build let it through to the C compiler; task 35). An int for a float still converts.
+fn half(x: f32) -> f32 {
+    return x / 2.0;
+}
+
+fn main() {
+    println "{half(\"4\")}";
+}

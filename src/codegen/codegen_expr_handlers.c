@@ -935,9 +935,85 @@ void c_decls_check_call(ParserContext *ctx, ASTNode *node)
 
 // With the program's C read: `target.field` where target is a C struct or union whose
 // fields are known names one of them.
+// `target.field` where target is a struct the Zen C defines, all of whose fields it knows,
+// names one of them, or a method (a build reported it only in the C, or not at all: task 26).
+// Not a generic's template, a struct with `use`d structs or a parent (fields from elsewhere),
+// a @crepr one (a C struct, of which it lists some fields), or one with an unnamed member.
+static void zen_check_member(ParserContext *ctx, ASTNode *node, ASTNode *def, const char *sname)
+{
+    const char *field = node->member.field;
+    if (isdigit((unsigned char)field[0]))
+    {
+        return; // a tuple's element (t.0), which codegen names itself
+    }
+    if (def->kind != NODE_STRUCT || def->strct.is_template || def->strct.used_struct_count ||
+        def->strct.parent || def->strct.is_incomplete || def->strct.is_opaque ||
+        def->strct.crepr_c_type)
+    {
+        return;
+    }
+    const char *best = NULL;
+    int best_d = 3;
+    for (ASTNode *f = def->strct.fields; f; f = f->next)
+    {
+        if (!f->field.name)
+        {
+            return;
+        }
+        if (strcmp(f->field.name, field) == 0)
+        {
+            return;
+        }
+        int dist = levenshtein(field, f->field.name);
+        if (dist < best_d)
+        {
+            best_d = dist;
+            best = f->field.name;
+        }
+    }
+    // (a method: Struct__name, or a trait's, Struct__Trait__name)
+    char buf[MAX_ERROR_MSG_LEN];
+    snprintf(buf, sizeof(buf), "%s__%s", sname, field);
+    char *mangled = merge_underscores(buf);
+    int method = find_func(ctx, mangled) != NULL;
+    zfree(mangled);
+    for (StructRef *ref = ctx->parsed_impls_list; ref && !method; ref = ref->next)
+    {
+        if (ref->node && ref->node->kind == NODE_IMPL_TRAIT && ref->node->impl_trait.target_type &&
+            strcmp(ref->node->impl_trait.target_type, sname) == 0)
+        {
+            snprintf(buf, sizeof(buf), "%s__%s__%s", sname, ref->node->impl_trait.trait_name,
+                     field);
+            char *trait_mangled = merge_underscores(buf);
+            method = find_func(ctx, trait_mangled) != NULL;
+            zfree(trait_mangled);
+        }
+    }
+    if (method)
+    {
+        return;
+    }
+    char msg[MAX_TYPE_NAME_LEN + 512], help[MAX_SHORT_MSG_LEN];
+    snprintf(msg, sizeof(msg), "'%s' has no field '%.255s'", sname, field);
+    if (best)
+    {
+        snprintf(help, sizeof(help), "Did you mean '%s'?", best);
+    }
+    else
+    {
+        size_t k = (size_t)snprintf(help, sizeof(help), "Its fields:");
+        for (ASTNode *f = def->strct.fields; f && k < sizeof(help) - 1; f = f->next)
+        {
+            k += (size_t)snprintf(help + k, sizeof(help) - k, " %s", f->field.name);
+        }
+    }
+    const char *hints[] = {help, NULL};
+    zerror_with_hints(node->token, msg, hints);
+}
+
 void c_decls_check_member(ParserContext *ctx, ASTNode *node, const char *target_type)
 {
-    if (!ctx->c_names_ready || ctx->config->mode_lsp || !target_type || !node->member.field)
+    if (ctx->config->mode_lsp || !target_type || !node->member.field)
     {
         return;
     }
@@ -948,9 +1024,20 @@ void c_decls_check_member(ParserContext *ctx, ASTNode *node, const char *target_
     {
         *star = 0;
     }
-    if (find_struct_def(ctx, base))
+    size_t blen = strlen(base);
+    while (blen && base[blen - 1] == ' ')
     {
-        return; // the Zen C's own
+        base[--blen] = 0;
+    }
+    ASTNode *zen_def = find_struct_def(ctx, base);
+    if (zen_def)
+    {
+        zen_check_member(ctx, node, zen_def, base); // the Zen C's own
+        return;
+    }
+    if (!ctx->c_names_ready)
+    {
+        return;
     }
     const CDecl *agg = c_decl_aggregate(ctx, base);
     const char *field = node->member.field;

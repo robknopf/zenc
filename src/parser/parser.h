@@ -1032,6 +1032,7 @@ ASTNode *transform_to_trait_object(ParserContext *ctx, const char *target_trait,
 int check_impl(ParserContext *ctx, const char *trait_name, const char *type_name);
 int check_opaque_alias_compat(ParserContext *ctx, Type *a, Type *b);
 int opaque_zero_converts(Type *to, ASTNode *expr);
+int value_kinds_clash(ParserContext *ctx, Type *expected, Type *got);
 /**
  * Rejects an argument whose type cannot stand for the parameter's (or the function's return type,
  * for a return), where the C compiler would not notice or would only report it in the generated

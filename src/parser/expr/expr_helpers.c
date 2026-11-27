@@ -422,6 +422,43 @@ static void check_generic_instance_argument(ParserContext *ctx, Type *expected, 
     return;
 }
 
+// What kind of value a type is, for what can't stand for what in a build (task 35): a number
+// (an integer, a float, a bool, a char), a string, a struct by value; 0 for anything else
+// (a pointer, an enum, an alias of one of those, a type not known yet), which isn't checked
+// here. Through aliases, but not opaque ones (they're checked as themselves).
+static int value_kind(ParserContext *ctx, Type *t)
+{
+    for (int depth = 0; t && t->kind == TYPE_ALIAS && !t->alias.is_opaque_alias && depth < 16;
+         depth++)
+    {
+        t = t->inner;
+    }
+    if (!t)
+    {
+        return 0;
+    }
+    if (is_integer_type(t) || is_float_type(t) || t->kind == TYPE_BOOL || t->kind == TYPE_CHAR)
+    {
+        return 1;
+    }
+    if (t->kind == TYPE_STRING)
+    {
+        return 2;
+    }
+    // (a struct the Zen C defines: not a generic's parameter, T, nor a C struct, whose
+    // checks are the C declarations')
+    return t->kind == TYPE_STRUCT && t->name && find_struct_def(ctx, t->name) ? 3 : 0;
+}
+
+// A string or a struct for a number, a number or a string for a struct: what no conversion
+// makes one of the other, which C reports only in the generated code (or not at all, for a
+// string's pointer as an integer).
+int value_kinds_clash(ParserContext *ctx, Type *expected, Type *got)
+{
+    int e = value_kind(ctx, expected), g = value_kind(ctx, got);
+    return (e == 1 && (g == 2 || g == 3)) || (e == 3 && (g == 1 || g == 2));
+}
+
 void check_argument_type(ParserContext *ctx, Type *expected, ASTNode *arg)
 {
     Type *got = arg ? arg->type_info : NULL;
@@ -430,6 +467,13 @@ void check_argument_type(ParserContext *ctx, Type *expected, ASTNode *arg)
         return;
     }
     check_generic_instance_argument(ctx, expected, arg);
+    if (value_kinds_clash(ctx, expected, got))
+    {
+        char *want = type_to_string(expected);
+        char *have = type_to_string(got);
+        zpanic_at(arg->token, "Type validation failed. Expected '%s', but got '%s'", want, have);
+        return;
+    }
     int expected_opaque = expected->kind == TYPE_ALIAS && expected->alias.is_opaque_alias;
     int got_opaque = got->kind == TYPE_ALIAS && got->alias.is_opaque_alias;
     if (!expected_opaque && !got_opaque)
