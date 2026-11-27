@@ -298,15 +298,26 @@ ZALLOC_API void *zarena_alloc_align(zarena *a, size_t size, size_t align)
         }
     }
 
-    if (a->head && a->head->next)
+    // Every block after head is empty (reset and restore empty them; a new block goes right
+    // after head). Use the first that fits, moved up to follow head, so a reset arena reuses
+    // its blocks: looking only at the next one, a reused arena (the fuzz harness, the LSP)
+    // added a block whenever an input needed a bigger one there, and never freed any.
+    zarena_block *prev = a->head;
+    zarena_block *next_blk = a->head ? a->head->next : NULL;
+    while (next_blk)
     {
-        zarena_block *next_blk = a->head->next;
         uintptr_t base = (uintptr_t)next_blk->data;
         uintptr_t start = _zarena_align_ptr(base, align);
         size_t padding = start - base;
 
         if (size + padding + ZARENA_RZ <= next_blk->capacity)
         {
+            if (prev != a->head)
+            {
+                prev->next = next_blk->next;
+                next_blk->next = a->head->next;
+                a->head->next = next_blk;
+            }
             a->head = next_blk;
             a->head->used = size + padding + ZARENA_RZ;
             a->total_alloc += size;
@@ -317,6 +328,8 @@ ZALLOC_API void *zarena_alloc_align(zarena *a, size_t size, size_t align)
 #endif
             return p;
         }
+        prev = next_blk;
+        next_blk = next_blk->next;
     }
 
     size_t next_cap = (a->head ? a->head->capacity * 2 : ZARENA_DEFAULT_BLOCK_SIZE);

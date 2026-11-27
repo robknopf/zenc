@@ -403,25 +403,44 @@ char *load_file(const char *fn, const char *relative_to, CompilerConfig *cfg)
 // ** Global Memory Arena **
 zarena g_arena = {0};
 
+// Appends `prefix` and `val` (either may be NULL) as one flag, after a space, cut to what
+// fits (with a warning) and never past `max_size`. (Once the buffer was exactly full, the
+// space it didn't add was still counted, and the rest was appended unbounded.)
 void append_flag(char *dest, size_t max_size, const char *prefix, const char *val)
 {
     size_t current_len = strlen(dest);
-
+    if (current_len + 1 >= max_size)
+    {
+        zwarn("Build flags exceed %zu bytes; '%s%s' left out", max_size - 1, prefix ? prefix : "",
+              val ? val : "");
+        return;
+    }
+    size_t room = max_size - 1 - current_len;
+    char *end = dest + current_len;
+    int cut = 0;
     if (current_len > 0 && dest[current_len - 1] != ' ')
     {
-        strncat(dest, " ", max_size - current_len - 1);
-        current_len++;
+        *end++ = ' ';
+        room--;
     }
-
-    if (prefix)
+    const char *parts[2] = {prefix, val};
+    for (int k = 0; k < 2; k++)
     {
-        strncat(dest, prefix, max_size - current_len - 1);
-        current_len = strlen(dest);
+        size_t len = parts[k] ? strlen(parts[k]) : 0;
+        if (len > room)
+        {
+            len = room;
+            cut = 1;
+        }
+        memcpy(end, parts[k] ? parts[k] : "", len);
+        end += len;
+        room -= len;
     }
-
-    if (val)
+    *end = '\0';
+    if (cut)
     {
-        strncat(dest, val, max_size - current_len - 1);
+        zwarn("Build flags exceed %zu bytes; '%s%s' cut short", max_size - 1, prefix ? prefix : "",
+              val ? val : "");
     }
 }
 

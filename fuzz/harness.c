@@ -62,6 +62,10 @@ __attribute__((used)) int LLVMFuzzerTestOneInput(const uint8_t *data, size_t siz
 
     compiler.error_count = 0;
     compiler.warning_count = 0;
+    // Each input's build directives start afresh (they accumulated, and overflowed the
+    // buffers into the diagnostic consumer's pointer after a few thousand inputs).
+    compiler.link_flags[0] = '\0';
+    compiler.cflags[0] = '\0';
 
     char *src = zarena_alloc_zero(&g_arena, size + 1);
     if (!src)
