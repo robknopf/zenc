@@ -1,0 +1,11 @@
+// Version 2. A C file the module links, which calls the module back (module_value): it can't
+// be compiled once on its own, so it's compiled with each version (std/reload.zc's
+// zr_libs_prepare), and runs that version's module_value.
+@link("twice.c")
+extern fn lib_twice() -> int;
+@link_name("module_value")
+fn module_value() -> int { return 21; }
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    println "version 2: {lib_twice()}";
+}

@@ -94,15 +94,15 @@ raw {
         return 0;
     }
 
-    // Files beside the C file named after it (module.c.*): what a version left on disk.
-    // (module.c.build is zc's, with the C: what else to compile the module with.)
+    // Files beside the C file named after it (module.c.*): what a version, or a library it
+    // links, left on disk.
     static int files_left(const char *dir_path)
     {
         DIR *d = opendir(dir_path);
         int n = 0;
         struct dirent *e;
         while (d && (e = readdir(d)) != NULL)
-            if (!strncmp(e->d_name, "module.c.", 9) && strcmp(e->d_name, "module.c.build") != 0) n++;
+            if (!strncmp(e->d_name, "module.c.", 9)) n++;
         if (d) closedir(d);
         return n;
     }

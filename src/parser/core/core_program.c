@@ -51,12 +51,25 @@ static void check_global_initializers(ASTNode *decls)
 //
 // The joined path is made on the heap, not in a buffer of this frame's caller:
 // parse_top_level_nodes is on the stack once for every level of nested imports.
+// realpath() of a file that's there, else NULL. (Windows' realpath, _fullpath, makes a path
+// absolute whether or not the file is there.)
+static char *realpath_existing(const char *path)
+{
+    char *resolved = realpath(path, NULL);
+    if (resolved && access(resolved, F_OK) != 0)
+    {
+        libc_free(resolved);
+        resolved = NULL;
+    }
+    return resolved;
+}
+
 static char *realpath_joined(const char *dir, const char *path)
 {
     size_t len = strlen(dir) + strlen(path) + 2;
     char *joined = xmalloc(len);
     snprintf(joined, len, "%s/%s", dir, path);
-    char *resolved = realpath(joined, NULL);
+    char *resolved = realpath_existing(joined);
     zfree(joined);
     return resolved;
 }
@@ -136,7 +149,24 @@ static ASTNode *parse_top_level_nodes(ParserContext *ctx, Lexer *l)
         {
             // Push to config.c_files immediately (module AST may be freed later)
             const char *path = attrs.link_path;
-            char *resolved = realpath(path, NULL);
+            char *resolved = NULL;
+            // Beside the file that links it first, as C's #include "..." (so a module and
+            // its .c can be built, and reloaded, from anywhere); then the current directory.
+            if (ctx->current_filename && path[0] != '/' && !(path[0] && path[1] == ':'))
+            {
+                char *dir = xstrdup(ctx->current_filename);
+                char *sep = z_path_last_sep(dir);
+                if (sep)
+                {
+                    *sep = '\0';
+                    resolved = realpath_joined(dir, path);
+                }
+                zfree(dir);
+            }
+            if (!resolved)
+            {
+                resolved = realpath_existing(path);
+            }
             if (!resolved && ctx->config->root_path)
             {
                 // The path may be relative to the workspace/stdlib root

@@ -586,26 +586,29 @@ void write_reload_build_args(ZenCompiler *compiler, const char *path)
     {
         const char *a = i < list.count ? list.args[i] : cfg->c_files.data[i - list.count];
         // (include directories, defines, the libraries it links and C files: what tcc and
-        // the Reloader need; -iquote's directory too)
+        // the Reloader need; -iquote's directory too. Not one that would end the comment.)
         int quote_dir = i > 0 && i < list.count && strcmp(list.args[i - 1], "-iquote") == 0;
-        if (i < list.count && strncmp(a, "-I", 2) != 0 && strncmp(a, "-D", 2) != 0 &&
-            strncmp(a, "-l", 2) != 0 && !quote_dir)
+        if ((i < list.count && strncmp(a, "-I", 2) != 0 && strncmp(a, "-D", 2) != 0 &&
+             strncmp(a, "-l", 2) != 0 && !quote_dir) ||
+            strstr(a, "*/"))
         {
             continue;
         }
-        if (!f && !(f = fopen(path, "w")))
+        if (!f)
         {
-            break;
+            if (!(f = fopen(path, "a")))
+            {
+                break;
+            }
+            fprintf(f, "\n/* zc --reload: what else the module is compiled with (std/reload.zc "
+                       "reads it)\n");
         }
-        fprintf(f, "%s%s\n", quote_dir ? "-I" : "", a);
+        fprintf(f, "zc-reload %s%s\n", quote_dir ? "-I" : "", a);
     }
     if (f)
     {
+        fprintf(f, "*/\n");
         fclose(f);
-    }
-    else
-    {
-        remove(path);
     }
     arg_list_free(&list);
 }

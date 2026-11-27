@@ -400,6 +400,17 @@ raw {
         size_t copied_bytes;
         unsigned char **kept_data;
         unsigned nkept_data;
+        // The C files the module links (@link("x.c"): std/regex.zc's TRE), each compiled once,
+        // into an image of its own that every version's names go to, kept (zr_libs_prepare).
+        // Again when the file changes (the old image stays: versions still running use it).
+        struct ZrLib
+        {
+            char *path;
+            long long mtime;
+            void *im;   // its ZlImage; NULL if it can't be one (then compiled with the module)
+            int failed; // (tried, and compiled with the module)
+        } *libs;
+        unsigned nlibs;
     } ZrReloader;
 
     static char *zr_strdup(const char *s)
@@ -3387,56 +3398,222 @@ raw {
     static int zr_compile_memory(ZrReloader *r, ZrVersion *v, int own);
     #endif
 
-    // What zc would give the C compiler besides the module's C file, which zc --reload
-    // writes in <c_file>.build, one a line: its include directories (-I), defines (-D), and
-    // the C files the module links (@link("x.c"), as std/regex.zc's TRE), compiled with it
-    // into the same version. -1 if one of those doesn't compile.
-    // Pass 0 applies the options, pass 1 adds the C files (after the module's own).
-    static int zr_add_build_args(ZrReloader *r, TCCState *s, int pass)
+    // What zc would give the C compiler besides the module's C file, which zc --reload writes
+    // at the C's end, in a comment, one a line after `zc-reload `: its include directories
+    // (-I), defines (-D), the libraries it links (-l) and the C files it links (@link("x.c"),
+    // as std/regex.zc's TRE). Each line in turn to `each`, until it returns non-zero (that).
+    static int zr_build_facts(const char *c_file, int (*each)(void *ctx, const char *line), void *ctx)
     {
-        size_t len = strlen(r->c_file) + 7;
-        char *path = (char *)malloc(len);
-        if (!path) return -1;
-        snprintf(path, len, "%s.build", r->c_file);
-        FILE *f = fopen(path, "r");
-        free(path);
+        FILE *f = fopen(c_file, "rb");
         if (!f) return 0;
-        char line[4096];
-        int rc = 0;
+        // (the comment is the C's last lines: read from near the end)
+        long size = 0;
+        if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
+        long from = size > 65536 ? size - 65536 : 0;
+        fseek(f, from, SEEK_SET);
+        size_t n = (size_t)(size - from);
+        char *text = (char *)malloc(n + 1);
+        if (!text || fread(text, 1, n, f) != n)
         {
-            while (rc == 0 && fgets(line, sizeof line, f))
-            {
-                size_t n = strlen(line);
-                while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
-                if (!n) continue;
-                if (!strncmp(line, "-l", 2))
-                {
-                    // A library it links: loaded, for its names (ws2_32 on Windows, which a
-                    // host that doesn't use the network hasn't)
-                    if (pass) continue;
-    #ifdef ZR_LOADER
-                    zl_load_library(line + 2);
-    #else
-                    tcc_add_library(s, line + 2);
-    #endif
-                }
-                else if (!strncmp(line, "-I", 2) || !strncmp(line, "-D", 2))
-                {
-                    if (pass) continue;
-                    if (line[1] == 'I') tcc_add_include_path(s, line + 2);
-                    else
-                    {
-                        char *eq = strchr(line + 2, '=');
-                        if (eq) *eq = 0;
-                        tcc_define_symbol(s, line + 2, eq ? eq + 1 : "1");
-                    }
-                }
-                else if (pass && tcc_add_file(s, line) == -1)
-                    rc = -1;
-            }
+            free(text);
+            fclose(f);
+            return 0;
         }
         fclose(f);
+        text[n] = 0;
+        int rc = 0;
+        char *at = NULL;
+        for (char *q = strstr(text, "/* zc --reload: "); q; q = strstr(q + 1, "/* zc --reload: ")) at = q;
+        for (char *line = at ? strchr(at, '\n') : NULL; line && rc == 0;)
+        {
+            line++;
+            char *eol = strchr(line, '\n');
+            if (eol) *eol = 0;
+            size_t k = strlen(line);
+            while (k && line[k - 1] == '\r') line[--k] = 0;
+            if (!strncmp(line, "*/", 2)) break;
+            if (!strncmp(line, "zc-reload ", 10)) rc = each(ctx, line + 10);
+            line = eol;
+        }
+        free(text);
         return rc;
+    }
+
+    #ifdef ZR_LOADER
+    // A library the version links, of zr_libs_prepare's: the image of path, if there is one.
+    static struct ZrLib *zr_lib_find(ZrReloader *r, const char *path)
+    {
+        struct stat st;
+        long long mtime = stat(path, &st) == 0 ? (long long)st.st_mtime : 0;
+        for (unsigned i = r->nlibs; i-- > 0;)
+            if (!strcmp(r->libs[i].path, path) && r->libs[i].mtime == mtime) return &r->libs[i];
+        return NULL;
+    }
+
+    // (zr_libs_prepare's: the options to compile a library with, as the module's)
+    typedef struct
+    {
+        ZrReloader *r;
+        TCCState *s;        // compiling a library: its options; else NULL
+        int compiled, failed;
+    } ZrLibsCtx;
+
+    static int zr_lib_option(void *ctx, const char *line)
+    {
+        ZrLibsCtx *c = (ZrLibsCtx *)ctx;
+        if (!strncmp(line, "-I", 2)) tcc_add_include_path(c->s, line + 2);
+        else if (!strncmp(line, "-D", 2))
+        {
+            char def[4096];
+            snprintf(def, sizeof def, "%s", line + 2);
+            char *eq = strchr(def, '=');
+            if (eq) *eq = 0;
+            tcc_define_symbol(c->s, def, eq ? eq + 1 : "1");
+        }
+        return 0;
+    }
+
+    static int zr_lib_prepare_one(void *ctx, const char *line)
+    {
+        ZrLibsCtx *c = (ZrLibsCtx *)ctx;
+        ZrReloader *r = c->r;
+        if (line[0] == '-') return 0;
+        if (zr_lib_find(r, line)) return 0;
+        struct ZrLib *grown = (struct ZrLib *)realloc(r->libs, (r->nlibs + 1) * sizeof(*grown));
+        if (!grown) return 0;
+        r->libs = grown;
+        struct ZrLib *lib = &r->libs[r->nlibs];
+        memset(lib, 0, sizeof(*lib));
+        struct stat st;
+        lib->mtime = stat(line, &st) == 0 ? (long long)st.st_mtime : 0;
+        lib->path = zr_strdup(line);
+        if (!lib->path) return 0;
+        r->nlibs++;
+        // Compiled alone, as the module is (its options, thread-locals as in the module, DWARF).
+        TCCState *s = zr_tcc_new();
+        if (!s)
+        {
+            lib->failed = 1;
+            return 0;
+        }
+        tcc_set_error_func(s, NULL, zr_on_tcc_quiet);
+        tcc_set_options(s, "-gdwarf");
+        tcc_set_output_type(s, TCC_OUTPUT_OBJ);
+        for (int i = 0; i < r->include_count; i++) tcc_add_include_path(s, r->includes[i]);
+        tcc_define_symbol(s, "_Thread_local", "");
+        tcc_define_symbol(s, "__thread", "");
+        ZrLibsCtx opt = {r, s, 0, 0};
+        zr_build_facts(r->c_file, zr_lib_option, &opt);
+        unsigned char *img = NULL;
+        size_t img_size = 0;
+        size_t len = strlen(r->c_file) + 64;
+        char *obj = (char *)malloc(len);
+        if (obj && tcc_add_file(s, line) == 0)
+        {
+            snprintf(obj, len, "%s.lib%u.%d.o", r->c_file, r->nlibs, (int)getpid());
+            if (tcc_output_file(s, obj) == 0) img = zl_read_file(obj, &img_size);
+            remove(obj);
+        }
+        free(obj);
+        tcc_delete(s);
+        char err[512];
+        int fault = 0;
+        // (its names: the host's; one it needs from the module, which a library alone can't
+        // have, and it's compiled with the module instead)
+        ZlImage *im = img ? zl_load(img, img_size, NULL, NULL, 0, &fault, err, sizeof err) : NULL;
+        if (!im)
+        {
+            lib->failed = 1;
+            if (r->verbose)
+                fprintf(stderr, "reload: %s is compiled with the module (alone: %s)\n", line,
+                        img ? err : "it doesn't compile");
+            return 0;
+        }
+        zl_run_init(im);
+        lib->im = im;
+        c->compiled++;
+        if (r->verbose) fprintf(stderr, "reload: %s compiled, once, for every version\n", line);
+        return 0;
+    }
+
+    // Before a version is compiled: each C file the module links, compiled once into an image
+    // of its own (kept: never released), that every version's names go to (zr_resolve_libs).
+    // A version compiles none of them again, so a library's own state (its globals) lasts
+    // across reloads too. Compiled again only when the file changes.
+    static void zr_libs_prepare(ZrReloader *r)
+    {
+        ZrLibsCtx c = {r, NULL, 0, 0};
+        zr_build_facts(r->c_file, zr_lib_prepare_one, &c);
+    }
+
+    // A name a version uses and doesn't define, in a library's image (zr_libs_prepare).
+    static void *zr_resolve_libs(void *ctx, const char *name)
+    {
+        ZrReloader *r = (ZrReloader *)ctx;
+        for (unsigned i = r->nlibs; i-- > 0;)
+        {
+            void *p = r->libs[i].im ? zl_sym((ZlImage *)r->libs[i].im, name) : NULL;
+            if (p) return p;
+        }
+        return NULL;
+    }
+    #endif
+
+    // (zr_add_build_args': what's given to tcc in each pass)
+    typedef struct
+    {
+        ZrReloader *r;
+        TCCState *s;
+        int pass;
+    } ZrBuildArgs;
+
+    static int zr_add_build_arg(void *ctx, const char *line)
+    {
+        ZrBuildArgs *c = (ZrBuildArgs *)ctx;
+        if (!strncmp(line, "-l", 2))
+        {
+            // A library it links: loaded, for its names (ws2_32 on Windows, which a host that
+            // doesn't use the network hasn't)
+            if (c->pass) return 0;
+    #ifdef ZR_LOADER
+            zl_load_library(line + 2);
+    #else
+            tcc_add_library(c->s, line + 2);
+    #endif
+        }
+        else if (!strncmp(line, "-I", 2) || !strncmp(line, "-D", 2))
+        {
+            if (c->pass) return 0;
+            if (line[1] == 'I') tcc_add_include_path(c->s, line + 2);
+            else
+            {
+                char def[4096];
+                snprintf(def, sizeof def, "%s", line + 2);
+                char *eq = strchr(def, '=');
+                if (eq) *eq = 0;
+                tcc_define_symbol(c->s, def, eq ? eq + 1 : "1");
+            }
+        }
+        else if (c->pass)
+        {
+    #ifdef ZR_LOADER
+            // (one compiled once for every version: zr_libs_prepare)
+            struct ZrLib *lib = zr_lib_find(c->r, line);
+            if (lib && lib->im) return 0;
+    #endif
+            if (tcc_add_file(c->s, line) == -1) return -1;
+        }
+        return 0;
+    }
+
+    // What zc would give the C compiler besides the module's C file (zr_build_facts), to the
+    // version's tcc. -1 if a C file compiled with it doesn't compile. Pass 0 applies the
+    // options, pass 1 adds the C files (after the module's own) that aren't images of their
+    // own (zr_libs_prepare).
+    static int zr_add_build_args(ZrReloader *r, TCCState *s, int pass)
+    {
+        ZrBuildArgs c = {r, s, pass};
+        return zr_build_facts(r->c_file, zr_add_build_arg, &c);
     }
 
     #ifdef ZR_LOADER
@@ -3445,13 +3622,14 @@ raw {
     {
         ZrReloader *r = (ZrReloader *)ctx;
         const ZcMfGlobal *g = zr_global_find(r->store, r->nstore, name);
-        return g ? g->addr : NULL;
+        return g ? g->addr : zr_resolve_libs(ctx, name);
     }
     #endif
 
     static int zr_compile(ZrReloader *r, ZrVersion *v, int own)
     {
     #ifdef ZR_LOADER
+        zr_libs_prepare(r);
         memset(v, 0, sizeof(*v));
         v->tcc = zr_tcc_new();
         if (!v->tcc) return -1;
@@ -3486,7 +3664,7 @@ raw {
         char err[512] = "the object file couldn't be written or read";
         int module_fault = 0;
         if (img)
-            v->im = zl_load(img, img_size, own ? NULL : zr_resolve_store, r, own, &module_fault,
+            v->im = zl_load(img, img_size, own ? zr_resolve_libs : zr_resolve_store, r, own, &module_fault,
                             err, sizeof err);
         if (!v->im && module_fault)
         {
@@ -5539,6 +5717,14 @@ raw {
         free(r->fs_by_name);
         free(r->fs_by_addr);
         free(r->state_before);
+        for (unsigned i = 0; i < r->nlibs; i++)
+        {
+    #ifdef ZR_LOADER
+            if (r->libs[i].im) zl_free((ZlImage *)r->libs[i].im);
+    #endif
+            free(r->libs[i].path);
+        }
+        free(r->libs);
         for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
         for (int i = 0; i < r->required_count; i++) free(r->required[i]);
         for (int i = 0; i < r->fetched_count; i++) free(r->fetched[i]);

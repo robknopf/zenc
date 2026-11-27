@@ -1,0 +1,11 @@
+// Version 1. A C file the module links (@link("counter.c")) is compiled once, into an image of
+// its own that every version uses (std/reload.zc's zr_libs_prepare): not again with each
+// version. So its own state lasts across reloads: its counter, 1 in version 1, is 2 in
+// version 2 (compiled with each version, it would start again at 1).
+@link("counter.c")
+extern fn lib_count() -> int;
+@link_name("reload_step")
+fn reload_step(_state: void*) {
+    let n = lib_count();
+    println "version 1: {n}";
+}

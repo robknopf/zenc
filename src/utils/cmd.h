@@ -72,7 +72,7 @@ ZEN_FORMAT_PRINTF(2, 3) void arg_list_add_fmt(ArgList *list, const char *fmt, ..
  * Reloader (std/reload.zc) to compile the module the same way. Removes `path` if there's
  * nothing to say.
  */
-void write_reload_build_args(ZenCompiler *compiler, const char *path);
+void write_reload_build_args(ZenCompiler *compiler, const char *c_file); // (appends to it)
 
 /**
  * @brief Free the argument list

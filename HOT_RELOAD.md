@@ -63,6 +63,14 @@ fn main() -> int {
   (x86-64 Linux and Windows); elsewhere, where libtcc loads them, 0.9.27 works.
 - The module's code can call the host's functions and any library linked into the host
   if the host exports its symbols (link it with `-rdynamic`).
+- A C file the module links (`@link("x.c")`, beside the `.zc` that says so, as
+  `std/regex.zc` links TRE) is compiled once, into an image of its own that every version
+  uses, kept for the session: its own state (its globals) lasts across reloads
+  [`module_c_library_once`], and it's compiled again when it changes. One that calls the
+  module back can't stand alone; it's compiled with each version [`module_c_calls_module`].
+  What else the module is compiled with (include directories, defines, the libraries and C
+  files it links) `zc transpile --reload` writes at the end of the C, in a comment
+  [`module_c_sources`].
 - Call `poll()` only when none of the module's code is running: between frames, between
   requests.
 - Call the module through `call(f)` or `call_with(f, arg)`, so a crash in it doesn't end
