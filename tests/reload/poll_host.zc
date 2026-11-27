@@ -5,8 +5,9 @@
 // Writes a module in WORK_DIR/mod, builds it, then changes files the ways an editor does
 // and checks after each what poll() says: true when a .zc file under the module's
 // directory changed (written in place, saved through a rename, or added in a directory
-// made after the first poll), false when nothing did or only another file did, and false
-// again right after a true. On Linux poll() learns of changes through inotify; elsewhere it
+// made after the first poll), or a C file the module links or a header that includes,
+// inside the directory or not; false when nothing did, only another file did, or only the
+// Reloader's own C file was written, and false again right after a true. On Linux poll() learns of changes through inotify; elsewhere it
 // scans every time, and the answers must be the same. Prints "ok" lines; on a wrong answer,
 // prints "FAIL" and exits 1.
 
@@ -31,6 +32,17 @@ raw {
     static void module_src(char *out, size_t n, int value)
     {
         snprintf(out, n, "@link_name(\"poll_value\")\nfn poll_value() -> int {\n    return %d;\n}\n", value);
+    }
+
+    // A module that links two C files: helper.c beside it, and `outside`.
+    static void linking_src(char *out, size_t n, const char *outside)
+    {
+        snprintf(out, n,
+                 "@link(\"helper.c\")\nextern fn helper_value() -> int;\n"
+                 "@link(\"%s\")\nextern fn outside_value() -> int;\n"
+                 "@link_name(\"poll_value\")\nfn poll_value() -> int {\n"
+                 "    return helper_value() + outside_value();\n}\n",
+                 outside);
     }
 
     #include <dirent.h>
@@ -115,6 +127,7 @@ extern fn own_loader() -> bool;
 extern fn files_left(dir: const char*) -> int;
 extern fn put(path: const char*, text: const char*);
 extern fn module_src(out: char*, n: usize, value: int);
+extern fn linking_src(out: char*, n: usize, outside: const char*);
 
 // poll(), after waiting out the 200 ms between scans when scanning (ZC_RELOAD_SCAN set, or
 // not Linux: no inotify).
@@ -197,6 +210,57 @@ fn main(argc: int, argv: char**) -> int {
     check("that file edited", poll_now(&code), true);
     check("nothing changed since", poll_now(&code), false);
 
+    // C the module links: a file beside it, with a header beside that, and a file outside
+    // the watched directory. Each edited alone is a change, and the new C runs (a linked
+    // file is an image of its own, compiled again when it or a header it includes changes).
+    let helper_h: char[4096];
+    let helper_c: char[4096];
+    let outside_c: char[4096];
+    let big: char[8192];
+    snprintf(helper_h, 4096, "%s/helper.h", dir);
+    snprintf(helper_c, 4096, "%s/helper.c", dir);
+    snprintf(path, 4096, "%s/ext", argv[2]);
+    make_dir(path);
+    snprintf(outside_c, 4096, "%s/ext/outside.c", argv[2]);
+    put(helper_h, "#define HELPER_BASE 10\n");
+    put(helper_c, "#include \"helper.h\"\nint helper_value(void) {{ return HELPER_BASE + 1; }}\n");
+    put(outside_c, "int outside_value(void) {{ return 100; }}\n");
+    linking_src(big, 8192, outside_c);
+    put(main_zc, big);
+    check("a module that links C", poll_now(&code), true);
+    value = code.symbol("poll_value");
+    check("and its C runs", value() == 111, true);
+    check("nothing changed since", poll_now(&code), false);
+
+    put(helper_c, "#include \"helper.h\"\nint helper_value(void) {{ return HELPER_BASE + 2; }}\n");
+    check("a linked C file edited alone", poll_now(&code), true);
+    value = code.symbol("poll_value");
+    check("and the new C runs", value() == 112, true);
+
+    put(helper_h, "#define HELPER_BASE 20\n");
+    check("a header it includes edited alone", poll_now(&code), true);
+    value = code.symbol("poll_value");
+    check("and the C compiled with it runs", value() == 122, true);
+
+    put(outside_c, "int outside_value(void) {{ return 200; }}\n");
+    check("a linked C file outside the directory", poll_now(&code), true);
+    value = code.symbol("poll_value");
+    check("and the new C runs", value() == 222, true);
+    check("nothing changed since", poll_now(&code), false);
     code.free();
+
+    // The Reloader's own C file, written inside the watched directory: zc writes it on
+    // every build, and that isn't a change.
+    snprintf(c_file, 4096, "%s/sub/inside.c", dir);
+    module_src(src, 512, 4);
+    put(main_zc, src);
+    let inside = Reloader::new(main_zc, c_file);
+    inside.set_zc(argv[1]);
+    inside.verbose(false);
+    if !inside.build() { println "FAIL the module does not build (its C inside)"; return 1; }
+    check("its own C file written in the directory", poll_now(&inside), false);
+    if !inside.build() { println "FAIL the module does not build again (its C inside)"; return 1; }
+    check("and written again", poll_now(&inside), false);
+    inside.free();
     return 0;
 }

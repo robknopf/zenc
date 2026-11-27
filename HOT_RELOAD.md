@@ -26,9 +26,10 @@ Each is explained, with what to do about it, in the section named.
   loads each version: old versions stay loaded, and debuggers see none of them
   ("Platforms").
 - **Not with** `--misra` or C++ output ("Platforms").
-- **Watching:** `poll()` reloads when a `.zc` file changes; a linked `.c` file or a header
-  edited alone is picked up at the next `.zc` save or `build()`. Outside Linux it scans,
-  so a save can take up to 200 ms to be seen ("Using it").
+- **Watching:** `poll()` sees `.zc`, `.c` and `.h` files under one directory tree, and the
+  C files the module links and the headers they include wherever they are; a header
+  outside the tree that only the module's own code includes is not watched. Outside Linux
+  it scans, so a save can take up to 200 ms to be seen ("Using it").
 - **Refused, the old version keeps running:** the state holds a pointer to a type whose
   layout changed; a function the host looked up changed signature; the host's block
   changed type or outgrew its size ("What a reload refuses").
@@ -73,13 +74,16 @@ fn main() -> int {
 ```
 
 - `build()` runs `zc transpile --reload` on the source, then compiles the C with libtcc
-  and loads it itself (see "How it works"). `poll()` does the same if any `.zc` file under the source's directory
-  changed (searched recursively; `watch(dir)` sets another directory). On Linux it
+  and loads it itself (see "How it works"). `poll()` does the same if a file the module is
+  built from changed: a `.zc`, `.c` or `.h` file under the source's directory (searched
+  recursively; `watch(dir)` sets another directory; the Reloader's own C file doesn't
+  count), or a C file the module links, or a header that one includes by `"name"`, wherever
+  it is [`poll_host.zc`]. On Linux it
   learns of changes through inotify, so a poll with nothing changed costs microseconds;
   elsewhere it checks every file's modification time, at most every 200 ms (so a save is
   seen up to that much later). `ZC_RELOAD_SCAN=1` in the environment makes it scan on
-  Linux too, to test that. Only `.zc` files count: a C file or header the module uses,
-  edited alone, is compiled again at the next `.zc` save (or `build()`).
+  Linux too, to test that. A header outside the directory that only the module's Zen C
+  includes isn't watched: `watch()` a directory above both.
 - `add_include(dir)` gives tcc a directory to find the module's C headers in, and zc
   too: zc reads them to know the names they declare, so a misspelled C function or
   constant is an error at the `.zc` line, not tcc's "undefined symbol".
@@ -99,7 +103,8 @@ fn main() -> int {
 - A C file the module links (`@link("x.c")`, beside the `.zc` that says so, as
   `std/regex.zc` links TRE) is compiled once, into an image of its own that every version
   uses, kept for the session: its own state (its globals) lasts across reloads
-  [`module_c_library_once`], and it's compiled again when it changes. One that calls the
+  [`module_c_library_once`], and it's compiled again when it, or a header it includes by
+  `"name"`, changes [`poll_host.zc`] (a new image, whose state starts again). One that calls the
   module back can't stand alone; it's compiled with each version [`module_c_calls_module`].
   What else the module is compiled with (include directories, defines, the libraries and C
   files it links) `zc transpile --reload` writes at the end of the C, in a comment
@@ -405,7 +410,9 @@ for that.
   module's changes; keep the state opaque to the host (`void*`, the module's functions), or
   `require_same()` the type. A name the module doesn't define gives `symbol()` NULL: check
   it after each `build()` or `poll()` that returned true.
-- `poll()` watches one directory tree (the source's, or `watch(dir)`), for `.zc` files.
+- `poll()` watches one directory tree (the source's, or `watch(dir)`), plus the module's
+  linked C files and their headers; a header the module's Zen C includes from outside that
+  tree isn't watched.
 
 ## Debugging
 

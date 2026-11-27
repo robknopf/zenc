@@ -302,6 +302,15 @@ raw {
         int number;       // which version it is (ZrReloader.version when it loaded)
     } ZrVersion;
 
+    // Files a version was built from besides the .zc files, each with its modification
+    // time then (zr_deps_add): a C file the module links, and the headers it includes.
+    typedef struct
+    {
+        char **paths;
+        int64_t *mtimes;
+        unsigned n, cap;
+    } ZrDeps;
+
     typedef struct
     {
         char *zc;
@@ -321,7 +330,7 @@ raw {
         int old_count;
         int old_cap;
         int version;
-        int64_t seen; // newest .zc modification time at the last build, or -1
+        int64_t seen; // the newest modification time poll() looks at, at the last build, or -1
         ZcManifest *types_now;  // a copy of the current version's manifest, or NULL
         ZcManifest *types_prev; // the same for the version before it
         ZcMfGlobal *store;      // the module's globals: in the version that owns them
@@ -406,11 +415,14 @@ raw {
         struct ZrLib
         {
             char *path;
-            long long mtime;
+            ZrDeps deps; // its file, then the headers it includes, as when it was compiled
             void *im;   // its ZlImage; NULL if it can't be one (then compiled with the module)
             int failed; // (tried, and compiled with the module)
         } *libs;
         unsigned nlibs;
+        // The C files the module links and the headers they include (zr_watch_refresh), for
+        // poll(): they can be outside the watched directory.
+        ZrDeps watched;
     } ZrReloader;
 
     static char *zr_strdup(const char *s)
@@ -456,9 +468,57 @@ raw {
     #endif
     }
 
-    // The newest modification time of the .zc files under `dir`, searched recursively, or
-    // -1 if there are none.
-    static int64_t zr_newest_zc(const char *dir_path, int depth)
+    // The Reloader's own C file, which a scan doesn't count: zc writes it on every build.
+    typedef struct
+    {
+        int has;
+    #ifdef _WIN32
+        char full[4096]; // (Windows' stat has no inode: by full path)
+    #else
+        dev_t dev;
+        ino_t ino;
+    #endif
+    } ZrSkip;
+
+    static void zr_skip_init(ZrSkip *k, const char *c_file)
+    {
+        memset(k, 0, sizeof(*k));
+    #ifdef _WIN32
+        k->has = _fullpath(k->full, c_file, sizeof k->full) != NULL;
+    #else
+        struct stat st;
+        if (stat(c_file, &st) != 0) return;
+        k->has = 1;
+        k->dev = st.st_dev;
+        k->ino = st.st_ino;
+    #endif
+    }
+
+    static int zr_skip_is(const ZrSkip *k, const char *path, const struct stat *st)
+    {
+        if (!k || !k->has) return 0;
+    #ifdef _WIN32
+        (void)st;
+        char full[4096];
+        return _fullpath(full, path, sizeof full) && _stricmp(full, k->full) == 0;
+    #else
+        (void)path;
+        return st->st_dev == k->dev && st->st_ino == k->ino;
+    #endif
+    }
+
+    // Whether a file of this name is one a version is built from: Zen C, or C and its
+    // headers (a C file the module links, a header it or the module includes).
+    static int zr_is_source(const char *name)
+    {
+        size_t n = strlen(name);
+        return (n > 3 && strcmp(name + n - 3, ".zc") == 0) ||
+               (n > 2 && (strcmp(name + n - 2, ".c") == 0 || strcmp(name + n - 2, ".h") == 0));
+    }
+
+    // The newest modification time of the source files (zr_is_source) under `dir`, searched
+    // recursively, but `skip`, or -1 if there are none.
+    static int64_t zr_newest_zc(const char *dir_path, int depth, const ZrSkip *skip)
     {
         int64_t newest = -1;
         if (depth > 16) return newest;
@@ -479,12 +539,11 @@ raw {
                 int64_t m = -1;
                 if (S_ISDIR(st.st_mode))
                 {
-                    m = zr_newest_zc(path, depth + 1);
+                    m = zr_newest_zc(path, depth + 1, skip);
                 }
-                else
+                else if (zr_is_source(name) && !zr_skip_is(skip, path, &st))
                 {
-                    size_t n = strlen(name);
-                    if (n > 3 && strcmp(name + n - 3, ".zc") == 0) m = zr_mtime_ns(&st, path);
+                    m = zr_mtime_ns(&st, path);
                 }
                 if (m > newest) newest = m;
             }
@@ -1941,8 +2000,16 @@ raw {
     static int64_t zr_newest(ZrReloader *r)
     {
         char *dir = zr_watch_dir(r);
-        int64_t newest = zr_newest_zc(dir, 0);
+        ZrSkip skip;
+        zr_skip_init(&skip, r->c_file);
+        int64_t newest = zr_newest_zc(dir, 0, &skip);
         free(dir);
+        for (unsigned i = 0; i < r->watched.n; i++)
+        {
+            struct stat st;
+            int64_t m = stat(r->watched.paths[i], &st) == 0 ? zr_mtime_ns(&st, r->watched.paths[i]) : -1;
+            if (m > newest) newest = m;
+        }
         return newest;
     }
 
@@ -1963,13 +2030,12 @@ raw {
     }
 
     #ifdef __linux__
+    #define ZR_INO_MASK (IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB | IN_CREATE | IN_DELETE | \
+                         IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF)
     static int zr_ino_add(int fd, const char *dir_path, int depth)
     {
         if (depth > 16) return 1;
-        if (inotify_add_watch(fd, dir_path, IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB | IN_CREATE |
-                                                IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
-                                                IN_DELETE_SELF | IN_MOVE_SELF) < 0)
-            return 0;
+        if (inotify_add_watch(fd, dir_path, ZR_INO_MASK) < 0) return 0;
         DIR *dir = opendir(dir_path);
         if (!dir) return 0;
         int ok = 1;
@@ -1998,12 +2064,33 @@ raw {
         r->ino_root = NULL;
     }
 
+    // The directories of the files poll() looks at besides the watched one's (r->watched), each
+    // alone: a C file the module links, a header it includes, wherever they are. Once more
+    // for a directory already watched is the same watch.
+    static void zr_ino_add_watched(ZrReloader *r)
+    {
+        if (r->ino_fd < 0) return;
+        for (unsigned i = 0; i < r->watched.n; i++)
+        {
+            char *dir = zr_strdup(r->watched.paths[i]);
+            if (!dir) continue;
+            char *slash = strrchr(dir, '/');
+            if (slash && slash != dir) *slash = 0;
+            if (slash) inotify_add_watch(r->ino_fd, dir, ZR_INO_MASK);
+            free(dir);
+        }
+    }
+
     static void zr_ino_setup(ZrReloader *r, char *root)
     {
         zr_ino_close(r);
         r->ino_root = root;
         r->ino_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-        if (r->ino_fd >= 0 && zr_ino_add(r->ino_fd, root, 0)) return;
+        if (r->ino_fd >= 0 && zr_ino_add(r->ino_fd, root, 0))
+        {
+            zr_ino_add_watched(r);
+            return;
+        }
         if (r->ino_fd >= 0) close(r->ino_fd);
         r->ino_fd = -1;
         r->ino_failed = 1;
@@ -3439,14 +3526,167 @@ raw {
         return rc;
     }
 
-    #ifdef ZR_LOADER
-    // A library the version links, of zr_libs_prepare's: the image of path, if there is one.
-    static struct ZrLib *zr_lib_find(ZrReloader *r, const char *path)
+    static int64_t zr_file_mtime(const char *path)
     {
         struct stat st;
-        long long mtime = stat(path, &st) == 0 ? (long long)st.st_mtime : 0;
+        return stat(path, &st) == 0 && !S_ISDIR(st.st_mode) ? zr_mtime_ns(&st, path) : -1;
+    }
+
+    static void zr_deps_free(ZrDeps *d)
+    {
+        for (unsigned i = 0; i < d->n; i++) free(d->paths[i]);
+        free(d->paths);
+        free(d->mtimes);
+        memset(d, 0, sizeof(*d));
+    }
+
+    // Whether every file is as it was when `d` was made.
+    static int zr_deps_current(const ZrDeps *d)
+    {
+        for (unsigned i = 0; i < d->n; i++)
+            if (zr_file_mtime(d->paths[i]) != d->mtimes[i]) return 0;
+        return 1;
+    }
+
+    // The include directories the module is compiled with: add_include()'s, and the build
+    // facts' -I.
+    typedef struct
+    {
+        const char *dirs[64];
+        char *owned[64];
+        unsigned n;
+    } ZrIncDirs;
+
+    static int zr_inc_collect_one(void *ctx, const char *line)
+    {
+        ZrIncDirs *inc = (ZrIncDirs *)ctx;
+        if (!strncmp(line, "-I", 2) && inc->n < 64 && (inc->owned[inc->n] = zr_strdup(line + 2)))
+        {
+            inc->dirs[inc->n] = inc->owned[inc->n];
+            inc->n++;
+        }
+        return 0;
+    }
+
+    static void zr_inc_collect(ZrReloader *r, ZrIncDirs *inc)
+    {
+        memset(inc, 0, sizeof(*inc));
+        for (int i = 0; i < r->include_count && inc->n < 64; i++) inc->dirs[inc->n++] = r->includes[i];
+        zr_build_facts(r->c_file, zr_inc_collect_one, inc);
+    }
+
+    static void zr_inc_free(ZrIncDirs *inc)
+    {
+        for (unsigned i = 0; i < 64; i++) free(inc->owned[i]);
+    }
+
+    // `path`, and the headers it includes by "name", recursively: each once, with its
+    // modification time now. A header is looked for as tcc does, beside the file that
+    // includes it, then in the include directories. One included by <name> isn't followed (a
+    // system's or a library's), nor one not found; one under an #if is followed either way
+    // (at worst, a library is compiled again for nothing).
+    static void zr_deps_add(ZrDeps *d, const ZrIncDirs *inc, const char *path, int depth)
+    {
+        if (depth > 16) return;
+        for (unsigned i = 0; i < d->n; i++)
+            if (!strcmp(d->paths[i], path)) return;
+        int64_t mtime = zr_file_mtime(path);
+        if (mtime < 0) return;
+        if (d->n == d->cap)
+        {
+            unsigned cap = d->cap ? d->cap * 2 : 8;
+            char **paths = (char **)realloc(d->paths, cap * sizeof(char *));
+            if (!paths) return;
+            d->paths = paths;
+            int64_t *mtimes = (int64_t *)realloc(d->mtimes, cap * sizeof(int64_t));
+            if (!mtimes) return;
+            d->mtimes = mtimes;
+            d->cap = cap;
+        }
+        char *own = zr_strdup(path);
+        if (!own) return;
+        d->paths[d->n] = own;
+        d->mtimes[d->n] = mtime;
+        d->n++;
+
+        FILE *f = fopen(path, "rb");
+        if (!f) return;
+        char line[4096];
+        while (fgets(line, sizeof line, f))
+        {
+            const char *p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p++ != '#') continue;
+            while (*p == ' ' || *p == '\t') p++;
+            if (strncmp(p, "include", 7) != 0) continue;
+            p += 7;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p++ != '"') continue;
+            const char *end = strchr(p, '"');
+            if (!end || end == p) continue;
+            char name[1024];
+            snprintf(name, sizeof name, "%.*s", (int)(end - p), p);
+            char found[4096];
+            if (name[0] == '/' || name[0] == '\\' || (name[0] && name[1] == ':'))
+            {
+                snprintf(found, sizeof found, "%s", name);
+            }
+            else
+            {
+                // beside the including file, then in each include directory
+                const char *slash = strrchr(path, '/');
+                const char *bslash = strrchr(path, '\\');
+                if (bslash && (!slash || bslash > slash)) slash = bslash;
+                snprintf(found, sizeof found, "%.*s%s", slash ? (int)(slash - path + 1) : 0, path, name);
+                for (unsigned i = 0; zr_file_mtime(found) < 0 && i < inc->n; i++)
+                    snprintf(found, sizeof found, "%s/%s", inc->dirs[i], name);
+            }
+            zr_deps_add(d, inc, found, depth + 1);
+        }
+        fclose(f);
+    }
+
+    // (zr_watch_refresh's)
+    typedef struct
+    {
+        ZrDeps *d;
+        const ZrIncDirs *inc;
+    } ZrWatchCtx;
+
+    static int zr_watch_one(void *ctx, const char *line)
+    {
+        ZrWatchCtx *c = (ZrWatchCtx *)ctx;
+        if (line[0] != '-') zr_deps_add(c->d, c->inc, line, 0);
+        return 0;
+    }
+
+    // Once zc has written a version's C: the C files it links and the headers they include,
+    // for poll() to look at too (they may be outside the watched directory). The newest of
+    // their modification times, or -1.
+    static int64_t zr_watch_refresh(ZrReloader *r)
+    {
+        zr_deps_free(&r->watched);
+        ZrIncDirs inc;
+        zr_inc_collect(r, &inc);
+        ZrWatchCtx c = {&r->watched, &inc};
+        zr_build_facts(r->c_file, zr_watch_one, &c);
+        zr_inc_free(&inc);
+    #ifdef __linux__
+        zr_ino_add_watched(r);
+    #endif
+        int64_t newest = -1;
+        for (unsigned i = 0; i < r->watched.n; i++)
+            if (r->watched.mtimes[i] > newest) newest = r->watched.mtimes[i];
+        return newest;
+    }
+
+    #ifdef ZR_LOADER
+    // A library the version links, of zr_libs_prepare's: the image of path, if there is one
+    // of it as it is now (it, and the headers it includes, as when it was compiled).
+    static struct ZrLib *zr_lib_find(ZrReloader *r, const char *path)
+    {
         for (unsigned i = r->nlibs; i-- > 0;)
-            if (!strcmp(r->libs[i].path, path) && r->libs[i].mtime == mtime) return &r->libs[i];
+            if (!strcmp(r->libs[i].path, path) && zr_deps_current(&r->libs[i].deps)) return &r->libs[i];
         return NULL;
     }
 
@@ -3484,8 +3724,10 @@ raw {
         r->libs = grown;
         struct ZrLib *lib = &r->libs[r->nlibs];
         memset(lib, 0, sizeof(*lib));
-        struct stat st;
-        lib->mtime = stat(line, &st) == 0 ? (long long)st.st_mtime : 0;
+        ZrIncDirs inc;
+        zr_inc_collect(r, &inc);
+        zr_deps_add(&lib->deps, &inc, line, 0);
+        zr_inc_free(&inc);
         lib->path = zr_strdup(line);
         if (!lib->path) return 0;
         r->nlibs++;
@@ -5397,6 +5639,9 @@ raw {
                     r->current.loaded ? "; still running the previous version" : "");
             return 0;
         }
+        // (the C files it links, as built now: a later edit of one is a change for poll())
+        int64_t linked = zr_watch_refresh(r);
+        if (linked > r->seen) r->seen = linked;
         double t1 = zr_now_ms();
 
         // Using the globals already there if it can; defining them again if they changed.
@@ -5723,8 +5968,10 @@ raw {
             if (r->libs[i].im) zl_free((ZlImage *)r->libs[i].im);
     #endif
             free(r->libs[i].path);
+            zr_deps_free(&r->libs[i].deps);
         }
         free(r->libs);
+        zr_deps_free(&r->watched);
         for (int i = 0; i < r->include_count; i++) free(r->includes[i]);
         for (int i = 0; i < r->required_count; i++) free(r->required[i]);
         for (int i = 0; i < r->fetched_count; i++) free(r->fetched[i]);
