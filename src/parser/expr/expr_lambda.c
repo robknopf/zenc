@@ -38,7 +38,9 @@ ASTNode *parse_arrow_lambda_single(ParserContext *ctx, Lexer *l, char *param_nam
     ASTNode *body_block = NULL;
     if (lexer_peek(l).kind == TOK_LBRACE)
     {
+        parsing_lambda_body++;
         body_block = parse_block(ctx, l);
+        parsing_lambda_body--;
     }
     else
     {
@@ -154,7 +156,9 @@ ASTNode *parse_arrow_lambda_multi(ParserContext *ctx, Lexer *l, char **param_nam
     ASTNode *body_block = NULL;
     if (lexer_peek(l).kind == TOK_LBRACE)
     {
+        parsing_lambda_body++;
         body_block = parse_block(ctx, l);
+        parsing_lambda_body--;
     }
     else
     {

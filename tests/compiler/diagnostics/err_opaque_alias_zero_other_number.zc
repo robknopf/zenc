@@ -1,0 +1,8 @@
+// EXPECT: FAIL
+// compiler/diagnostics: only the literal 0 converts to an opaque alias outside its module
+// (tests/language/features/opaque-types/test_opaque_alias_zero.zc): another number doesn't.
+import "../../language/features/opaque-types/_opaque_id_lib.zc"
+
+fn main() {
+    println "{user_number(5)}";
+}

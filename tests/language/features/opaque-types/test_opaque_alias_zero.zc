@@ -1,0 +1,27 @@
+// language/features/opaque-types: test_opaque_alias_zero
+// Outside the module that defines it, the literal 0 converts to an opaque alias of an
+// integer type, as C's null pointer constant does to a pointer: a handle kind's "no handle".
+// In arguments, initialisation, assignment, return and == / !=. The rejections (another
+// number, a variable holding 0, another kind, a return of another type, < with 0) are in
+// tests/compiler/diagnostics/err_opaque_alias_zero_*.zc.
+import "_opaque_id_lib.zc"
+
+fn no_user() -> UserId {
+    return 0;
+}
+
+fn is_none(user: UserId) -> bool {
+    return user == 0;
+}
+
+test "0 is an opaque alias's no-handle" {
+    let none: UserId = 0;
+    assert(user_number(0) == 0, "an argument");
+    assert(is_none(none), "initialisation, and ==");
+    let user = UserId::of(4);
+    assert(user != 0, "!=");
+    assert(0 != user, "0 on the left");
+    user = 0;
+    assert(is_none(user), "assignment");
+    assert(is_none(no_user()), "a return");
+}

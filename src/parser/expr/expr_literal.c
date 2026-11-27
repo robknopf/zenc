@@ -158,7 +158,9 @@ ASTNode *parse_lambda(ParserContext *ctx, Lexer *l)
     ASTNode *body = NULL;
     if (lexer_peek(l).kind == TOK_LBRACE)
     {
+        parsing_lambda_body++;
         body = parse_block(ctx, l);
+        parsing_lambda_body--;
     }
     else
     {

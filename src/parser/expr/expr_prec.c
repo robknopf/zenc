@@ -2799,6 +2799,13 @@ static ASTNode *parse_expr_prec_impl(ParserContext *ctx, Lexer *l, Precedence mi
                         lhs_is_num = is_integer_type(lhs_base) || is_float_type(lhs_base);
                         rhs_is_num = is_integer_type(rhs_base) || is_float_type(rhs_base);
                     }
+                    // A handle kind and 0, for == and != (opaque_zero_converts)
+                    if ((strcmp(bin->binary.op, "==") == 0 || strcmp(bin->binary.op, "!=") == 0) &&
+                        (opaque_zero_converts(lhs->type_info, rhs) ||
+                         opaque_zero_converts(rhs->type_info, lhs)))
+                    {
+                        lhs_is_num = rhs_is_num = 1;
+                    }
                 }
 
                 if (!skip_check && !type_eq(lhs->type_info, rhs->type_info) &&
@@ -2942,6 +2949,11 @@ static ASTNode *parse_expr_prec_impl(ParserContext *ctx, Lexer *l, Precedence mi
                                               (t1 && strstr(t1, "*") != NULL));
                             if (lhs_is_ptr && rhs->kind == NODE_EXPR_LITERAL &&
                                 rhs->literal.int_val == 0)
+                            {
+                                is_null_assign = 1;
+                            }
+                            // (and a handle kind's: opaque_zero_converts)
+                            if (opaque_zero_converts(lhs->type_info, rhs))
                             {
                                 is_null_assign = 1;
                             }

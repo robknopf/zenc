@@ -16,6 +16,8 @@
 #include "analysis/move_check.h"
 
 char *curr_func_ret = NULL;
+Type *curr_func_ret_type = NULL; // (curr_func_ret's Type, where it's known)
+int parsing_lambda_body = 0;     // (a return there is the lambda's, not curr_func_ret's)
 
 static void auto_import_std_test(ParserContext *ctx)
 {
@@ -275,6 +277,13 @@ ASTNode *parse_return(ParserContext *ctx, Lexer *l)
         {
             n->ret.value = parse_expression(ctx, l);
         }
+    }
+
+    // An opaque alias returned: as an argument is checked against its parameter (the same
+    // kind, its own file's conversions, or the literal 0: check_argument_type).
+    if (n->ret.value && curr_func_ret_type && !parsing_lambda_body)
+    {
+        check_argument_type(ctx, curr_func_ret_type, n->ret.value);
     }
 
     if (lexer_peek(l).kind == TOK_SEMICOLON)

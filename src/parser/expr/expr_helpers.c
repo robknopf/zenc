@@ -139,6 +139,25 @@ int tokens_could_be_generic_args(Lexer *l)
     }
 }
 
+// The literal 0 converts to an opaque alias of an integer type, as C's null pointer constant
+// does to a pointer: a handle kind's "no handle" (`wgf_sprite_create(0)`, `if a != 0`). In
+// arguments, initialisation, assignment, return and ==/!=. Nothing else does: another
+// number, a variable holding 0, another kind (task 33).
+int opaque_zero_converts(Type *to, ASTNode *expr)
+{
+    if (!to || to->kind != TYPE_ALIAS || !to->alias.is_opaque_alias || !expr)
+    {
+        return 0;
+    }
+    Type *base = to->inner;
+    for (int depth = 0; base && base->kind == TYPE_ALIAS && depth < 16; depth++)
+    {
+        base = base->inner;
+    }
+    return base && is_integer_type(base) && expr->kind == NODE_EXPR_LITERAL &&
+           expr->literal.kind == LITERAL_INT && expr->literal.int_val == 0;
+}
+
 int check_opaque_alias_compat(ParserContext *ctx, Type *a, Type *b)
 {
     if (!a || !b)
@@ -421,7 +440,8 @@ void check_argument_type(ParserContext *ctx, Type *expected, ASTNode *arg)
     {
         return;
     }
-    if (type_eq(expected, got) || check_opaque_alias_compat(ctx, expected, got))
+    if (type_eq(expected, got) || check_opaque_alias_compat(ctx, expected, got) ||
+        opaque_zero_converts(expected, arg))
     {
         return;
     }

@@ -1,0 +1,9 @@
+// EXPECT: FAIL
+// compiler/diagnostics: only the literal 0 converts to an opaque alias outside its module: a
+// variable holding 0 is its own type (u32 here), and needs the alias's own conversion.
+import "../../language/features/opaque-types/_opaque_id_lib.zc"
+
+fn main() {
+    let zero: u32 = 0;
+    println "{user_number(zero)}";
+}

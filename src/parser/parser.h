@@ -92,6 +92,8 @@ DeclarationAttributes parse_attributes(ParserContext *ctx, Lexer *l);
 ASTNode *parse_program(ParserContext *ctx, Lexer *l);
 
 extern char *curr_func_ret;
+extern Type *curr_func_ret_type;
+extern int parsing_lambda_body;
 extern ParserContext *token_parser_ctx;
 
 #include "ast/symbols.h"
@@ -1029,6 +1031,19 @@ char *module_prefix_for(ParserContext *ctx, const char *path);
 ASTNode *transform_to_trait_object(ParserContext *ctx, const char *target_trait, ASTNode *expr);
 int check_impl(ParserContext *ctx, const char *trait_name, const char *type_name);
 int check_opaque_alias_compat(ParserContext *ctx, Type *a, Type *b);
+int opaque_zero_converts(Type *to, ASTNode *expr);
+/**
+ * Rejects an argument whose type cannot stand for the parameter's (or the function's return type,
+ * for a return), where the C compiler would not notice or would only report it in the generated
+ * code:
+ * - an opaque alias is a distinct type outside the file that defines it:
+ *   another alias where one is expected, or the underlying type, or an alias
+ *   where its underlying type is expected, as `let` does;
+ * - two instances of one generic with different arguments (`Handle<A>` for
+ *   `Handle<B>`).
+ * The literal 0 stands for an opaque alias of an integer (opaque_zero_converts).
+ */
+void check_argument_type(ParserContext *ctx, Type *expected, ASTNode *arg);
 Module *find_module(ParserContext *ctx, const char *alias);
 SelectiveImport *find_selective_import(ParserContext *ctx, const char *name);
 void re_export_wildcard_symbols(ParserContext *ctx, const char *module_base);

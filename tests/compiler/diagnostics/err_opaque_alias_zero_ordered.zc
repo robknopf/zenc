@@ -1,0 +1,11 @@
+// EXPECT: FAIL
+// compiler/diagnostics: an opaque alias compares with the literal 0 by == and != only (a
+// handle is there or not): not by < and the like.
+import "../../language/features/opaque-types/_opaque_id_lib.zc"
+
+fn main() {
+    let user = UserId::of(4);
+    if user < 0 {
+        println "never";
+    }
+}

@@ -223,6 +223,7 @@ ASTNode *parse_function(ParserContext *ctx, Lexer *l, int is_extern, const char 
     }
 
     curr_func_ret = ret;
+    curr_func_ret_type = ret_type_obj;
 
     // Auto-prefix function name if in module context
     // Don't prefix generic templates or functions inside impl blocks (already
@@ -315,6 +316,7 @@ ASTNode *parse_function(ParserContext *ctx, Lexer *l, int is_extern, const char 
     ctx->known_generics_count = saved_generic_count;
 
     curr_func_ret = NULL;
+    curr_func_ret_type = NULL;
 
     ASTNode *node = ast_create(NODE_FUNCTION);
     node->token = name_tok; // Save definition location
@@ -422,6 +424,7 @@ void parse_pending_bodies(ParserContext *ctx)
     int saved_in_method = ctx->in_method_with_self;
     int saved_self_ptr = ctx->self_is_pointer;
     char *saved_ret = curr_func_ret;
+    Type *saved_ret_type = curr_func_ret_type;
     char *saved_doc = ctx->last_doc_comment;
 
     // We increment parse depth so a parse_program_nodes inside a body does not start another round.
@@ -450,6 +453,7 @@ void parse_pending_bodies(ParserContext *ctx)
             ctx->current_impl_struct = NULL;
             ctx->current_filename = node->test_stmt.filename;
             curr_func_ret = NULL;
+            curr_func_ret_type = NULL;
         }
         else
         {
@@ -457,6 +461,7 @@ void parse_pending_bodies(ParserContext *ctx)
             ctx->current_impl_struct = node->func.impl_struct;
             ctx->current_filename = node->func.filename;
             curr_func_ret = node->func.ret_type;
+            curr_func_ret_type = node->func.ret_type_info;
         }
 
         if (node->kind != NODE_TEST)
@@ -491,5 +496,6 @@ void parse_pending_bodies(ParserContext *ctx)
     ctx->in_method_with_self = saved_in_method;
     ctx->self_is_pointer = saved_self_ptr;
     curr_func_ret = saved_ret;
+    curr_func_ret_type = saved_ret_type;
     ctx->last_doc_comment = saved_doc;
 }

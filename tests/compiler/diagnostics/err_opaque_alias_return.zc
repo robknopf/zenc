@@ -1,0 +1,12 @@
+// EXPECT: FAIL
+// compiler/diagnostics: a function returning an opaque alias, outside the module that defines
+// it, returns that alias (or the literal 0): not its underlying type, as an argument can't be.
+import "../../language/features/opaque-types/_opaque_id_lib.zc"
+
+fn make(raw: u32) -> UserId {
+    return raw;
+}
+
+fn main() {
+    println "{make(3).raw()}";
+}

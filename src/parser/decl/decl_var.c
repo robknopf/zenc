@@ -629,7 +629,8 @@ ASTNode *parse_var_decl(ParserContext *ctx, Lexer *l, int is_export)
             int is_opaque = (type_obj->kind == TYPE_ALIAS && type_obj->alias.is_opaque_alias) ||
                             (t->kind == TYPE_ALIAS && t->alias.is_opaque_alias);
             if (!is_numeric && !is_pointer && !is_function && !is_struct && !is_array &&
-                (!is_opaque || !check_opaque_alias_compat(ctx, type_obj, t)))
+                (!is_opaque || !check_opaque_alias_compat(ctx, type_obj, t)) &&
+                !opaque_zero_converts(type_obj, init))
             {
                 char *expected = type_to_string(type_obj);
                 char *got = type_to_string(t);
