@@ -175,7 +175,13 @@ MANDIR = $(PREFIX)/share/man
 SHAREDIR = $(PREFIX)/share/zenc
 INCLUDEDIR = $(PREFIX)/include/zenc
 
-PLUGINS = plugins/befunge.so plugins/brainfuck.so plugins/forth.so plugins/lisp.so plugins/sql.so
+# The plugins, as zc loads them (src/platform/os.h's z_get_plugin_ext): .dll on Windows
+ifeq ($(OS),Windows_NT)
+    PLUGIN_EXT = .dll
+else
+    PLUGIN_EXT = .so
+endif
+PLUGINS = $(patsubst %,plugins/%$(PLUGIN_EXT),befunge brainfuck forth lisp sql)
 
 # Fil-C configuration
 FILCC_DIR := $(firstword $(wildcard filc-*/build/bin))
@@ -211,7 +217,7 @@ ape: $(ZC_COM) $(ZC_BOOT_COM)
 
 # Build plugins
 
-plugins/%.so: plugins/%.zc $(TARGET)
+plugins/%$(PLUGIN_EXT): plugins/%.zc $(TARGET)
 	$(ZC_RUN) build $< -shared -o $@
 
 # Library groupings by directory
@@ -546,7 +552,7 @@ install: $(TARGET) install-tools
 
 	# Install compiled plugins
 	$(INSTALL) -d $(SHAREDIR)/plugins
-	$(CP) plugins/*.so $(SHAREDIR)/plugins/
+	$(CP) plugins/*$(PLUGIN_EXT) $(SHAREDIR)/plugins/
 	@echo "=> Installed to $(BINDIR)/$(TARGET)"
 	@echo "=> Man pages installed to $(MANDIR)"
 	@echo "=> Standard library installed to $(SHAREDIR)/std"
@@ -598,7 +604,7 @@ uninstall-ape:
 # Clean
 clean:
 	$(RM) $(OBJ_DIR) obj-ape obj-fuzz obj-fuzz-cmplog $(TARGET) $(ALL_TOOLS) libzc-*.a $(TCC_OUT)
-	$(RM) out.c out.cpp out.m out.cu plugins/*.so a.out* out test_out_* rule_*
+	$(RM) out.c out.cpp out.m out.cu plugins/*.so plugins/*.dll a.out* out test_out_* rule_*
 	$(RM) *.gcda *.gcno *.gcov coverage.info
 	$(RM) -r coverage-report/
 	$(RM) .bench_* bench_* benchmarks_result.json
