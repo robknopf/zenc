@@ -96,6 +96,7 @@ Check out these projects built with Zen C:
           <ul>
             <li><a href="#language-server-protocol-lsp">LSP</a></li>
             <li><a href="#debugging-zen-c">Debugging</a></li>
+            <li><a href="#hot-reload">Hot reload</a></li>
           </ul>
         </li>
         <li><a href="#compiler-support--compatibility">Compiler Support & Compatibility</a></li>
@@ -415,6 +416,35 @@ Add these configurations to your `.vscode` directory to enable one-click debuggi
     "preLaunchTask": "Zen C: Build Debug"
 }
 ```
+
+### Hot reload
+
+A program can keep running while its Zen C code is edited. A *host* program uses
+`std/reload.zc`'s `Reloader`, which compiles the *module* with zc's own libtcc on every save,
+in memory, and switches to it between two calls. Globals, `static` locals and a block the
+host keeps survive the switch, and are moved field by field when an edit changes their
+layout; function pointers, trait objects and closures kept from before call the new code; a
+crash in the new code goes back to the version before; gdb and VS Code debug the reloaded
+`.zc` code. A release build is the same source compiled ahead of time, with none of it.
+
+```zc
+import "std/reload.zc"
+
+let code = Reloader::new("src/game/game.zc", "build/game.c");
+code.build();
+let frame: fn*() = code.symbol("game_frame");
+while running {
+    if code.poll() { frame = code.symbol("game_frame"); }
+    if !code.call(frame) { frame = code.symbol("game_frame"); }
+}
+```
+
+**Limits:** x86-64 Linux and Windows (MinGW-w64) only, macOS and arm64 partly; not with
+`--misra` or C++ output. An edit that leaves state it can't move safely (a pointer to a
+type whose layout changed, a changed signature of a function the host calls) is refused,
+and the old version keeps running. Heap data behind a pointer isn't moved (std's containers
+are), and a pointer into a raw C block's data goes stale. **[HOT_RELOAD.md](HOT_RELOAD.md)**
+has the full list, each with what to do, and every guarantee with the test that checks it.
 
 ## Compiler Support & Compatibility
 

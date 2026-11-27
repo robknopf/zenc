@@ -18,6 +18,38 @@ reloaded code (`run_debugger_tests.sh`, `vscode_debug.py`), and
 `make test-reload-soak` runs a long session of random edits checked against a model of what
 must follow and what must stay (`tests/reload/soak.py`).
 
+## Limits at a glance
+
+Each is explained, with what to do about it, in the section named.
+
+- **Platforms:** x86-64 Linux and Windows (MinGW-w64). On macOS and arm64 a system libtcc
+  loads each version: old versions stay loaded, and debuggers see none of them
+  ("Platforms").
+- **Not with** `--misra` or C++ output ("Platforms").
+- **Watching:** `poll()` reloads when a `.zc` file changes; a linked `.c` file or a header
+  edited alone is picked up at the next `.zc` save or `build()`. Outside Linux it scans,
+  so a save can take up to 200 ms to be seen ("Using it").
+- **Refused, the old version keeps running:** the state holds a pointer to a type whose
+  layout changed; a function the host looked up changed signature; the host's block
+  changed type or outgrew its size ("What a reload refuses").
+- **Heap data** behind a pointer is never moved; only std's containers are
+  ("Other limits").
+- **Not carried, left at zero:** a renamed field (dropped and added), a field changed to
+  a type that isn't a number, an enum value whose variant is gone, bit-fields, unions and
+  vector types that changed ("Values that are not carried").
+- **Stale once its version is released:** a pointer into a version's own C data (a C
+  `static` in a `raw` block, a const table of pointers): a fault, rolled back inside
+  `call()`. Linked `.c` files and the host's libraries aren't affected ("What an old version
+  costs").
+- **Starts again on every reload:** a global whose type only the C compiler knows, and a
+  thread-local in raw C ("Kept by the module, not the host").
+- **Not run again for you:** `main`, constructors, a level's setup; use `@after_reload`
+  ("Things a reload doesn't do again").
+- **Crashes** are caught only inside `call()`/`call_with()`, and what the crashed code did
+  to the heap and libraries isn't undone ("A crash in the new code").
+- **Not checked:** that the host's own idea of a type matches the module's, and that the
+  names it looks up exist (`symbol()` gives NULL) ("Other limits").
+
 ## Using it
 
 The host uses `std/reload.zc`:
@@ -46,7 +78,8 @@ fn main() -> int {
   learns of changes through inotify, so a poll with nothing changed costs microseconds;
   elsewhere it checks every file's modification time, at most every 200 ms (so a save is
   seen up to that much later). `ZC_RELOAD_SCAN=1` in the environment makes it scan on
-  Linux too, to test that.
+  Linux too, to test that. Only `.zc` files count: a C file or header the module uses,
+  edited alone, is compiled again at the next `.zc` save (or `build()`).
 - `add_include(dir)` gives tcc a directory to find the module's C headers in, and zc
   too: zc reads them to know the names they declare, so a misspelled C function or
   constant is an error at the `.zc` line, not tcc's "undefined symbol".
@@ -174,7 +207,9 @@ host's pointer to it stays valid.
 - **A reload doesn't start the program again.** `@constructor` functions run when the
   first version loads [`constructor_runs`], and the current version's `@destructor`
   functions at `free()` [`destructor_runs`], in the order a normal build runs them
-  [`constructor_order`].
+  [`constructor_order`]. (A normal build today runs a file's constructors in the reverse of
+  the order they're written, and an imported module's after the importing file's; that
+  looks accidental, and `--reload` will follow it if it changes.)
 - **`@before_reload`** functions run on the old version just before a reload, and
   **`@after_reload`** ones on the new version once the state has moved; neither at the
   first load [`reload_hooks`]. Use them for work to redo after an edit: rebuilding a
@@ -365,6 +400,12 @@ for that.
   checked; the std containers above are the exception.
 - Types are matched by their C name. Two structs of the same name under different `@cfg`
   are one entry (only one is compiled).
+- Only the module's versions are compared with each other, never with the host. A host
+  that declares its own copy of a module type, to read the state, isn't told when the
+  module's changes; keep the state opaque to the host (`void*`, the module's functions), or
+  `require_same()` the type. A name the module doesn't define gives `symbol()` NULL: check
+  it after each `build()` or `poll()` that returned true.
+- `poll()` watches one directory tree (the source's, or `watch(dir)`), for `.zc` files.
 
 ## Debugging
 
