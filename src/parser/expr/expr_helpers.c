@@ -467,11 +467,19 @@ void check_argument_type(ParserContext *ctx, Type *expected, ASTNode *arg)
         return;
     }
     check_generic_instance_argument(ctx, expected, arg);
-    if (value_kinds_clash(ctx, expected, got))
+    // A clash of kinds (task 35). Where the typechecker runs (zc check, --typecheck) it reports
+    // this itself, with every other error; in a build, the same error here.
+    int typechecker_runs = ctx->config && (ctx->config->mode_check || ctx->config->use_typecheck);
+    if (!typechecker_runs && value_kinds_clash(ctx, expected, got))
     {
         char *want = type_to_string(expected);
         char *have = type_to_string(got);
-        zpanic_at(arg->token, "Type validation failed. Expected '%s', but got '%s'", want, have);
+        char msg[512];
+        snprintf(msg, sizeof(msg), "Type mismatch: expected '%s', but found '%s'", want, have);
+        const char *hints[] = {
+            "Check if you need an explicit cast",
+            "Ensure the types match exactly (no implicit conversions for strict types)", NULL};
+        zpanic_with_hints(arg->token, msg, hints);
         return;
     }
     int expected_opaque = expected->kind == TYPE_ALIAS && expected->alias.is_opaque_alias;
