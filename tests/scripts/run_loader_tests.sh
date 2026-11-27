@@ -108,7 +108,7 @@ for t in "${TESTS[@]}"; do
     fi
     loader_flags=()
     for f in "${flags[@]}"; do
-        case "$f" in -I*|-D*) loader_flags+=("$f") ;; esac
+        case "$f" in -I*|-D*|-l*) loader_flags+=("$f") ;; esac  # (-l: the libraries it loads)
     done
     (cd "$d" && timeout 30 "$WORK/load_host$EXE" "$d/prog.c" "${sources[@]}" "${loader_flags[@]}" < /dev/null \
         > loaded.out 2> loaded.err); rc=$?

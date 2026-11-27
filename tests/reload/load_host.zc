@@ -29,7 +29,8 @@ raw {
         {
             size_t len = strlen(argv[a]);
             if (len > 2 && !strcmp(argv[a] + len - 2, ".c") && argv[a][0] != '-') continue; // below
-            if (!strncmp(argv[a], "-I", 2)) tcc_add_include_path(s, argv[a] + 2);
+            if (!strncmp(argv[a], "-l", 2)) zl_load_library(argv[a] + 2); // (as the Reloader does)
+            else if (!strncmp(argv[a], "-I", 2)) tcc_add_include_path(s, argv[a] + 2);
             else if (!strncmp(argv[a], "-D", 2))
             {
                 char *eq = strchr(argv[a] + 2, '=');

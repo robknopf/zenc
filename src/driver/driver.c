@@ -408,6 +408,20 @@ static int compile_program(ZenCompiler *compiler)
     // Compile C
     const char *outfile = compiler->config.output_file ? compiler->config.output_file
                                                        : (z_is_windows() ? "a.exe" : "a.out");
+    // On Windows a program is NAME.exe: gcc's linker adds the .exe to an output without one,
+    // tcc doesn't, and Windows then won't run it (`zc run`, which runs NAME.exe).
+    char exe_out[1024];
+    const char *out_sep = z_path_last_sep(outfile);
+    const char *out_base = out_sep ? out_sep + 1 : outfile;
+    const char *cc_flags = compiler->config.gcc_flags;
+    int links_program = !strstr(cc_flags, "-shared") && !strstr(cc_flags, "-c") &&
+                        !strstr(cc_flags, "-S") && !strstr(cc_flags, "-E");
+    if (z_is_windows() && links_program && !strchr(out_base, '.') &&
+        strlen(outfile) + 5 < sizeof(exe_out))
+    {
+        snprintf(exe_out, sizeof(exe_out), "%s.exe", outfile);
+        outfile = exe_out;
+    }
     ArgList compile_args;
     arg_list_init(&compile_args);
     build_compile_arg_list(&compile_args, outfile, temp_source_buf, compiler);

@@ -78,7 +78,11 @@ before.
 MinGW-w64's gcc (its C runtime, msvcrt, is the one tcc's code uses), the host linked with
 `-ltcc -lpthread -lm` and, where Linux has `-rdynamic`, `-Wl,--export-all-symbols`. zc's
 libtcc is static there too, so a host has no `libtcc.dll` to find. MinGW's gdb debugs it
-(below). `poll()` scans
+(below). A module is compiled for msvcrt alone (tcc's C library there), without MinGW's
+POSIX functions, so std's time, threads, locks and directory listing are Windows' own there
+[`module_uses_std`] (`Thread::cancel` fails: Windows can't stop another thread safely). The
+libraries a module links (`-lws2_32`, which every build there has) are loaded for it, so a
+module can use the network in a host that doesn't. `poll()` scans
 the files there (no inotify yet: up to 200 ms to see a save). Elsewhere (macOS, arm64)
 libtcc loads each version, without the Reloader's own loading: old versions stay loaded,
 and a debugger sees none of them. Where the Reloader loads versions itself, a version it

@@ -27,6 +27,13 @@ test "Thread Spawn and Detach" {
     assert(detach_result.is_ok(), "Thread detach has failed");
 }
 
+// Thread::cancel is pthread_cancel; Windows has no safe way to stop another thread, and there
+// it fails (std/thread.zc).
+@cfg(windows)
+fn cancel_works() -> bool { return false; }
+@cfg(not(windows))
+fn cancel_works() -> bool { return true; }
+
 test "Thread Spawn and Cancel" {
     "Testing thread spawn and cancel";
 
@@ -39,5 +46,5 @@ test "Thread Spawn and Cancel" {
 
     let thr = spawn_result.unwrap();
     let cancel_result = thr.cancel();
-    assert(cancel_result.is_ok(), "Thread cancel has failed");
+    assert(cancel_result.is_ok() == cancel_works(), "Thread cancel has failed");
 }

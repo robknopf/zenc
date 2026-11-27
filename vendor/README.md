@@ -8,7 +8,7 @@ are for this project's code, leave it alone; it builds with its own flags
 | Directory | What | Release | Licence |
 |---|---|---|---|
 | `tree-sitter/` | the tree-sitter runtime: `lib/src` (all but `wasm-stdlib/`) and `lib/include` | [v0.27.2](https://github.com/tree-sitter/tree-sitter/releases/tag/v0.27.2), 2026-11-07; tarball sha256 `356528363bf7fbad12a2cfeb5a2678c0118ef886a4d69ad9a379db5fdef0735f` | MIT (`tree-sitter/LICENSE`) |
-| `tinycc/` | Tiny C Compiler: its sources, `include/`, `lib/` and `win32/` (all but `tests/` and `examples/`) | mob branch at [e9e9e7f](https://repo.or.cz/tinycc.git/commit/e9e9e7f6236895a32c5e905aada486bab6671e95), 2026-11-23 (no release since 0.9.27); one change, below | LGPL 2.1 (`tinycc/COPYING`; `tinycc/RELICENSING`) |
+| `tinycc/` | Tiny C Compiler: its sources, `include/`, `lib/` and `win32/` (all but `tests/` and `examples/`) | mob branch at [e9e9e7f](https://repo.or.cz/tinycc.git/commit/e9e9e7f6236895a32c5e905aada486bab6671e95), 2026-11-23 (no release since 0.9.27); two changes, below | LGPL 2.1 (`tinycc/COPYING`; `tinycc/RELICENSING`) |
 | `tree-sitter-c/` | the C grammar's generated parser: `src/parser.c` and `src/tree_sitter/` | [v0.24.2](https://github.com/tree-sitter/tree-sitter-c/releases/tag/v0.24.2), 2026-04-22; tarball sha256 `2eeb4db31f8fa0865e45488503d13403923bcb485a1bdb637abff8c42dd97364` | MIT (`tree-sitter-c/LICENSE`) |
 
 zc uses tree-sitter and its grammar to read the declarations of the C headers a program includes (the names,
@@ -35,9 +35,11 @@ compiled by. libtcc is static on every OS (on Windows too, where tinycc's defaul
 DLL). x86-64 Linux and Windows; elsewhere zc uses a libtcc of the system's, as before.
 
 `zc_tcc.h` is zc's (the Reloader, finding it beside `libtcc.h`, asks zc for tcc's
-directory). One change to tinycc: in `tcc.h`, built by gcc for 64-bit Windows, `setjmp`
-gives the C runtime no frame to unwind to. libtcc's errors return by longjmp, and MinGW's,
-unwinding (RtlUnwind), crashed from a libtcc linked into a program.
+directory). Two changes to tinycc. In `tcc.h`, built by gcc for 64-bit Windows, `setjmp`
+gives the C runtime no frame to unwind to: libtcc's errors return by longjmp, and MinGW's,
+unwinding (RtlUnwind), crashed from a libtcc linked into a program. And
+`win32/lib/kernel32.def` lists, at its end, kernel32's SRW locks and condition variables
+(Vista's), which std/sync.zc uses on Windows and tinycc's list predates.
 
 LGPL 2.1: zc and the programs that link libtcc (development builds that reload: release
 builds don't) are linked with it statically; whoever distributes one must let its users
@@ -45,6 +47,6 @@ relink it with another libtcc (the LGPL's section 6), as the object files and `z
 do.
 
 To update: check out the commit, copy its tracked files over (without `tests/` and
-`examples/`), make the change again, and check the file lists and `config.h` in the
+`examples/`), make the changes again, and check the file lists and `config.h` in the
 Makefile and `cmake/ZcTcc.cmake` against tinycc's Makefile, `lib/Makefile` and
 `configure`.

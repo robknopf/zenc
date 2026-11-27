@@ -386,13 +386,36 @@ static void add_include_args(ArgList *list, ZenCompiler *compiler)
     }
 }
 
+// The C compiler: `--cc tcc` (plain `tcc`) is zc's own tcc when it has one (beside it, in
+// zc_tcc_dir()), not whichever is first on PATH: the one whose libtcc reloading programs
+// link, with zc's changes (vendor/README.md). Added as one argument, as its path may have
+// spaces; any other is split at spaces (`zig cc`).
+static void add_compiler_arg(ArgList *list, CompilerConfig *cfg)
+{
+    if (strcmp(cfg->cc, "tcc") == 0 || strcmp(cfg->cc, "tcc.exe") == 0)
+    {
+        const char *dir = zc_tcc_dir(cfg);
+        if (dir)
+        {
+            char path[MAX_PATH_SIZE + 16];
+            snprintf(path, sizeof(path), "%s/tcc%s", dir, z_is_windows() ? ".exe" : "");
+            if (access(path, F_OK) == 0)
+            {
+                arg_list_add(list, path);
+                return;
+            }
+        }
+    }
+    arg_list_add_from_string(list, cfg->cc);
+}
+
 void build_compile_arg_list(ArgList *list, const char *outfile, const char *temp_source_file,
                             ZenCompiler *compiler)
 {
     CompilerConfig *cfg = &compiler->config;
 
     // Compiler
-    arg_list_add_from_string(list, cfg->cc);
+    add_compiler_arg(list, cfg);
 
     // GCC Flags
     arg_list_add_from_string(list, cfg->gcc_flags);
@@ -472,7 +495,25 @@ void build_compile_arg_list(ArgList *list, const char *outfile, const char *temp
     }
 
     // Linker flags
+    size_t first_link = list->count;
     arg_list_add_from_string(list, compiler->link_flags);
+    if (z_is_windows() && z_path_match_compiler(cfg->cc, "tcc"))
+    {
+        // tcc on Windows links msvcrt, which has the math functions, and has no libm or
+        // libpthread (std's threads are Windows' there: std/thread.zc): a program's `-lm` or
+        // `-lpthread` (for gcc, or for other systems) means nothing there.
+        size_t kept = first_link;
+        for (size_t i = first_link; i < list->count; i++)
+        {
+            if (strcmp(list->args[i], "-lm") == 0 || strcmp(list->args[i], "-lpthread") == 0)
+            {
+                zfree(list->args[i]);
+                continue;
+            }
+            list->args[kept++] = list->args[i];
+        }
+        list->count = kept;
+    }
     if (z_is_windows())
     {
         arg_list_add(list, "-lws2_32");
@@ -534,14 +575,21 @@ void write_reload_build_args(ZenCompiler *compiler, const char *path)
     ArgList list = {0};
     add_include_args(&list, compiler);
     arg_list_add_from_string(&list, compiler->cflags);
+    arg_list_add_from_string(&list, compiler->link_flags);
+    if (z_is_windows())
+    {
+        arg_list_add(&list, "-lws2_32"); // (as every build there links it: see above)
+    }
     CompilerConfig *cfg = &compiler->config;
     FILE *f = NULL;
     for (size_t i = 0; i < list.count + cfg->c_files.length; i++)
     {
         const char *a = i < list.count ? list.args[i] : cfg->c_files.data[i - list.count];
-        // (include directories, defines and C files: what tcc needs; -iquote's directory too)
+        // (include directories, defines, the libraries it links and C files: what tcc and
+        // the Reloader need; -iquote's directory too)
         int quote_dir = i > 0 && i < list.count && strcmp(list.args[i - 1], "-iquote") == 0;
-        if (i < list.count && strncmp(a, "-I", 2) != 0 && strncmp(a, "-D", 2) != 0 && !quote_dir)
+        if (i < list.count && strncmp(a, "-I", 2) != 0 && strncmp(a, "-D", 2) != 0 &&
+            strncmp(a, "-l", 2) != 0 && !quote_dir)
         {
             continue;
         }
@@ -638,7 +686,7 @@ void build_preprocess_arg_list(ArgList *list, const char *outfile, const char *s
                                ZenCompiler *compiler)
 {
     CompilerConfig *cfg = &compiler->config;
-    arg_list_add_from_string(list, cfg->cc);
+    add_compiler_arg(list, cfg);
     arg_list_add_from_string(list, cfg->gcc_flags);
     arg_list_add_from_string(list, compiler->cflags);
     if (cfg->is_freestanding)

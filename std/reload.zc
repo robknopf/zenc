@@ -837,6 +837,23 @@ raw {
         return at;
     }
 
+    // Loads a library a module links (`-lws2_32`: its name without lib and suffix), so its
+    // names are the host's (zl_host_sym): on Windows ws2_32.dll, elsewhere libNAME.so, made
+    // global. 0 if it isn't there (a library the host already has, or only a linker script
+    // as libm.so is, does no harm then).
+    static int zl_load_library(const char *name)
+    {
+        char file[300];
+        if (strlen(name) > 200) return 0;
+    #ifdef _WIN32
+        snprintf(file, sizeof file, "%s.dll", name);
+        return LoadLibraryA(file) != NULL;
+    #else
+        snprintf(file, sizeof file, "lib%s.so", name);
+        return dlopen(file, RTLD_NOW | RTLD_GLOBAL) != NULL;
+    #endif
+    }
+
     // A name the host defines: in the program or a library it loaded. On Windows, what a
     // module exports (the program's own functions only if it's linked with
     // -Wl,--export-all-symbols); the C runtime's before the others, as ntdll.dll exports
@@ -3284,7 +3301,18 @@ raw {
                 size_t n = strlen(line);
                 while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
                 if (!n) continue;
-                if (!strncmp(line, "-I", 2) || !strncmp(line, "-D", 2))
+                if (!strncmp(line, "-l", 2))
+                {
+                    // A library it links: loaded, for its names (ws2_32 on Windows, which a
+                    // host that doesn't use the network hasn't)
+                    if (pass) continue;
+    #ifdef ZR_LOADER
+                    zl_load_library(line + 2);
+    #else
+                    tcc_add_library(s, line + 2);
+    #endif
+                }
+                else if (!strncmp(line, "-I", 2) || !strncmp(line, "-D", 2))
                 {
                     if (pass) continue;
                     if (line[1] == 'I') tcc_add_include_path(s, line + 2);

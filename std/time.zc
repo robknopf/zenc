@@ -15,10 +15,52 @@ extern fn gettimeofday(tv: timeval*, tz: void*) -> int;
 // Note: time() is declared by <time.h> which is already included above.
 // Zen C does not redeclare it to avoid type conflicts (time_t varies by platform).
 
+// On Windows the time and sleeping come from the C runtime (_ftime64, in msvcrt itself) and
+// kernel32's Sleep: gettimeofday and usleep are MinGW's own, which tcc, compiling for msvcrt
+// alone, doesn't have. (No <windows.h>: what std includes, every program that imports it
+// gets. Sleep is declared as <windows.h> declares it.)
+raw {
+#ifdef _WIN32
+#include <sys/timeb.h>
+    __declspec(dllimport) void __stdcall Sleep(unsigned long);
+    static unsigned long long _z_time_win_now_ms(void)
+    {
+        struct __timeb64 tb;
+        _ftime64(&tb);
+        return (unsigned long long)tb.time * 1000ULL + (unsigned long long)tb.millitm;
+    }
+    static void _z_time_win_sleep_us(unsigned long long us)
+    {
+        Sleep((unsigned long)((us + 999ULL) / 1000ULL));
+    }
+#endif
+}
+
+@cfg(windows)
+extern fn _z_time_win_now_ms() -> u64;
+@cfg(windows)
+extern fn _z_time_win_sleep_us(us: u64);
+
+@cfg(windows)
+fn _time_now_impl() -> u64 {
+    return _z_time_win_now_ms();
+}
+
+@cfg(not(windows))
 fn _time_now_impl() -> u64 {
     let tv: timeval;
     gettimeofday(&tv, NULL);
     return (u64)tv.tv_sec * 1000 + (u64)tv.tv_usec / 1000;
+}
+
+@cfg(windows)
+fn _z_time_sleep_us(us: u64) {
+    _z_time_win_sleep_us(us);
+}
+
+@cfg(not(windows))
+fn _z_time_sleep_us(us: u64) {
+    usleep((u32)us);
 }
 
 fn _z_time_time() -> i64 {
@@ -51,11 +93,11 @@ impl Time {
     
     /// Sleeps for the given Duration.
     fn sleep(d: Duration) {
-        usleep((u32)(d.millis * (u64)1000));
+        _z_time_sleep_us(d.millis * (u64)1000);
     }
     
     /// Sleeps for the given number of milliseconds.
     fn sleep_ms(ms: u64) {
-        usleep((u32)(ms * (u64)1000));
+        _z_time_sleep_us(ms * (u64)1000);
     }
 }

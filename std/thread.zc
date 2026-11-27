@@ -1,13 +1,15 @@
 
-include <pthread.h>
 include <time.h>
-include <unistd.h>
 
 import "./core.zc"
 import "./result.zc"
 import "./mem.zc"
 import "./sync.zc"
-// Essential raw block: required for pthread operations and closure trampolining
+// Essential raw block: required for thread operations and closure trampolining. Threads are
+// pthread's on POSIX; on Windows the C runtime's (_beginthreadex), as pthread isn't there for
+// every compiler (MinGW has its own; tcc, compiling for msvcrt alone, has none). No
+// <windows.h>: what std includes, every program that imports it gets; what it's used for is
+// declared here as it declares it.
 // This block cannot be eliminated because:
 // 1. z_closure_T is an internal compiler type for Zen-C closures
 // 2. pthread_t, pthread_mutex_t are opaque types that can't be extern'd with void*
@@ -34,10 +36,52 @@ raw {
         return NULL;
     }
 
+#ifdef _WIN32
+    #include <process.h>
+    __declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void *, unsigned long);
+    __declspec(dllimport) int __stdcall CloseHandle(void *);
+    __declspec(dllimport) void __stdcall Sleep(unsigned long);
+
+    static unsigned __stdcall _z_thread_win_start(void *arg) {
+        _z_thread_trampoline(arg);
+        return 0;
+    }
+
+    static int _z_thread_equal(void* handle1, void* handle2) {
+        return handle1 == handle2;
+    }
+
+    static int _z_thread_spawn(void *ctx_copy, size_t *out_handle) {
+        uintptr_t h = _beginthreadex(NULL, 0, _z_thread_win_start, ctx_copy, 0, NULL);
+        if (!h) return -1;
+        *out_handle = (size_t)h;
+        return 0;
+    }
+
+    static int _z_thread_join(void *handle) {
+        if (WaitForSingleObject(handle, 0xFFFFFFFFUL) != 0) return -1;
+        CloseHandle(handle);
+        return 0;
+    }
+
+    static int _z_thread_detach(void* handle) {
+        return CloseHandle(handle) ? 0 : -1;
+    }
+
+    // (Windows has no safe way to stop another thread: TerminateThread can leave its locks
+    // held and its memory half written)
+    static int _z_thread_cancel(void* handle) {
+        (void)handle;
+        return -1;
+    }
+#else
+    #include <pthread.h>
+    #include <unistd.h>
+
     static int _z_thread_equal(void* handle1, void* handle2) {
         return pthread_equal((pthread_t)handle1, (pthread_t)handle2);
     }
-    
+
     static int _z_thread_spawn(void *ctx_copy, size_t *out_handle) {
         pthread_t pt;
         int ret = pthread_create(&pt, NULL, _z_thread_trampoline, ctx_copy);
@@ -46,7 +90,7 @@ raw {
         }
         return (int)ret;
     }
-    
+
     static int _z_thread_join(void *handle) {
         return (int)pthread_join((pthread_t)handle, NULL);
     }
@@ -58,9 +102,14 @@ raw {
     static int _z_thread_cancel(void* handle) {
         return pthread_cancel((pthread_t)handle);
     }
-    
+#endif
+
     static void _z_usleep(int micros) {
+#ifdef _WIN32
+        Sleep((unsigned long)((micros + 999) / 1000));
+#else
         usleep(micros);
+#endif
     }
 }
 
@@ -118,6 +167,8 @@ impl Thread {
         return Result<bool>::Ok(true);
     }
 
+    /// Cancels the thread (pthread_cancel). Not on Windows, which has no safe way to stop
+    /// another thread: there it fails.
     fn cancel(self) -> Result<bool> {
         let err = _z_thread_cancel(self.handle);
         if err {

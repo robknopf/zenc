@@ -17,10 +17,76 @@ extern fn opendir(name: const char*) -> DIR*;
 extern fn closedir(dir: DIR*) -> int;
 extern fn stat(path: const char*, buf: fs_stat*) -> int;
 
+// On Windows a directory is listed with the C runtime's _findfirst64 and _findnext64 (in
+// msvcrt itself): its opendir, readdir and closedir are MinGW's own, which tcc, compiling for
+// msvcrt alone, doesn't have. (No <windows.h>: what std includes, every program that imports
+// it gets.)
+raw {
+#ifdef _WIN32
+#include <io.h>
+    typedef struct { intptr_t h; int first; struct __finddata64_t fd; } _z_fs_windir;
+    static void *_z_fs_win_opendir(const char *name)
+    {
+        size_t n = strlen(name);
+        char *pattern = (char *)malloc(n + 3);
+        if (!pattern) return NULL;
+        memcpy(pattern, name, n + 1);
+        if (n && pattern[n - 1] != '/' && pattern[n - 1] != '\\') strcat(pattern, "/");
+        strcat(pattern, "*");
+        _z_fs_windir *d = (_z_fs_windir *)calloc(1, sizeof *d);
+        if (d) d->h = _findfirst64(pattern, &d->fd);
+        free(pattern);
+        if (d && d->h == -1)
+        {
+            free(d);
+            d = NULL;
+        }
+        if (d) d->first = 1;
+        return d;
+    }
+    static int _z_fs_win_readdir(void *dir, char *out_name, int buf_size, int *is_dir)
+    {
+        _z_fs_windir *d = (_z_fs_windir *)dir;
+        if (!d->first && _findnext64(d->h, &d->fd) != 0) return 0;
+        d->first = 0;
+        strncpy(out_name, d->fd.name, (size_t)buf_size - 1);
+        out_name[buf_size - 1] = 0;
+        *is_dir = (d->fd.attrib & _A_SUBDIR) != 0;
+        return 1;
+    }
+    static int _z_fs_win_closedir(void *dir)
+    {
+        _z_fs_windir *d = (_z_fs_windir *)dir;
+        int r = _findclose(d->h);
+        free(d);
+        return r;
+    }
+#endif
+}
+
+@cfg(windows)
+extern fn _z_fs_win_opendir(name: const char*) -> void*;
+@cfg(windows)
+extern fn _z_fs_win_readdir(dir: void*, out_name: char*, buf_size: c_int, is_dir: c_int*) -> c_int;
+@cfg(windows)
+extern fn _z_fs_win_closedir(dir: void*) -> c_int;
+
+@cfg(windows)
+fn _z_fs_opendir(name: const char*) -> void* {
+    return _z_fs_win_opendir(name);
+}
+
+@cfg(windows)
+fn _z_fs_closedir(dir: void*) -> int {
+    return (int)_z_fs_win_closedir(dir);
+}
+
+@cfg(not(windows))
 fn _z_fs_opendir(name: const char*) -> void* {
     return (void*)opendir(name);
 }
 
+@cfg(not(windows))
 fn _z_fs_closedir(dir: void*) -> int {
     return closedir((DIR*)dir);
 }
@@ -34,6 +100,12 @@ fn _z_fs_get_metadata(path: const char*, size: u64*, is_dir: c_int*, is_file: c_
     return 0;
 }
 
+@cfg(windows)
+fn _z_fs_read_entry(dir: void*, out_name: char*, buf_size: c_int, is_dir: c_int*) -> c_int {
+    return _z_fs_win_readdir(dir, out_name, buf_size, is_dir);
+}
+
+@cfg(not(windows))
 fn _z_fs_read_entry(dir: void*, out_name: char*, buf_size: c_int, is_dir: c_int*) -> c_int {
     raw {
         struct dirent* ent = readdir((DIR*)dir);

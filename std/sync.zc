@@ -1,8 +1,147 @@
 import "./core.zc"
 import "./mem.zc"
 
-include <pthread.h>
-include <semaphore.h>
+// The locks, in C: pthread's on POSIX; on Windows its own (SRW locks and condition
+// variables, Vista and later), as pthread isn't there for every compiler (MinGW has its own;
+// tcc, compiling for msvcrt alone, has none). Barrier and Semaphore are built on them on
+// Windows and macOS (below). No <windows.h>: what std includes, every program that imports it
+// gets; its functions are declared here as it declares them.
+raw {
+#ifdef _WIN32
+    struct _RTL_SRWLOCK;
+    struct _RTL_CONDITION_VARIABLE;
+    __declspec(dllimport) void __stdcall InitializeSRWLock(struct _RTL_SRWLOCK *);
+    __declspec(dllimport) void __stdcall AcquireSRWLockExclusive(struct _RTL_SRWLOCK *);
+    __declspec(dllimport) void __stdcall ReleaseSRWLockExclusive(struct _RTL_SRWLOCK *);
+    __declspec(dllimport) void __stdcall AcquireSRWLockShared(struct _RTL_SRWLOCK *);
+    __declspec(dllimport) void __stdcall ReleaseSRWLockShared(struct _RTL_SRWLOCK *);
+    __declspec(dllimport) unsigned char __stdcall TryAcquireSRWLockExclusive(struct _RTL_SRWLOCK *);
+    __declspec(dllimport) unsigned char __stdcall TryAcquireSRWLockShared(struct _RTL_SRWLOCK *);
+    __declspec(dllimport) void __stdcall InitializeConditionVariable(struct _RTL_CONDITION_VARIABLE *);
+    __declspec(dllimport) void __stdcall WakeConditionVariable(struct _RTL_CONDITION_VARIABLE *);
+    __declspec(dllimport) void __stdcall WakeAllConditionVariable(struct _RTL_CONDITION_VARIABLE *);
+    __declspec(dllimport) int __stdcall SleepConditionVariableSRW(struct _RTL_CONDITION_VARIABLE *,
+                                                                  struct _RTL_SRWLOCK *, unsigned long, unsigned long);
+    // (an SRW lock and a condition variable are a pointer each; an RwLock also notes whether
+    // a writer holds it, for unlock)
+    typedef struct { void *lock; volatile long writer; } _z_sync_rw;
+    #define _Z_SRW(h) ((struct _RTL_SRWLOCK *)(h))
+    static void _z_mutex_init(void *h) { InitializeSRWLock(_Z_SRW(h)); }
+    static void _z_mutex_lock(void *h) { AcquireSRWLockExclusive(_Z_SRW(h)); }
+    static void _z_mutex_unlock(void *h) { ReleaseSRWLockExclusive(_Z_SRW(h)); }
+    static int _z_mutex_trylock(void *h) { return TryAcquireSRWLockExclusive(_Z_SRW(h)) != 0; }
+    static void _z_mutex_destroy(void *h) { (void)h; }
+    static void _z_cond_init(void *h) { InitializeConditionVariable((struct _RTL_CONDITION_VARIABLE *)h); }
+    static void _z_cond_wait(void *h, void *m)
+    {
+        SleepConditionVariableSRW((struct _RTL_CONDITION_VARIABLE *)h, _Z_SRW(m), 0xFFFFFFFFUL, 0);
+    }
+    static void _z_cond_signal(void *h) { WakeConditionVariable((struct _RTL_CONDITION_VARIABLE *)h); }
+    static void _z_cond_broadcast(void *h) { WakeAllConditionVariable((struct _RTL_CONDITION_VARIABLE *)h); }
+    static void _z_cond_destroy(void *h) { (void)h; }
+    static void _z_rw_init(void *h)
+    {
+        InitializeSRWLock((struct _RTL_SRWLOCK *)&((_z_sync_rw *)h)->lock);
+        ((_z_sync_rw *)h)->writer = 0;
+    }
+    static void _z_rw_rdlock(void *h) { AcquireSRWLockShared((struct _RTL_SRWLOCK *)&((_z_sync_rw *)h)->lock); }
+    static void _z_rw_wrlock(void *h)
+    {
+        AcquireSRWLockExclusive((struct _RTL_SRWLOCK *)&((_z_sync_rw *)h)->lock);
+        ((_z_sync_rw *)h)->writer = 1;
+    }
+    static void _z_rw_unlock(void *h)
+    {
+        _z_sync_rw *rw = (_z_sync_rw *)h;
+        if (rw->writer)
+        {
+            rw->writer = 0;
+            ReleaseSRWLockExclusive((struct _RTL_SRWLOCK *)&rw->lock);
+        }
+        else
+            ReleaseSRWLockShared((struct _RTL_SRWLOCK *)&rw->lock);
+    }
+    static int _z_rw_tryrdlock(void *h) { return TryAcquireSRWLockShared((struct _RTL_SRWLOCK *)&((_z_sync_rw *)h)->lock) != 0; }
+    static int _z_rw_trywrlock(void *h)
+    {
+        if (!TryAcquireSRWLockExclusive((struct _RTL_SRWLOCK *)&((_z_sync_rw *)h)->lock)) return 0;
+        ((_z_sync_rw *)h)->writer = 1;
+        return 1;
+    }
+    static void _z_rw_destroy(void *h) { (void)h; }
+#else
+    #include <pthread.h>
+    #include <semaphore.h>
+    static void _z_mutex_init(void *h) { pthread_mutex_init((pthread_mutex_t *)h, NULL); }
+    static void _z_mutex_lock(void *h) { pthread_mutex_lock((pthread_mutex_t *)h); }
+    static void _z_mutex_unlock(void *h) { pthread_mutex_unlock((pthread_mutex_t *)h); }
+    static int _z_mutex_trylock(void *h) { return pthread_mutex_trylock((pthread_mutex_t *)h) == 0; }
+    static void _z_mutex_destroy(void *h) { pthread_mutex_destroy((pthread_mutex_t *)h); }
+    static void _z_cond_init(void *h) { pthread_cond_init((pthread_cond_t *)h, NULL); }
+    static void _z_cond_wait(void *h, void *m) { pthread_cond_wait((pthread_cond_t *)h, (pthread_mutex_t *)m); }
+    static void _z_cond_signal(void *h) { pthread_cond_signal((pthread_cond_t *)h); }
+    static void _z_cond_broadcast(void *h) { pthread_cond_broadcast((pthread_cond_t *)h); }
+    static void _z_cond_destroy(void *h) { pthread_cond_destroy((pthread_cond_t *)h); }
+    static void _z_rw_init(void *h) { pthread_rwlock_init((pthread_rwlock_t *)h, NULL); }
+    static void _z_rw_rdlock(void *h) { pthread_rwlock_rdlock((pthread_rwlock_t *)h); }
+    static void _z_rw_wrlock(void *h) { pthread_rwlock_wrlock((pthread_rwlock_t *)h); }
+    static void _z_rw_unlock(void *h) { pthread_rwlock_unlock((pthread_rwlock_t *)h); }
+    static int _z_rw_tryrdlock(void *h) { return pthread_rwlock_tryrdlock((pthread_rwlock_t *)h) == 0; }
+    static int _z_rw_trywrlock(void *h) { return pthread_rwlock_trywrlock((pthread_rwlock_t *)h) == 0; }
+    static void _z_rw_destroy(void *h) { pthread_rwlock_destroy((pthread_rwlock_t *)h); }
+    #ifndef __APPLE__
+    static void _z_barrier_init(void *h, int count) { pthread_barrier_init((pthread_barrier_t *)h, NULL, (unsigned)count); }
+    static int _z_barrier_wait(void *h)
+    {
+        int ret = pthread_barrier_wait((pthread_barrier_t *)h);
+        return ret == 0 || ret == PTHREAD_BARRIER_SERIAL_THREAD;
+    }
+    static void _z_barrier_destroy(void *h) { pthread_barrier_destroy((pthread_barrier_t *)h); }
+    static void _z_sem_init(void *h, int value) { sem_init((sem_t *)h, 0, (unsigned)value); }
+    static void _z_sem_wait(void *h) { sem_wait((sem_t *)h); }
+    static int _z_sem_trywait(void *h) { return sem_trywait((sem_t *)h) == 0; }
+    static void _z_sem_post(void *h) { sem_post((sem_t *)h); }
+    static int _z_sem_value(void *h) { int v = 0; sem_getvalue((sem_t *)h, &v); return v; }
+    static void _z_sem_destroy(void *h) { sem_destroy((sem_t *)h); }
+    #endif
+#endif
+}
+
+extern fn _z_mutex_init(h: void*);
+extern fn _z_mutex_lock(h: void*);
+extern fn _z_mutex_unlock(h: void*);
+extern fn _z_mutex_trylock(h: void*) -> c_int;
+extern fn _z_mutex_destroy(h: void*);
+extern fn _z_cond_init(h: void*);
+extern fn _z_cond_wait(h: void*, m: void*);
+extern fn _z_cond_signal(h: void*);
+extern fn _z_cond_broadcast(h: void*);
+extern fn _z_cond_destroy(h: void*);
+extern fn _z_rw_init(h: void*);
+extern fn _z_rw_rdlock(h: void*);
+extern fn _z_rw_wrlock(h: void*);
+extern fn _z_rw_unlock(h: void*);
+extern fn _z_rw_tryrdlock(h: void*) -> c_int;
+extern fn _z_rw_trywrlock(h: void*) -> c_int;
+extern fn _z_rw_destroy(h: void*);
+@cfg(all(not(apple), not(windows)))
+extern fn _z_barrier_init(h: void*, count: c_int);
+@cfg(all(not(apple), not(windows)))
+extern fn _z_barrier_wait(h: void*) -> c_int;
+@cfg(all(not(apple), not(windows)))
+extern fn _z_barrier_destroy(h: void*);
+@cfg(all(not(apple), not(windows)))
+extern fn _z_sem_init(h: void*, value: c_int);
+@cfg(all(not(apple), not(windows)))
+extern fn _z_sem_wait(h: void*);
+@cfg(all(not(apple), not(windows)))
+extern fn _z_sem_trywait(h: void*) -> c_int;
+@cfg(all(not(apple), not(windows)))
+extern fn _z_sem_post(h: void*);
+@cfg(all(not(apple), not(windows)))
+extern fn _z_sem_value(h: void*) -> c_int;
+@cfg(all(not(apple), not(windows)))
+extern fn _z_sem_destroy(h: void*);
 
 struct Mutex {
     handle: void*;
@@ -12,27 +151,27 @@ impl Mutex {
     /// Creates a new Mutex.
     fn new() -> Mutex {
         let ptr = alloc_bytes(64); 
-        pthread_mutex_init((pthread_mutex_t*)ptr, NULL);
+        _z_mutex_init(ptr);
         return Mutex { handle: ptr };
     }
     
     /// Locks the mutex.
     fn lock(self) {
-        pthread_mutex_lock((pthread_mutex_t*)self.handle);
+        _z_mutex_lock(self.handle);
     }
     
     /// Unlocks the mutex.
     fn unlock(self) {
-        pthread_mutex_unlock((pthread_mutex_t*)self.handle);
+        _z_mutex_unlock(self.handle);
     }
     
     fn try_lock(self) -> bool {
-        return pthread_mutex_trylock((pthread_mutex_t*)self.handle) == 0;
+        return _z_mutex_trylock(self.handle) != 0;
     }
     
     fn free(self) {
         if (self.handle != NULL) {
-            pthread_mutex_destroy((pthread_mutex_t*)self.handle);
+            _z_mutex_destroy(self.handle);
             dealloc<void>(self.handle);
             self.handle = NULL;
         }
@@ -47,25 +186,25 @@ impl CondVar {
     /// Creates a new Mutex.
     fn new() -> CondVar {
         let ptr = alloc_bytes(64); 
-        pthread_cond_init((pthread_cond_t*)ptr, NULL);
+        _z_cond_init(ptr);
         return CondVar { handle: ptr };
     }
     
     fn wait(self, mutex: Mutex*) {
-        pthread_cond_wait((pthread_cond_t*)self.handle, (pthread_mutex_t*)(*mutex).handle);
+        _z_cond_wait(self.handle, (*mutex).handle);
     }
     
     fn signal(self) {
-        pthread_cond_signal((pthread_cond_t*)self.handle);
+        _z_cond_signal(self.handle);
     }
     
     fn broadcast(self) {
-        pthread_cond_broadcast((pthread_cond_t*)self.handle);
+        _z_cond_broadcast(self.handle);
     }
     
     fn free(self) {
         if (self.handle != NULL) {
-            pthread_cond_destroy((pthread_cond_t*)self.handle);
+            _z_cond_destroy(self.handle);
             dealloc<void>(self.handle);
             self.handle = NULL;
         }
@@ -80,34 +219,34 @@ impl RwLock {
     /// Creates a new Mutex.
     fn new() -> RwLock {
         let ptr = alloc_bytes(64); 
-        pthread_rwlock_init((pthread_rwlock_t*)ptr, NULL);
+        _z_rw_init(ptr);
         return RwLock { handle: ptr };
     }
     
     fn rdlock(self) {
-        pthread_rwlock_rdlock((pthread_rwlock_t*)self.handle);
+        _z_rw_rdlock(self.handle);
     }
     
     fn wrlock(self) {
-        pthread_rwlock_wrlock((pthread_rwlock_t*)self.handle);
+        _z_rw_wrlock(self.handle);
     }
     
     /// Unlocks the mutex.
     fn unlock(self) {
-        pthread_rwlock_unlock((pthread_rwlock_t*)self.handle);
+        _z_rw_unlock(self.handle);
     }
     
     fn try_rdlock(self) -> bool {
-        return pthread_rwlock_tryrdlock((pthread_rwlock_t*)self.handle) == 0;
+        return _z_rw_tryrdlock(self.handle) != 0;
     }
     
     fn try_wrlock(self) -> bool {
-        return pthread_rwlock_trywrlock((pthread_rwlock_t*)self.handle) == 0;
+        return _z_rw_trywrlock(self.handle) != 0;
     }
     
     fn free(self) {
         if (self.handle != NULL) {
-            pthread_rwlock_destroy((pthread_rwlock_t*)self.handle);
+            _z_rw_destroy(self.handle);
             dealloc<void>(self.handle);
             self.handle = NULL;
         }
@@ -164,7 +303,7 @@ struct Barrier {
     handle: void*;
 }
 
-@cfg(apple)
+@cfg(any(apple, windows))
 struct BarrierData {
     mutex: Mutex;
     cond: CondVar;
@@ -174,7 +313,7 @@ struct BarrierData {
 }
 
 impl Barrier {
-    @cfg(apple)
+    @cfg(any(apple, windows))
     /// Creates a new Mutex.
     fn new(count: int) -> Barrier {
         let data = (BarrierData*)alloc_bytes(sizeof(BarrierData));
@@ -186,15 +325,15 @@ impl Barrier {
         return Barrier { handle: data };
     }
 
-    @cfg(not(apple))
+    @cfg(all(not(apple), not(windows)))
     /// Creates a new Mutex.
     fn new(count: int) -> Barrier {
         let ptr = alloc_bytes(64); 
-        pthread_barrier_init((pthread_barrier_t*)ptr, NULL, count);
+        _z_barrier_init(ptr, (c_int)count);
         return Barrier { handle: ptr };
     }
     
-    @cfg(apple)
+    @cfg(any(apple, windows))
     fn wait(self) -> bool {
         let data = (BarrierData*)self.handle;
         data.mutex.lock();
@@ -216,16 +355,12 @@ impl Barrier {
         return false;
     }
 
-    @cfg(not(apple))
+    @cfg(all(not(apple), not(windows)))
     fn wait(self) -> bool {
-        let ret = pthread_barrier_wait((pthread_barrier_t*)self.handle);
-        if (ret == 0 || ret == -1) {
-            return true;
-        }
-        return false;
+        return _z_barrier_wait(self.handle) != 0;
     }
     
-    @cfg(apple)
+    @cfg(any(apple, windows))
     fn free(self) {
         if (self.handle != NULL) {
             let data = (BarrierData*)self.handle;
@@ -236,10 +371,10 @@ impl Barrier {
         }
     }
 
-    @cfg(not(apple))
+    @cfg(all(not(apple), not(windows)))
     fn free(self) {
         if (self.handle != NULL) {
-            pthread_barrier_destroy((pthread_barrier_t*)self.handle);
+            _z_barrier_destroy(self.handle);
             dealloc<void>(self.handle);
             self.handle = NULL;
         }
@@ -256,7 +391,7 @@ struct Semaphore {
     handle: void*;
 }
 
-@cfg(apple)
+@cfg(any(apple, windows))
 struct SemData {
     mutex: Mutex;
     cond: CondVar;
@@ -264,7 +399,7 @@ struct SemData {
 }
 
 impl Semaphore {
-    @cfg(apple)
+    @cfg(any(apple, windows))
     /// Creates a new Mutex.
     fn new(value: int) -> Semaphore {
         let data = (SemData*)zalloc_bytes(sizeof(SemData));
@@ -274,15 +409,15 @@ impl Semaphore {
         return Semaphore { handle: data };
     }
 
-    @cfg(not(apple))
+    @cfg(all(not(apple), not(windows)))
     /// Creates a new Mutex.
     fn new(value: int) -> Semaphore {
         let ptr = alloc_bytes(32);
-        sem_init((sem_t*)ptr, 0, value);
+        _z_sem_init(ptr, (c_int)value);
         return Semaphore { handle: ptr };
     }
     
-    @cfg(apple)
+    @cfg(any(apple, windows))
     fn wait(self) {
         let data = (SemData*)self.handle;
         data.mutex.lock();
@@ -293,12 +428,12 @@ impl Semaphore {
         data.mutex.unlock();
     }
 
-    @cfg(not(apple))
+    @cfg(all(not(apple), not(windows)))
     fn wait(self) {
-        sem_wait((sem_t*)self.handle);
+        _z_sem_wait(self.handle);
     }
     
-    @cfg(apple)
+    @cfg(any(apple, windows))
     fn try_wait(self) -> bool {
         let data = (SemData*)self.handle;
         data.mutex.lock();
@@ -311,12 +446,12 @@ impl Semaphore {
         return false;
     }
 
-    @cfg(not(apple))
+    @cfg(all(not(apple), not(windows)))
     fn try_wait(self) -> bool {
-        return sem_trywait((sem_t*)self.handle) == 0;
+        return _z_sem_trywait(self.handle) != 0;
     }
     
-    @cfg(apple)
+    @cfg(any(apple, windows))
     fn post(self) {
         let data = (SemData*)self.handle;
         data.mutex.lock();
@@ -325,12 +460,12 @@ impl Semaphore {
         data.mutex.unlock();
     }
 
-    @cfg(not(apple))
+    @cfg(all(not(apple), not(windows)))
     fn post(self) {
-        sem_post((sem_t*)self.handle);
+        _z_sem_post(self.handle);
     }
     
-    @cfg(apple)
+    @cfg(any(apple, windows))
     fn value(self) -> int {
         let data = (SemData*)self.handle;
         data.mutex.lock();
@@ -339,14 +474,12 @@ impl Semaphore {
         return val;
     }
 
-    @cfg(not(apple))
+    @cfg(all(not(apple), not(windows)))
     fn value(self) -> int {
-        let val: int = 0;
-        sem_getvalue((sem_t*)self.handle, &val);
-        return val;
+        return (int)_z_sem_value(self.handle);
     }
     
-    @cfg(apple)
+    @cfg(any(apple, windows))
     fn free(self) {
         if (self.handle != NULL) {
             let data = (SemData*)self.handle;
@@ -357,10 +490,10 @@ impl Semaphore {
         }
     }
 
-    @cfg(not(apple))
+    @cfg(all(not(apple), not(windows)))
     fn free(self) {
         if (self.handle != NULL) {
-            sem_destroy((sem_t*)self.handle);
+            _z_sem_destroy(self.handle);
             dealloc<void>(self.handle);
             self.handle = NULL;
         }

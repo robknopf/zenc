@@ -1,0 +1,26 @@
+// Version 1. A module using std's time, locks and threads, which on Windows are std's own
+// (Windows' API), not MinGW's POSIX functions: tcc, compiling the module, has only msvcrt
+// (task 46). The same in version 2, edited.
+import "std/time.zc"
+import "std/sync.zc"
+import "std/thread.zc"
+
+let counter: int = 0;
+
+@link_name("reload_step")
+fn reload_step(state: void*) {
+    let t0 = Time::now();
+    Time::sleep_ms(2);
+    let m = Mutex::new();
+    let mp = &m;
+    let t = Thread::spawn(fn() {
+        mp.lock();
+        counter = counter + 1;
+        mp.unlock();
+    }).unwrap();
+    t.join().unwrap();
+    m.lock();
+    let c = counter;
+    m.unlock();
+    println "version 1: time moves {Time::now() >= t0}, counter {c}";
+}
