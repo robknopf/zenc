@@ -15,8 +15,8 @@ what the model says it must:
   - a stored pointer follows its function while it keeps its signature; once it changes or
     is gone, it stays on the last one (copied out of its version), whose call to helper
     still runs the newest helper;
-  - the closure runs the newest lambda while it can be told apart (std/reload.zc's
-    zr_lambda_match), and keeps its old body once it can't;
+  - the closure runs the newest lambda going to the same place (std/reload.zc's
+    zr_lambda_match), however its body changed and whatever lambdas are added beside it;
   - the counter counts every run, across every reload; the literal reads the same.
 
 And that memory stays bounded: from the 40th iteration on, resident memory grows by at most
@@ -117,15 +117,10 @@ def reload_effects(was, now):
             now.ptr[i] = ("pinned", was.value[i])  # stays on the version replaced's f{i}
         else:
             now.ptr[i] = was.ptr[i]
-    kind, frozen = was.cb
-    if kind == "follow":
-        same_body = now.k == was.k
-        n_now = 2 if now.extra_lambda else 1
-        n_was = 2 if was.extra_lambda else 1
-        if not same_body and not (n_now == 1 and n_was <= 1):
-            now.cb = ("pinned", was.k)
-        else:
-            now.cb = was.cb
+    # The kept lambda goes to state.cb, taking and capturing the same in every version: the
+    # closure follows it, whatever its body and the lambdas beside it (zc keys a lambda by
+    # where it goes: `setup#=state.cb`).
+    now.cb = was.cb
     now.runs = was.runs
     now.stored_gen = was.stored_gen
 

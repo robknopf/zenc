@@ -1,0 +1,30 @@
+// Version 5. A closure kept in the host's block runs the same lambda of the newest version:
+// the one with the same body (it moved: version 3 puts another lambda like it before it), or
+// else the one going to the same place (state.cb), taking and capturing the same, its body
+// edited (version 2, and version 4, where its function has another like it). When the
+// lambda going there captures something else (version 5), it keeps its old body, and what
+// that calls by name (helper) runs the newest version's.
+struct State { cb: fn(int) -> int; set: bool; }
+fn helper(x: int) -> int {
+    println "helper version 5";
+    return x * 2;
+}
+fn setup(state: State*) {
+    let k = 3;
+    let j = 0;
+    let unused = fn(x: int) -> int { return x + k; };
+    if unused(0) < 0 { println "never"; }
+    state.cb = fn(x: int) -> int {
+        println "lambda version 5";
+        return helper(x) + k + j;
+    };
+}
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if !state.set {
+        setup(state);
+        state.set = true;
+    }
+    let r = state.cb(1);
+    println "returned {r}";
+}

@@ -1,0 +1,28 @@
+// Version 2. Two closures kept in the host's block, of lambdas alike (each takes an int and
+// captures nothing), one assigned to a field (state.a), one passed to a call (keep's second
+// argument). Version 2 edits both bodies and adds a third lambda like them before them:
+// each closure still runs its own lambda's new body, found by where the lambda goes (zc
+// keys it `setup#=state.a`, `setup#=keep(1)`), not by its body or its place among the others.
+struct State { a: fn(int) -> int; b: fn(int) -> int; set: bool; }
+fn keep(state: State*, f: fn(int) -> int) { state.b = f; }
+fn setup(state: State*) {
+    let other = fn(x: int) -> int { return x; };
+    if other(0) != 0 { println "never"; }
+    state.a = fn(x: int) -> int {
+        println "a version 2";
+        return x + 1;
+    };
+    keep(state, fn(x: int) -> int {
+        println "b version 2";
+        return x + 2;
+    });
+}
+@link_name("reload_step")
+fn reload_step(state: State*) {
+    if !state.set {
+        setup(state);
+        state.set = true;
+    }
+    let r = state.a(1) + state.b(1);
+    println "returned {r}";
+}

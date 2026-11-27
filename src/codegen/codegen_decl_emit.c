@@ -93,12 +93,146 @@ struct ReloadLambda *reload_lambda(ParserContext *ctx, int id, int make)
     {
         return NULL;
     }
-    ctx->cg.reload_lambdas = xrealloc(ctx->cg.reload_lambdas, sizeof(*ctx->cg.reload_lambdas) *
-                                                                  (size_t)(ctx->cg.reload_lambda_count + 1));
+    ctx->cg.reload_lambdas =
+        xrealloc(ctx->cg.reload_lambdas,
+                 sizeof(*ctx->cg.reload_lambdas) * (size_t)(ctx->cg.reload_lambda_count + 1));
     struct ReloadLambda *l = &ctx->cg.reload_lambdas[ctx->cg.reload_lambda_count++];
     memset(l, 0, sizeof(*l));
     l->id = id;
     return l;
+}
+
+// A place's path (`state.cb`, `hits[]`, `on_hit`) into buf, for naming a lambda by where it
+// goes; 0 if it isn't a plain path.
+static int reload_path(ASTNode *node, char *buf, size_t size, int depth)
+{
+    if (!node || depth > 32)
+    {
+        return 0;
+    }
+    size_t used = strlen(buf);
+    switch (node->kind)
+    {
+    case NODE_EXPR_VAR:
+        if (!node->var_ref.name)
+        {
+            return 0;
+        }
+        snprintf(buf + used, size - used, "%s", node->var_ref.name);
+        return 1;
+    case NODE_EXPR_MEMBER:
+        if (!node->member.field || !reload_path(node->member.target, buf, size, depth + 1))
+        {
+            return 0;
+        }
+        used = strlen(buf);
+        snprintf(buf + used, size - used, ".%s", node->member.field);
+        return 1;
+    case NODE_EXPR_INDEX:
+        if (!reload_path(node->index.array, buf, size, depth + 1))
+        {
+            return 0;
+        }
+        used = strlen(buf);
+        snprintf(buf + used, size - used, "[]");
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+// A lambda's key: `fn#=where` when it goes somewhere nameable (where: a variable, a place
+// assigned, `callee(n)` for a call's argument n, `Type{field}`, `return`), with `~2`, `~3`
+// for the next ones going to the same place; else `fn#n`, which of the function's lambdas it
+// is in source order. The Reloader follows a closure to the lambda with its key, its
+// signature the same, when its body changed (std/reload.zc's zr_lambda_match): where a
+// lambda goes says which it is better than how many come before it.
+static void reload_lambda_key(ParserContext *ctx, ASTNode *lambda, const char *fname,
+                              const char *where, int *nlambda)
+{
+    if (!lambda || lambda->kind != NODE_LAMBDA)
+    {
+        return;
+    }
+    struct ReloadLambda *l = reload_lambda(ctx, lambda->lambda.lambda_id, 1);
+    if (l->key)
+    {
+        return;
+    }
+    size_t len = strlen(fname) + (where ? strlen(where) : 0) + 32;
+    l->key = xmalloc(len);
+    if (!where)
+    {
+        snprintf(l->key, len, "%s#%d", fname, (*nlambda)++);
+        return;
+    }
+    snprintf(l->key, len, "%s#=%s", fname, where);
+    for (int n = 2;; n++)
+    {
+        int taken = 0;
+        for (int i = 0; i < ctx->cg.reload_lambda_count && !taken; i++)
+        {
+            struct ReloadLambda *o = &ctx->cg.reload_lambdas[i];
+            taken = o != l && o->key && strcmp(o->key, l->key) == 0;
+        }
+        if (!taken)
+        {
+            break;
+        }
+        snprintf(l->key, len, "%s#=%s~%d", fname, where, n);
+    }
+}
+
+// Names the lambdas `node` puts somewhere (its direct children), before the walk reaches
+// them and numbers the rest.
+static void reload_lambda_places(ParserContext *ctx, ASTNode *node, const char *fname, int *nlambda)
+{
+    char where[256];
+    where[0] = 0;
+    switch (node->kind)
+    {
+    case NODE_VAR_DECL:
+        if (node->var_decl.init_expr && node->var_decl.name)
+        {
+            reload_lambda_key(ctx, node->var_decl.init_expr, fname, node->var_decl.name, nlambda);
+        }
+        break;
+    case NODE_EXPR_BINARY:
+        if (node->binary.op && strcmp(node->binary.op, "=") == 0 &&
+            reload_path(node->binary.left, where, sizeof(where), 0))
+        {
+            reload_lambda_key(ctx, node->binary.right, fname, where, nlambda);
+        }
+        break;
+    case NODE_RETURN:
+        reload_lambda_key(ctx, node->ret.value, fname, "return", nlambda);
+        break;
+    case NODE_EXPR_CALL:
+        if (reload_path(node->call.callee, where, sizeof(where), 0))
+        {
+            size_t base = strlen(where);
+            int n = 0;
+            for (ASTNode *a = node->call.args; a; a = a->next, n++)
+            {
+                snprintf(where + base, sizeof(where) - base, "(%d)", n);
+                reload_lambda_key(ctx, a, fname, where, nlambda);
+            }
+        }
+        break;
+    case NODE_EXPR_STRUCT_INIT:
+        for (ASTNode *f = node->struct_init.fields; f; f = f->next)
+        {
+            if (f->kind == NODE_VAR_DECL && f->var_decl.name && node->struct_init.struct_name)
+            {
+                snprintf(where, sizeof(where), "%s{%s}", node->struct_init.struct_name,
+                         f->var_decl.name);
+                reload_lambda_key(ctx, f->var_decl.init_expr, fname, where, nlambda);
+            }
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 static void reload_collect_in(ParserContext *ctx, ASTNode *node, const char *fname, const char *cfg,
@@ -108,16 +242,11 @@ static void reload_collect_in(ParserContext *ctx, ASTNode *node, const char *fna
     {
         return;
     }
+    reload_lambda_places(ctx, node, fname, nlambda);
     if (node->kind == NODE_LAMBDA)
     {
-        // Where it is: its function, and which of the function's lambdas (in source order).
-        struct ReloadLambda *l = reload_lambda(ctx, node->lambda.lambda_id, 1);
-        if (!l->key)
-        {
-            size_t len = strlen(fname) + 24;
-            l->key = xmalloc(len);
-            snprintf(l->key, len, "%s#%d", fname, (*nlambda)++);
-        }
+        // Going nowhere nameable: which of the function's lambdas it is.
+        reload_lambda_key(ctx, node, fname, NULL, nlambda);
     }
     if (node->kind == NODE_VAR_DECL && node->var_decl.is_static &&
         !node->var_decl.is_thread_local && node->var_decl.name && !reload_static_name(ctx, node))

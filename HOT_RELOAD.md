@@ -58,8 +58,9 @@ fn main() -> int {
   include:`, `lib:`, `link:`), so `zc build host.zc` links it, and the Reloader gives it
   that directory's headers and runtime (it asks zc). A C compiler given the generated C
   needs `-I` and `-L` for that directory and `-ltcc -ldl -lpthread -lm`. Another libtcc
-  (0.9.27 or 0.9.28) works too: link it instead, and the Reloader leaves it looking where
-  it was built for (or `ZC_TCC_DIR`).
+  works too, linked instead: the Reloader leaves it looking where it was built for (or
+  `ZC_TCC_DIR`). It must be 0.9.28 or later where the Reloader loads versions itself
+  (x86-64 Linux and Windows); elsewhere, where libtcc loads them, 0.9.27 works.
 - The module's code can call the host's functions and any library linked into the host
   if the host exports its symbols (link it with `-rdynamic`).
 - Call `poll()` only when none of the module's code is running: between frames, between
@@ -188,11 +189,15 @@ function of the same name. So:
   name runs the newest version's code where the call still means the same
   [`old_function_calls_new`].
 - **A closure kept from before runs the same lambda of the new version**: the one with the
-  same body (found wherever it moved in the file), or else, if its body was edited, the only
-  lambda in its function that takes and captures the same. An edited callback runs its new
-  body. One that can't be told apart (its function has another lambda like it), or whose
-  captures or parameters changed, keeps its old body, and the reload names it: `a lambda in
-  setup (its body changed, and its function has other lambdas like it)` [`lambda_follows`].
+  same body (found wherever it moved in the file), or else, if its body was edited, the one
+  going to the same place, taking and capturing the same. zc names a lambda by where it
+  goes: a variable (`let on_hit = fn...`), a place assigned (`state.cb = fn...`), a call's
+  argument (`on(0)`, the first of `on(...)`), a struct field (`Rock{on_hit}`), a return.
+  One going nowhere nameable is found as the only lambda in its function that takes and
+  captures the same. An edited callback runs its new body. One whose captures or parameters
+  changed, or that can't be told apart, keeps its old body, and the reload names it: `a
+  lambda in setup, to state.cb (the lambda going there takes or captures something else
+  now)` [`lambda_follows`].
 - **A string literal** kept from an old version (or any constant) still reads the same: the
   module's literals are in a pool the Reloader keeps, one copy of each
   [`string_literal_kept`], [`string_literal_old_deleted`].
@@ -353,9 +358,7 @@ breakpoints there: the Zen C extension does (or `"debug.allowBreakpointsEverywhe
 - **Variables** (arguments, locals, globals), **stepping** by `.zc` line, and `list` (the
   C's `#line` directives give the `.zc` files by their absolute path).
 
-It needs libtcc 0.9.28 (zc's is), which writes DWARF (`-gdwarf`). With 0.9.27 the versions are
-compiled with stabs, which gdb no longer binds breakpoints in; everything else works the
-same.
+It needs libtcc 0.9.28 (zc's is), which writes DWARF (`-gdwarf`).
 
 A released version (see "What an old version costs") is unregistered: a breakpoint in it
 goes with it, and stays set for the versions that have that line. A function copied out of
@@ -439,8 +442,7 @@ pending on` lets a breakpoint wait for the module. lldb reads the same interface
   Direct calls stay direct. What `symbol()` returns is a stub as well.
 - **The pool.** A read-only object with no relocation in it (a string literal, a number, a
   table of them) is loaded from a pool in kept memory: one copy of each, by its bytes and,
-  if it has one, its name. (libtcc 0.9.27 puts literals with the writable data: there an
-  anonymous object ending in a zero byte is taken to be one.)
+  if it has one, its name.
 - **Releasing.** After a reload, every old version but the one a crash goes back to is
   released: unregistered, its memory given back and left reserved. A function a stub was
   pinned to was copied out of it first, when the stub was pinned: its bytes into kept

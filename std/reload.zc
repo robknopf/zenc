@@ -62,8 +62,9 @@
 // `zc --tcc-dir` names), which `zc build` and `zc run` link from the lines below. A C
 // compiler given the generated C needs `-I` and `-L` for that directory and `-ltcc -ldl
 // -lpthread -lm` (on Windows, `-ltcc -lpthread -lm`, and the host linked with
-// -Wl,--export-all-symbols where Linux's has -rdynamic). Another libtcc (0.9.27 or 0.9.28)
-// works too, with ZC_TCC_DIR naming its directory. The Reloader
+// -Wl,--export-all-symbols where Linux's has -rdynamic). Another libtcc works too, with
+// ZC_TCC_DIR naming its directory: 0.9.28 or later where the Reloader loads versions itself
+// (x86-64 Linux and Windows), 0.9.27 too elsewhere. The Reloader
 // loads versions itself on x86-64 Linux and Windows; elsewhere libtcc loads them, old
 // versions stay loaded and a debugger sees none of them. It is for development hosts, and
 // not written for --misra builds.
@@ -105,6 +106,11 @@ raw {
     #endif
     #if defined(__x86_64__) && (defined(__linux__) || defined(_WIN32))
     #define ZR_LOADER 1 // the Reloader loads each version itself (zl_load)
+    // It needs libtcc 0.9.28 or later: its read-only string literals and DWARF. (0.9.27
+    // defines TCC_RELOCATE_AUTO.) zc's own is: `zc --tcc-dir`.
+    #ifdef TCC_RELOCATE_AUTO
+    #error "std/reload.zc needs libtcc 0.9.28 or later here: link zc's own (zc --tcc-dir), not the system's"
+    #endif
     #endif
     // Elsewhere libtcc loads each version, and on x86-64 old functions are made to jump to
     // new ones (zr_forward) instead of stubs.
@@ -1289,11 +1295,8 @@ raw {
                         y->st_shndx == ZL_SHN_UNDEF || !im->sec[y->st_shndx])
                         continue;
                     ZlShdr *ys = &im->sh[y->st_shndx];
-                    // libtcc 0.9.27 puts string literals with the writable data: there, an
-                    // anonymous object ending in a zero byte is taken to be one.
-                    int literal = !strncmp(zl_name(im, s), "L.", 2) &&
-                                  ((const unsigned char *)(uintptr_t)im->addr[s])[y->st_size - 1] == 0;
-                    if ((ys->sh_flags & 4) || ((ys->sh_flags & ZL_SHF_WRITE) && !literal) ||
+                    // (string literals are read-only: libtcc 0.9.28, which this loader needs)
+                    if ((ys->sh_flags & 4) || (ys->sh_flags & ZL_SHF_WRITE) ||
                         ys->sh_type == ZL_SHT_NOBITS || !strncmp(zl_name(im, s), "_zc_mf", 6))
                         continue;
                     if (pass)
@@ -3252,8 +3255,7 @@ raw {
     // tcc writes an object file with debug information (beside the C file, removed once read),
     // and the Reloader loads it (zl_load), registered with debuggers: breakpoints by .zc file
     // and line (the C's #line directives) bind in every version as it loads, and backtraces
-    // and variables read through it. DWARF with libtcc 0.9.28 (-gdwarf); 0.9.27 writes stabs,
-    // which gdb no longer binds breakpoints in. Where the Reloader doesn't load versions
+    // and variables read through it (DWARF: -gdwarf). Where the Reloader doesn't load versions
     // itself (not x86-64 Linux or Windows), libtcc compiles them into memory, where a
     // debugger sees no symbols.
     #ifndef ZR_LOADER
@@ -3318,11 +3320,7 @@ raw {
         v->tcc = zr_tcc_new();
         if (!v->tcc) return -1;
         tcc_set_error_func(v->tcc, NULL, own ? zr_on_tcc_error : zr_on_tcc_quiet);
-    #ifdef TCC_RELOCATE_AUTO
-        tcc_set_options(v->tcc, "-g");
-    #else
         tcc_set_options(v->tcc, "-gdwarf");
-    #endif
         tcc_set_output_type(v->tcc, TCC_OUTPUT_OBJ);
         for (int i = 0; i < r->include_count; i++) tcc_add_include_path(v->tcc, r->includes[i]);
         // A thread-local is an ordinary global of the module, shared by its threads (see
@@ -4020,6 +4018,18 @@ raw {
                 (!exact || (st->lkey && e->key && !strcmp(e->key, st->lkey))))
                 exact = e;
         if (exact) return exact;
+        // Going to the same place (zc's key `fn#=where`: a variable, a field, a call's
+        // argument, a return), with the same signature: the same lambda, edited.
+        if (st->lkey && strstr(st->lkey, "#="))
+        {
+            for (const ZcMfLambda *e = now; e && e->c_name; e++)
+                if (e->key && !strcmp(e->key, st->lkey))
+                {
+                    if (!strcmp(zr_s(e->sig), zr_s(st->lsig))) return e;
+                    *why = "the lambda going there takes or captures something else now";
+                    return NULL;
+                }
+        }
         const ZcMfLambda *in_now = NULL, *in_was = NULL;
         int n_now = zr_lambda_alike(now, st->lkey, st->lsig, &in_now);
         int n_was = zr_lambda_alike(was, st->lkey, st->lsig, &in_was);
@@ -4163,9 +4173,11 @@ raw {
                     if (!st->drop && st->lkey)
                     {
                         const char *hash = strchr(st->lkey, '#');
+                        const char *where = strstr(st->lkey, "#=");
                         if (n_kept < 4)
-                            fprintf(log, "%sa lambda in %.*s (%s)", n_kept ? ", " : "reload: old code still runs for: ",
-                                    hash ? (int)(hash - st->lkey) : (int)strlen(st->lkey), st->lkey, st->why);
+                            fprintf(log, "%sa lambda in %.*s%s%s (%s)", n_kept ? ", " : "reload: old code still runs for: ",
+                                    hash ? (int)(hash - st->lkey) : (int)strlen(st->lkey), st->lkey,
+                                    where ? ", to " : "", where ? where + 2 : "", st->why);
                         n_kept++;
                     }
                     continue;

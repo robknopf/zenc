@@ -11,7 +11,11 @@ lambda version 2
 helper version 3
 returned 5
 --- step 4
-reload: old code still runs for: a lambda in setup (its body changed, and its function has other lambdas like it)
-lambda version 2
+lambda version 4
 helper version 4
+returned 5
+--- step 5
+reload: old code still runs for: a lambda in setup, to state.cb (the lambda going there takes or captures something else now)
+lambda version 4
+helper version 5
 returned 5
