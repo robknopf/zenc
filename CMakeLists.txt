@@ -86,10 +86,23 @@ include_directories(
 # Source files read from src-sources.txt (single manifest shared by Makefile, CMakeLists.txt, build.bat)
 file(STRINGS src-sources.txt SRCS)
 
-# --- Find JIT Backend (LibTCC) ---
+# --- tcc: zc's own (vendor/tinycc), or the system's libtcc ---
+# zc's own tcc, as the Makefile builds it (see there and vendor/README.md): libtcc, the tcc
+# program and tcc's runtime, in tcc/ beside zc in the build directory, where zc finds them
+# (`zc --tcc-dir`). The REPL's JIT and std/reload.zc's Reloader use it. On x86-64 Linux and
+# Windows; elsewhere (ZC_OWN_TCC=OFF) a libtcc of the system's, if there is one.
 option(ZC_USE_JIT "Enable JIT support in REPL using LibTCC" ON)
+set(ZC_OWN_TCC_DEFAULT OFF)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+    set(ZC_OWN_TCC_DEFAULT ON)
+endif()
+option(ZC_OWN_TCC "Build zc's own tcc from vendor/tinycc" ${ZC_OWN_TCC_DEFAULT})
 
-if(ZC_USE_JIT)
+if(ZC_USE_JIT AND ZC_OWN_TCC)
+    add_compile_definitions(ZC_HAS_JIT)
+    include(cmake/ZcTcc.cmake)
+    message(STATUS "zc's own tcc (vendor/tinycc): ${ZC_TCC_OUT}")
+elseif(ZC_USE_JIT)
     find_library(TCC_LIBRARY NAMES tcc libtcc)
     if(TCC_LIBRARY)
         add_compile_definitions(ZC_HAS_JIT)
@@ -124,7 +137,9 @@ endif()
 
 # Platform-specific library logic
 set(PLATFORM_LIBS Threads::Threads)
-if(ZC_USE_JIT)
+if(ZC_USE_JIT AND ZC_OWN_TCC)
+    list(APPEND PLATFORM_LIBS zc_libtcc)
+elseif(ZC_USE_JIT)
     list(APPEND PLATFORM_LIBS ${TCC_LIBRARY})
 endif()
 if(WIN32)
@@ -168,6 +183,10 @@ endif()
 # Add executable
 add_executable(zc ${SRCS})
 target_link_libraries(zc PRIVATE zc_vendor ${PLATFORM_LIBS})
+if(ZC_USE_JIT AND ZC_OWN_TCC)
+    target_include_directories(zc PRIVATE ${ZC_TCC_OUT})
+    add_dependencies(zc zc_tcc)
+endif()
 if(NOT "${ZC_COMPILE_FLAGS}" STREQUAL "")
     target_compile_options(zc PRIVATE ${ZC_COMPILE_FLAGS})
 endif()
@@ -195,6 +214,11 @@ install(FILES std.zc DESTINATION share/zenc)
 install(DIRECTORY std DESTINATION share/zenc)
 install(FILES src/repl/docs.json DESTINATION share/zenc)
 install(FILES plugins/zprep_plugin.h DESTINATION include/zenc)
+if(ZC_USE_JIT AND ZC_OWN_TCC)
+    # (zc finds it beside std.zc. The tcc program in it looks in the build directory's for
+    # its headers unless given -B; zc and the Reloader say where.)
+    install(DIRECTORY ${ZC_TCC_OUT} DESTINATION share/zenc USE_SOURCE_PERMISSIONS)
+endif()
 install(DIRECTORY ${CMAKE_BINARY_DIR}/plugins/ DESTINATION lib/zenc/plugins 
         FILES_MATCHING PATTERN "*.${PLUGIN_EXT}")
 

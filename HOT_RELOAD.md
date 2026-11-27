@@ -52,8 +52,8 @@ fn main() -> int {
   constant is an error at the `.zc` line, not tcc's "undefined symbol".
 - `symbol(name)` gives the address of a function (or anything else) in the version loaded
   now. Look it up again after a `build()` or `poll()` that returned true.
-- The host needs libtcc: zc's own, built with zc from `vendor/tinycc` into the `tcc/`
-  beside its `std.zc` (`zc --tcc-dir` names it; `make install` puts it in
+- The host needs libtcc: zc's own, built with zc (by `make` or CMake) from
+  `vendor/tinycc` into a `tcc/` beside zc (`zc --tcc-dir` names it; installed, it is in
   `share/zenc/tcc`), so no tcc need be installed. `std/reload.zc` asks for it (`//>
   include:`, `lib:`, `link:`), so `zc build host.zc` links it, and the Reloader gives it
   that directory's headers and runtime (it asks zc). A C compiler given the generated C

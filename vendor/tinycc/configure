@@ -739,7 +739,6 @@ rm -f $TMPN* $CONFTEST
 use_cp=
 fn_makelink()
 {
-    test -f "$1/$2" || return 0  # (zc: a directory not vendored, tests/)
     tgt=$1/$2
     case $2 in
     */*) dn=${2%/*}

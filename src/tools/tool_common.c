@@ -114,7 +114,7 @@ void z_compiler_setup(ZenCompiler *compiler)
             }
 
             // Try parent
-            char *last_slash = (char *)strrchr(current_root, '/');
+            char *last_slash = z_path_last_sep(current_root); // (on Windows, a backslash too)
             if (last_slash && last_slash != current_root)
             {
                 *last_slash = '\0';

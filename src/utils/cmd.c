@@ -29,9 +29,9 @@ void print_search_paths(CompilerConfig *cfg)
     }
 }
 
-// zc's own tcc (vendor/tinycc, built into tcc/ beside std.zc): its libtcc, headers and
-// runtime, where std/reload.zc's Reloader and the programs it's in find them. ZC_TCC_DIR in
-// the environment says another; NULL when there's none (zc built with ZC_HAS_JIT=0).
+// zc's own tcc (vendor/tinycc, built into a tcc/ beside zc or std.zc): its libtcc, headers
+// and runtime, where std/reload.zc's Reloader and the programs it's in find them.
+// ZC_TCC_DIR in the environment says another; NULL when there's none (zc built without it).
 const char *zc_tcc_dir(CompilerConfig *cfg)
 {
     static char dir[MAX_PATH_SIZE];
@@ -40,14 +40,26 @@ const char *zc_tcc_dir(CompilerConfig *cfg)
     {
         return env;
     }
-    if (!cfg->root_path)
+    // Beside zc (a CMake build's, in its build directory), then beside std.zc (make's, in
+    // the source tree, and an installed zc's: SHAREDIR/tcc).
+    char self[MAX_PATH_SIZE];
+    z_get_executable_path(self, sizeof(self));
+    const char *places[] = {self[0] ? self : NULL, cfg->root_path};
+    for (int i = 0; i < 2; i++)
     {
-        return NULL;
+        if (!places[i])
+        {
+            continue;
+        }
+        char check[MAX_PATH_SIZE + 16];
+        snprintf(dir, sizeof(dir), "%s/tcc", places[i]);
+        snprintf(check, sizeof(check), "%s/libtcc.h", dir);
+        if (access(check, F_OK) == 0)
+        {
+            return dir;
+        }
     }
-    char check[MAX_PATH_SIZE + 16];
-    snprintf(dir, sizeof(dir), "%s/tcc", cfg->root_path);
-    snprintf(check, sizeof(check), "%s/libtcc.h", dir);
-    return access(check, F_OK) == 0 ? dir : NULL;
+    return NULL;
 }
 
 // Puts zc_tcc_dir() in the environment as ZC_TCC_DIR, for `${ZC_TCC_DIR}` in `//>`

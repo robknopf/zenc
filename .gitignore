@@ -84,3 +84,5 @@ awesome-zenc/
 
 # zc's own tcc, built from vendor/tinycc
 /tcc/
+/build/
+/build-*/

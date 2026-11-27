@@ -91,19 +91,38 @@ else
     LIBS = -lm -lpthread -ldl
 endif
 
-# zc's own tcc (vendor/tinycc, see vendor/README.md): libtcc and tcc's runtime, its C
-# headers and libtcc1.a, built by tinycc's own build in obj/tinycc and gathered in tcc/,
-# beside std.zc, where zc finds them (`make install` puts them in SHAREDIR/tcc). The REPL's
-# JIT links that libtcc, and std/reload.zc's Reloader links it into the programs that
-# reload. ZC_HAS_JIT=0 builds zc without it (and without tcc/).
-ZC_HAS_JIT ?= 1
+# zc's own tcc (vendor/tinycc, see vendor/README.md): libtcc, the tcc program and tcc's
+# runtime (its C headers and libtcc1.a), compiled from tinycc's sources (below, as
+# CMakeLists.txt does) into obj/tinycc and gathered in tcc/, beside zc and std.zc, where zc
+# finds them (`make install` puts them in SHAREDIR/tcc). The REPL's JIT links that libtcc,
+# and std/reload.zc's Reloader links it into the programs that reload. On x86-64 Linux and
+# Windows; elsewhere a libtcc of the system's, if there is one, as before. ZC_HAS_JIT=0
+# builds without either.
+ifeq ($(OS),Windows_NT)
+    ZC_OWN_TCC ?= 1
+else ifeq ($(shell uname -s)/$(shell uname -m),Linux/x86_64)
+    ZC_OWN_TCC ?= 1
+else
+    ZC_OWN_TCC ?= 0
+endif
+ifeq ($(ZC_OWN_TCC),1)
+    ZC_HAS_JIT ?= 1
+else ifeq ($(origin ZC_HAS_JIT),undefined)
+    # (a libtcc of the system's: only if a small program using it compiles and links)
+    TCC_PROBE_HASH := \#
+    TCC_PROBE_DIRS := $(if $(wildcard /usr/local/lib/libtcc.a),-I/usr/local/include -L/usr/local/lib)
+    ZC_HAS_JIT := $(shell printf '$(TCC_PROBE_HASH)include <libtcc.h>\nint main(void) { tcc_delete(tcc_new()); return 0; }\n' | $(CC) -x c - -o /dev/null $(TCC_PROBE_DIRS) -ltcc >/dev/null 2>&1 && echo 1 || echo 0)
+endif
 TCC_OUT = tcc
-TCC_LIB = $(TCC_OUT)/libtcc.a
 TCC_BUILD = $(OBJ_DIR)/tinycc
-TCC_CC ?= $(CC)
+ifeq ($(ZC_OWN_TCC)$(ZC_HAS_JIT),11)
+    TCC_LIB = $(TCC_OUT)/libtcc.a
+else
+    TCC_LIB =
+endif
 ZC_RUN ?= ./zc
 ifeq ($(ZC_HAS_JIT), 1)
-    CFLAGS += -DZC_HAS_JIT -I$(TCC_OUT)
+    CFLAGS += -DZC_HAS_JIT $(if $(TCC_LIB),-I$(TCC_OUT))
 endif
 
 TARGET = zc$(EXE)
@@ -115,7 +134,7 @@ ifeq ($(OS),Windows_NT)
     LIBS = -lws2_32
 endif
 ifeq ($(ZC_HAS_JIT), 1)
-    LIBS := $(TCC_LIB) $(LIBS)
+    LIBS := $(if $(TCC_LIB),$(TCC_LIB),$(TCC_PROBE_DIRS) -ltcc) $(LIBS)
 endif
 
  # Feature selection (default: all enabled)
@@ -225,42 +244,78 @@ $(OBJ_DIR)/vendor/%.o: vendor/%.c
 # tcc/ (see ZC_HAS_JIT above), laid out as tcc's lib path (tcc_set_lib_path) is on each
 # OS: its headers in include/ (on Windows with tcc's own Windows headers), libtcc1.a beside
 # them (on Windows in lib/, with the DLLs' .def files); and libtcc.a, libtcc.h and the tcc
-# program at the top. Built static on Windows too, so nothing there is a DLL to find.
+# program at the top. Static on Windows too, so nothing there is a DLL to find.
+#
+# Built as tinycc's configure and Makefile build it, without them (they need a Unix shell
+# and its tools; CMakeLists.txt builds it the same way): its config.h; tccdefs.h made into C
+# (c2str); libtcc.c compiled as one source (it includes the rest for the target config.h
+# names); tcc.c linked with it; and libtcc1.a compiled by that tcc. Keep in step with
+# CMakeLists.txt.
 TCC_SRC = vendor/tinycc
-# (configure, run in TCC_BUILD, by a relative path: on Windows, MSYS mangles absolute ones)
-TCC_UP = $(subst $(eval) ,,$(foreach d,$(subst /, ,$(TCC_BUILD)),../))
-TCC_RT_O = runmain.o bt-exe.o bt-log.o bcheck.o bcheck_run.o
+TCC_VERSION := $(shell cat $(TCC_SRC)/VERSION)
+TCC_CFLAGS = -O2 -w -fno-strict-aliasing -I$(TCC_BUILD)
+TCC_LIB1_SRCS = lib/libtcc1.c lib/stdatomic.c lib/atomic.S lib/builtin.c lib/alloca.S lib/alloca-bt.S lib/tcov.c
+TCC_RT_SRCS = lib/runmain.c lib/bt-exe.c lib/bt-log.c
 ifeq ($(OS),Windows_NT)
-    TCC_CONFIGURE = --enable-static --config-mingw32
+    TCC_LIB1_SRCS += win32/lib/chkstk.S win32/lib/crt1.c win32/lib/crt1w.c win32/lib/wincrt1.c \
+                     win32/lib/wincrt1w.c win32/lib/dllcrt1.c win32/lib/dllmain.c win32/lib/winex.c
+    TCC_RT_SRCS += lib/bt-dll.c
+    TCC_B = -B$(TCC_SRC)/win32 -I$(TCC_SRC)/include
     TCC_RT_LIB = $(TCC_OUT)/lib
-    TCC_RT_O += bt-dll.o
+    TCC_EXE_LIBS = -static
+    # (no directory built in: on Windows tcc looks beside tcc.exe, or beside the program
+    # libtcc is in, unless told)
+    TCC_CONFIG = echo '\#define TCC_TARGET_PE 1';
 else
-    TCC_CONFIGURE =
+    TCC_LIB1_SRCS += lib/va_list.c lib/dsohandle.c
+    TCC_B = -B$(TCC_SRC)
     TCC_RT_LIB = $(TCC_OUT)
+    TCC_EXE_LIBS = -lm -ldl -lpthread
+    # (as configure does: the multiarch triplet whose crti.o is there, else /usr/lib64; musl's
+    # loader; and the directory tcc looks in, built in)
+    TCC_CONFIG = t=$$($(TCC_BUILD)/conftest$(EXE) triplet); \
+        if [ -f /usr/lib/$$t/crti.o ]; then echo "\#define CONFIG_TRIPLET \"$$t\""; \
+        elif [ -f /usr/lib64/crti.o ]; then echo '\#define CONFIG_TCC_LIBPATHS "{B}:/usr/lib64"'; \
+            echo '\#define CONFIG_TCC_CRTPREFIX "/usr/lib64"'; fi; \
+        if [ -f /lib/ld-musl-x86_64.so.1 ]; then echo '\#define CONFIG_TCC_MUSL 1'; \
+            echo '\#define CONFIG_TCC_ELFINTERP "/lib/ld-musl-x86_64.so.1"'; fi; \
+        echo '\#define CONFIG_TCCDIR "$(abspath $(TCC_OUT))"';
 endif
-$(TCC_LIB): $(wildcard vendor/tinycc/*.c vendor/tinycc/*.h vendor/tinycc/lib/* vendor/tinycc/include/*)
+
+$(TCC_OUT)/libtcc.a: $(wildcard $(TCC_SRC)/*.c $(TCC_SRC)/*.h $(TCC_SRC)/lib/* $(TCC_SRC)/include/* $(TCC_SRC)/win32/lib/*)
 	$(RM) $(TCC_BUILD) $(TCC_OUT)
-	$(MKDIR) $(TCC_BUILD) $(TCC_OUT)/include $(TCC_RT_LIB)
-	cd $(TCC_BUILD) && $(TCC_UP)$(TCC_SRC)/configure --cc="$(TCC_CC)" --tccdir="$(abspath $(TCC_OUT))" $(TCC_CONFIGURE) > configure.log
-	$(MAKE) -C $(TCC_BUILD) tcc$(EXE) libtcc.a libtcc1.a > $(TCC_BUILD)/make.log
+	$(MKDIR) $(TCC_BUILD)/lib $(TCC_OUT)/include $(TCC_RT_LIB)
+	$(CC) -o $(TCC_BUILD)/conftest$(EXE) $(TCC_SRC)/conftest.c
+	$(CC) -DC2STR -o $(TCC_BUILD)/c2str$(EXE) $(TCC_SRC)/conftest.c
+	$(TCC_BUILD)/c2str$(EXE) $(TCC_SRC)/include/tccdefs.h $(TCC_BUILD)/tccdefs_.h
+	{ echo '#define TCC_VERSION "$(TCC_VERSION)"'; echo '#define TCC_TARGET_X86_64 1'; \
+	  echo '#define CONFIG_TCC_PREDEFS 1'; $(TCC_CONFIG) } > $(TCC_BUILD)/config.h
+	$(CC) $(TCC_CFLAGS) -c $(TCC_SRC)/libtcc.c -o $(TCC_BUILD)/libtcc.o
+	$(AR) rcs $(TCC_BUILD)/libtcc.a $(TCC_BUILD)/libtcc.o
+	$(CC) $(TCC_CFLAGS) -DONE_SOURCE=0 -c $(TCC_SRC)/tcc.c -o $(TCC_BUILD)/tcc.o
+	$(CC) -o $(TCC_BUILD)/tcc$(EXE) $(TCC_BUILD)/tcc.o $(TCC_BUILD)/libtcc.a $(TCC_EXE_LIBS)
+	for f in $(TCC_LIB1_SRCS); do b=$${f##*/}; \
+	    $(TCC_BUILD)/tcc$(EXE) $(TCC_B) -I$(TCC_BUILD) -c $(TCC_SRC)/$$f -o $(TCC_BUILD)/lib/$${b%.*}.o || exit 1; done
+	$(TCC_BUILD)/tcc$(EXE) -ar rcs $(TCC_RT_LIB)/libtcc1.a $(TCC_BUILD)/lib/*.o
+	for f in $(TCC_RT_SRCS); do b=$${f##*/}; \
+	    $(TCC_BUILD)/tcc$(EXE) $(TCC_B) -I$(TCC_BUILD) -c $(TCC_SRC)/$$f -o $(TCC_RT_LIB)/$${b%.*}.o || exit 1; done
+	$(TCC_BUILD)/tcc$(EXE) $(TCC_B) -I$(TCC_BUILD) -bt -c $(TCC_SRC)/lib/bcheck.c -o $(TCC_RT_LIB)/bcheck.o
+	$(TCC_BUILD)/tcc$(EXE) $(TCC_B) -I$(TCC_BUILD) -bt -DBCHECK_RUN -c $(TCC_SRC)/lib/bcheck.c -o $(TCC_RT_LIB)/bcheck_run.o
 	cp $(TCC_SRC)/include/*.h $(TCC_SRC)/tcclib.h $(TCC_OUT)/include/
 ifeq ($(OS),Windows_NT)
 	cp -r $(TCC_SRC)/win32/include/. $(TCC_OUT)/include/
 	cp $(TCC_SRC)/win32/lib/*.def $(TCC_RT_LIB)/
 endif
-	cp $(TCC_BUILD)/libtcc1.a $(TCC_RT_LIB)/
-	for o in $(TCC_RT_O); do if [ -f $(TCC_BUILD)/$$o ]; then cp $(TCC_BUILD)/$$o $(TCC_RT_LIB)/; fi; done
-	cp $(TCC_BUILD)/tcc$(EXE) $(TCC_SRC)/libtcc.h $(TCC_OUT)/
-	printf '// zc'"'"'s own libtcc (vendor/tinycc): std/reload.zc asks zc for its directory.\n#define ZC_OWN_LIBTCC 1\n' > $(TCC_OUT)/zc_tcc.h
-	cp $(TCC_BUILD)/libtcc.a $(TCC_LIB)
+	cp $(TCC_BUILD)/tcc$(EXE) $(TCC_SRC)/libtcc.h $(TCC_SRC)/zc_tcc.h $(TCC_OUT)/
+	cp $(TCC_BUILD)/libtcc.a $(TCC_OUT)/libtcc.a
 	@echo "=> Built tcc: $(TCC_OUT)/"
 
-ifeq ($(ZC_HAS_JIT), 1)
+ifneq ($(TCC_LIB),)
 $(OBJ_DIR)/src/repl/repl_jit.o: | $(TCC_LIB)
 $(TARGET): $(TCC_LIB)
 $(ALL_TOOLS): | $(TCC_LIB)
 endif
-tcc: $(TCC_LIB)
+tcc: $(TCC_OUT)/libtcc.a
 
 TOOL_BASE_OBJS = $(CORE_OBJS) $(ANALYSIS_OBJS) $(CODEGEN_OBJS) $(MISRA_OBJS) \
                  $(PLATFORM_OBJS) $(UTILS_OBJS) $(DIAG_OBJS) $(PLUGIN_OBJS) $(VENDOR_OBJS)
@@ -486,7 +541,7 @@ install: $(TARGET) install-tools
 	$(INSTALL) -m 644 src/utils/emitter.h src/utils/zvec.h src/utils/zalloc.h $(INCLUDEDIR)/
 
 	# Install zc's tcc, built for where it goes (the directory it looks in is built in)
-	$(if $(filter 1,$(ZC_HAS_JIT)),$(MAKE) TCC_OUT="$(SHAREDIR)/tcc" TCC_BUILD="$(OBJ_DIR)/tinycc-install" "$(SHAREDIR)/tcc/libtcc.a")
+	$(if $(TCC_LIB),$(MAKE) TCC_OUT="$(SHAREDIR)/tcc" TCC_BUILD="$(OBJ_DIR)/tinycc-install" "$(SHAREDIR)/tcc/libtcc.a")
 
 	# Install compiled plugins
 	$(INSTALL) -d $(SHAREDIR)/plugins
