@@ -521,7 +521,8 @@ static unsigned long long reload_lambda_text(const char *text, int id, char **si
     snprintf(head, sizeof head, "struct Lambda_%d_Ctx {", id);
     const char *st = strstr(text, head);
     const char *st_end = st ? strstr(st, "};") : NULL;
-    size_t slen = (st && st_end ? (size_t)(st_end - st) : 0) + (line && end ? (size_t)(end - line) : 0) + 2;
+    size_t slen =
+        (st && st_end ? (size_t)(st_end - st) : 0) + (line && end ? (size_t)(end - line) : 0) + 2;
     char *raw = xmalloc(slen);
     raw[0] = 0;
     if (st && st_end)

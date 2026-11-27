@@ -78,7 +78,7 @@ CFLAGS += $(if $(filter 1,$(CC_IS_CLANG)),$(CLANG_WARN_FLAGS),$(GCC_WARN_FLAGS))
 ifeq ($(findstring tcc,$(CC)),tcc)
 TCC_BASE = -std=$(C_STD) -Wall -Wextra -Werror -g -DZC_ALLOW_INTERNAL -DZC_HAS_JIT
 TCC_DEFS = $(filter -DZC_% -DZEN_% -DHAS_%,$(DEFINES))
-TCC_INCS = -I/usr/local/include -I./src -I./src/ast -I./src/parser -I./src/codegen -I./plugins -I./src/zen -I./src/utils -I./src/lexer -I./src/analysis -I./src/lsp -I./src/diagnostics
+TCC_INCS = -I/usr/local/include -I./src -I./src/ast -I./src/parser -I./src/codegen -I./plugins -I./src/zen -I./src/utils -I./src/lexer -I./src/analysis -I./src/lsp -I./src/diagnostics -I./vendor/tree-sitter/include
 CFLAGS = $(TCC_BASE) $(TCC_DEFS) $(TCC_INCS)
 endif
 

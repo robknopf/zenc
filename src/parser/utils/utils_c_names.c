@@ -297,7 +297,9 @@ static char *c_cache_get(char **p)
 
 static int c_cache_read_decls(ParserContext *ctx, char *p)
 {
-    CDecl d = {0};
+    CDecl d;
+    memset(&d, 0,
+           sizeof(d)); // (no kind yet: 0 is none of CDeclKind's, which clang's -Wassign-enum minds)
     int have = 0;
     while (*p)
     {

@@ -592,7 +592,8 @@ static void cd_aggregate(const CdRead *r, TSNode spec, CDecl *into)
         }
         return;
     }
-    CDecl agg = {0};
+    CDecl agg;
+    memset(&agg, 0, sizeof(agg)); // (no kind yet: see utils_c_names.c's c_cache_read_decls)
     if (!ts_node_is_null(body))
     {
         cd_fields(r, body, &agg, 0);

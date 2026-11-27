@@ -453,7 +453,7 @@ static int compile_program(ZenCompiler *compiler)
     {
         ArgList run_args;
         arg_list_init(&run_args);
-        char exe_path[1024];
+        char exe_path[1024 + 8]; // (outfile, up to exe_out's 1024, and "./" or ".exe")
         if (z_is_windows())
         {
             snprintf(exe_path, sizeof(exe_path), "%s", outfile);
