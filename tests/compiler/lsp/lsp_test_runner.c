@@ -1253,6 +1253,20 @@ static void test_c_decls(void)
                                  "    let x = MADE_HERE;\n"
                                  "}\n");
     expect_diagnostics(850, comptime_path, NULL, NULL, "Undefined");
+
+    // An extern fn's C enum parameter (a binding's): checked as the header's function is.
+    const char *extern_path = C_TEST_DIR "/extern_enum.zc";
+    open_document(extern_path, "//> include: " C_TEST_DIR "/include\n"
+                               "include \"decls.h\"\n"
+                               "extern fn dpaint(c: dcolor);\n"
+                               "fn main() {\n"
+                               "    dpaint(D_LARGE);\n"
+                               "    dpaint(D_GREEN);\n"
+                               "    dpaint(1);\n"
+                               "}\n");
+    expect_diagnostics(851, extern_path,
+                       "Argument 1 of 'dpaint' is a 'dsize', but the parameter is a 'dcolor'", NULL,
+                       "Argument");
     printf("PASS: test_c_decls\n");
 }
 

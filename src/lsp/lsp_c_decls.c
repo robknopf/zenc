@@ -389,11 +389,60 @@ static const CDecl *c_function(ParserContext *ctx, const char *name)
     return d;
 }
 
+// The C enum a call's argument is, if it's one of a C enum's constants (the LSP has no types
+// for locals), else NULL.
+static const char *arg_c_enum(ParserContext *ctx, ASTNode *a)
+{
+    if (a->kind != NODE_EXPR_VAR)
+    {
+        return NULL;
+    }
+    const CDecl *c = c_decl_find(ctx, a->var_ref.name);
+    if (!c || c->kind != CD_ENUM_CONSTANT || find_symbol_in_all(ctx, a->var_ref.name))
+    {
+        return NULL;
+    }
+    return c_decl_enum_of(ctx, c->type);
+}
+
+// A call to a function the Zen C declares (an extern fn, as a binding's, or its own): an
+// argument for a parameter that's a C enum is that enum, as a build checks it (codegen's
+// c_decls_check_sig_enums).
+static void check_sig_call(ParserContext *ctx, ASTNode *call, FuncSig *sig, const char *name,
+                           cJSON *diagnostics)
+{
+    int i = 0;
+    for (ASTNode *a = call->call.args; a && i < sig->total_args; a = a->next, i++)
+    {
+        if (!sig->arg_types || !sig->arg_types[i])
+        {
+            continue;
+        }
+        char *param_c = type_to_c_string(sig->arg_types[i], 0);
+        const char *want = param_c ? c_decl_enum_of(ctx, param_c) : NULL;
+        zfree(param_c);
+        const char *have = want ? arg_c_enum(ctx, a) : NULL;
+        if (have && strcmp(have, want) != 0)
+        {
+            char msg[1024];
+            snprintf(msg, sizeof(msg), "Argument %d of '%s' is a '%s', but the parameter is a '%s'",
+                     i + 1, name, have, want);
+            add_diagnostic(diagnostics, a->token, msg);
+        }
+    }
+}
+
 static void check_call(ParserContext *ctx, ASTNode *call, cJSON *diagnostics)
 {
     ASTNode *callee = call->call.callee;
     if (!callee || callee->kind != NODE_EXPR_VAR)
     {
+        return;
+    }
+    FuncSig *sig = find_func(ctx, callee->var_ref.name);
+    if (sig)
+    {
+        check_sig_call(ctx, call, sig, callee->var_ref.name, diagnostics);
         return;
     }
     const CDecl *d = c_function(ctx, callee->var_ref.name);
@@ -419,16 +468,7 @@ static void check_call(ParserContext *ctx, ASTNode *call, cJSON *diagnostics)
     for (ASTNode *a = call->call.args; a && i < d->nparams; a = a->next, i++)
     {
         const char *want = c_decl_enum_of(ctx, d->params[i].type);
-        if (!want || a->kind != NODE_EXPR_VAR)
-        {
-            continue; // (only a constant: the LSP has no types for locals)
-        }
-        const CDecl *c = c_decl_find(ctx, a->var_ref.name);
-        if (!c || c->kind != CD_ENUM_CONSTANT || find_symbol_in_all(ctx, a->var_ref.name))
-        {
-            continue;
-        }
-        const char *have = c_decl_enum_of(ctx, c->type);
+        const char *have = want ? arg_c_enum(ctx, a) : NULL; // (only a constant)
         if (have && strcmp(have, want) != 0)
         {
             snprintf(msg, sizeof(msg),
