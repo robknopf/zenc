@@ -235,6 +235,69 @@ static void reload_lambda_places(ParserContext *ctx, ASTNode *node, const char *
     }
 }
 
+// --reload: a `@thread_local` static, emitted as storage per thread that the host keeps by
+// its key (std/reload.zc's zr_tls_get): tcc compiles a thread-local for a program's own
+// thread-local block, which a module loaded later can't have. From here on its name means
+// this thread's (reload_local_declared). Each version finds the host's storage once (its
+// own _zt_h_N), and a thread's is made, with the initial value, when it first uses it.
+// 0 if it can't be (no C type to give it): then it's emitted as before.
+int emit_reload_tls(ParserContext *ctx, ASTNode *node)
+{
+    if (!ctx->config->reload_mode || ctx->config->use_cpp || !node->var_decl.is_thread_local ||
+        !node->var_decl.name)
+    {
+        return 0;
+    }
+    char *type = reload_static_type(ctx, node);
+    if (!type)
+    {
+        return 0;
+    }
+    const char *key = reload_tls_key(ctx, node);
+    char global_key[256];
+    if (!key)
+    {
+        snprintf(global_key, sizeof(global_key), "#%s", node->var_decl.name); // (at file scope)
+        key = global_key;
+    }
+    int id = ctx->cg.reload_tls_emitted++;
+    char tname[48], buf[512];
+    snprintf(tname, sizeof(tname), "_zt_t_%d", id);
+    EMIT(ctx, "/* @thread_local %s: per thread, kept by the reload host as \"%s\" */ typedef ",
+         node->var_decl.name, key);
+    emit_var_decl_type(ctx, type, tname);
+    EMIT(ctx, "; ");
+    const char *init = "0";
+    char init_ref[48];
+    if (node->var_decl.init_expr)
+    {
+        EMIT(ctx, "static const %s _zt_i_%d = ", tname, id);
+        codegen_expression(ctx, node->var_decl.init_expr);
+        EMIT(ctx, "; ");
+        snprintf(init_ref, sizeof(init_ref), "&_zt_i_%d", id);
+        init = init_ref;
+    }
+    EMIT(ctx, "static void *_zt_h_%d;\n", id);
+    snprintf(buf, sizeof(buf), "(*(%s *)zr_tls_get(&_zt_h_%d, \"%s\", sizeof(%s), %s))", tname, id,
+             key, tname, init);
+    reload_local_declared(ctx, node->var_decl.name, xstrdup(buf));
+    zfree(type);
+    return 1;
+}
+
+// A `@thread_local` static's key (struct ReloadTls), or NULL if the walk didn't name it.
+const char *reload_tls_key(ParserContext *ctx, ASTNode *decl)
+{
+    for (int i = 0; i < ctx->cg.reload_tls_count; i++)
+    {
+        if (ctx->cg.reload_tls[i].decl == decl)
+        {
+            return ctx->cg.reload_tls[i].key;
+        }
+    }
+    return NULL;
+}
+
 static void reload_collect_in(ParserContext *ctx, ASTNode *node, const char *fname, const char *cfg,
                               int depth, int *nlambda)
 {
@@ -247,6 +310,33 @@ static void reload_collect_in(ParserContext *ctx, ASTNode *node, const char *fna
     {
         // Going nowhere nameable: which of the function's lambdas it is.
         reload_lambda_key(ctx, node, fname, NULL, nlambda);
+    }
+    if (node->kind == NODE_VAR_DECL && node->var_decl.is_thread_local && node->var_decl.name &&
+        !reload_tls_key(ctx, node))
+    {
+        // Its key, `function#name` (`~2` for a second of the name in the function).
+        size_t len = strlen(fname) + strlen(node->var_decl.name) + 24;
+        char *key = xmalloc(len);
+        snprintf(key, len, "%s#%s", fname, node->var_decl.name);
+        for (int n = 2;; n++)
+        {
+            int taken = 0;
+            for (int i = 0; i < ctx->cg.reload_tls_count && !taken; i++)
+            {
+                taken = strcmp(ctx->cg.reload_tls[i].key, key) == 0;
+            }
+            if (!taken)
+            {
+                break;
+            }
+            snprintf(key, len, "%s#%s~%d", fname, node->var_decl.name, n);
+        }
+        ctx->cg.reload_tls =
+            xrealloc(ctx->cg.reload_tls,
+                     sizeof(*ctx->cg.reload_tls) * (size_t)(ctx->cg.reload_tls_count + 1));
+        ctx->cg.reload_tls[ctx->cg.reload_tls_count].decl = node;
+        ctx->cg.reload_tls[ctx->cg.reload_tls_count].key = key;
+        ctx->cg.reload_tls_count++;
     }
     if (node->kind == NODE_VAR_DECL && node->var_decl.is_static &&
         !node->var_decl.is_thread_local && node->var_decl.name && !reload_static_name(ctx, node))

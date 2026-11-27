@@ -553,6 +553,15 @@ struct ParserContext
             const char *cfg;
         } *reload_statics;
         int reload_static_count;
+        /// --reload: the `@thread_local` statics, each per thread in storage the host keeps
+        /// by its key (`function#name`: std/reload.zc's zr_tls_get), the same across versions.
+        struct ReloadTls
+        {
+            ASTNode *decl;
+            char *key;
+        } *reload_tls;
+        int reload_tls_count;
+        int reload_tls_emitted; ///< _zt_ names given out (one per thread-local emitted)
         /// --reload: each lambda's identity across versions (emit_reload_manifest's lambdas):
         /// where it is (`function#n`, its function and which lambda of it), what it takes and
         /// captures, and its emitted C's hash (lambda numbers and #line directives left out).

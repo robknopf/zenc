@@ -118,6 +118,111 @@ raw {
     #define ZR_FORWARD 1
     #endif
 
+    // A module's @thread_local statics, per thread (zc emits each through this: its
+    // emit_reload_tls). tcc compiles a thread-local for a program's own thread-local block,
+    // which a module loaded later can't have, so the host keeps them, by key (`function#name`)
+    // and size, the same across versions: a thread's value lasts across reloads, as a kept
+    // static's does, and goes when the thread ends. A thread's is made when it first uses it,
+    // with the initial value of the version running then. `handle` is the version's own
+    // cache of the key's entry, found once.
+    #ifndef _WIN32
+    #include <pthread.h>
+    #endif
+    typedef struct ZrTls
+    {
+        char *key;
+        size_t size;
+    #ifdef _WIN32
+        DWORD slot;
+    #else
+        pthread_key_t slot;
+    #endif
+        struct ZrTls *next;
+    } ZrTls;
+    static ZrTls *zr_tls_all;
+    #ifdef _WIN32
+    // (fiber-local storage, which frees a thread's value when it ends: Vista's, which MinGW's
+    // <windows.h> declares only for _WIN32_WINNT 0x0600 and up; declared here as it declares
+    // them. The lock is a spin on an interlocked flag, held only to find or make an entry.)
+    __declspec(dllimport) DWORD __stdcall FlsAlloc(void(__stdcall *)(void *));
+    __declspec(dllimport) void *__stdcall FlsGetValue(DWORD);
+    __declspec(dllimport) BOOL __stdcall FlsSetValue(DWORD, void *);
+    static volatile LONG zr_tls_lock;
+    static void __stdcall zr_tls_free(void *p) { free(p); }
+    #else
+    static pthread_mutex_t zr_tls_lock = PTHREAD_MUTEX_INITIALIZER;
+    #endif
+
+    void *zr_tls_get(void **handle, const char *key, size_t size, const void *init);
+    void *zr_tls_get(void **handle, const char *key, size_t size, const void *init)
+    {
+        ZrTls *t = (ZrTls *)*handle;
+        if (!t)
+        {
+    #ifdef _WIN32
+            while (InterlockedCompareExchange(&zr_tls_lock, 1, 0) != 0) Sleep(0);
+    #else
+            pthread_mutex_lock(&zr_tls_lock);
+    #endif
+            for (t = zr_tls_all; t; t = t->next)
+                if (t->size == size && !strcmp(t->key, key)) break;
+            if (!t && (t = (ZrTls *)calloc(1, sizeof *t)) != NULL)
+            {
+                int made;
+    #ifdef _WIN32
+                t->slot = FlsAlloc(zr_tls_free);
+                made = t->slot != 0xFFFFFFFFUL; // (FLS_OUT_OF_INDEXES)
+    #else
+                made = pthread_key_create(&t->slot, free) == 0;
+    #endif
+                t->key = made ? strdup(key) : NULL;
+                t->size = size;
+                if (t->key)
+                {
+                    t->next = zr_tls_all;
+                    zr_tls_all = t;
+                }
+                else
+                {
+                    free(t);
+                    t = NULL;
+                }
+            }
+    #ifdef _WIN32
+            InterlockedExchange(&zr_tls_lock, 0);
+    #else
+            pthread_mutex_unlock(&zr_tls_lock);
+    #endif
+            if (!t)
+            {
+                fprintf(stderr, "reload: no thread-local storage left for %s\n", key);
+                abort();
+            }
+            *handle = t;
+        }
+    #ifdef _WIN32
+        void *p = FlsGetValue(t->slot);
+    #else
+        void *p = pthread_getspecific(t->slot);
+    #endif
+        if (!p)
+        {
+            p = calloc(1, size ? size : 1);
+            if (!p)
+            {
+                fprintf(stderr, "reload: out of memory for the thread-local %s\n", key);
+                abort();
+            }
+            if (init) memcpy(p, init, size);
+    #ifdef _WIN32
+            FlsSetValue(t->slot, p);
+    #else
+            pthread_setspecific(t->slot, p);
+    #endif
+        }
+        return p;
+    }
+
     // What Windows spells otherwise.
     #ifdef _WIN32
     static void *zr_aligned_alloc(size_t align, size_t size) { return _aligned_malloc(size, align); }
@@ -860,6 +965,9 @@ raw {
     // functions of the same names (sprintf, without floating point).
     static void *zl_host_sym(const char *name)
     {
+        // (what zc's code for a module calls in the host: given, so a host not linked to
+        // export its names, with -rdynamic or --export-all-symbols, has it too)
+        if (!strcmp(name, "zr_tls_get")) return (void *)zr_tls_get;
     #ifdef _WIN32
         HMODULE mods[1024];
         DWORD need = 0;
@@ -3351,8 +3459,8 @@ raw {
         tcc_set_options(v->tcc, "-gdwarf");
         tcc_set_output_type(v->tcc, TCC_OUTPUT_OBJ);
         for (int i = 0; i < r->include_count; i++) tcc_add_include_path(v->tcc, r->includes[i]);
-        // A thread-local is an ordinary global of the module, shared by its threads (see
-        // zr_compile_memory).
+        // A thread-local in raw C is an ordinary global of the module, shared by its threads
+        // (see zr_compile_memory); a @thread_local static is per thread (zr_tls_get).
         tcc_define_symbol(v->tcc, "_Thread_local", "");
         tcc_define_symbol(v->tcc, "__thread", "");
         if (own) tcc_define_symbol(v->tcc, "ZC_RELOAD_OWN_GLOBALS", "1");
@@ -3414,10 +3522,12 @@ raw {
         tcc_set_output_type(v->tcc, TCC_OUTPUT_MEMORY);
         for (int i = 0; i < r->include_count; i++) tcc_add_include_path(v->tcc, r->includes[i]);
         // libtcc can't give code compiled into memory thread-local storage (0.9.27 doesn't
-        // know _Thread_local; 0.9.28 refuses it), and std/core.zc and the generated C use it:
-        // a thread-local is an ordinary global of the module, shared by its threads.
+        // know _Thread_local; 0.9.28 refuses it): a thread-local in raw C is an ordinary global
+        // of the module, shared by its threads. (A @thread_local static is per thread, the
+        // host's: zr_tls_get.)
         tcc_define_symbol(v->tcc, "_Thread_local", "");
         tcc_define_symbol(v->tcc, "__thread", "");
+        tcc_add_symbol(v->tcc, "zr_tls_get", (const void *)zr_tls_get);
         if (own) tcc_define_symbol(v->tcc, "ZC_RELOAD_OWN_GLOBALS", "1");
         else
             for (unsigned i = 0; i < r->nstore; i++)

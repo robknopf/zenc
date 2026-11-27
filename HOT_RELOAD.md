@@ -331,8 +331,13 @@ for that.
 
 - a global or `static` local whose type only the C compiler works out (`let x = f();`
   with `f`'s type unknown to Zen C): write its type;
-- a thread-local: a reload build makes it an ordinary global, shared by the module's
-  threads (a release build keeps them per thread).
+- a thread-local in a raw C block (`_Thread_local`, `__thread`): a reload build makes it
+  an ordinary global, shared by the module's threads (libtcc can't give a module
+  thread-local storage), and `zc transpile --reload` says so. A `@thread_local static` is
+  per thread, and the host keeps it: zc gives it storage per thread from the host
+  (`zr_tls_get`), by its function and name, so a thread's value lasts across reloads, and a
+  new thread starts from the initial value of the version running then
+  [`thread_local_per_thread`].
 
 **Other limits.**
 

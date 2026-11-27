@@ -108,6 +108,8 @@ void reload_collect_statics(ParserContext *ctx, ASTNode *funcs);
 struct ReloadLambda *reload_lambda(ParserContext *ctx, int id, int make);
 void emit_reload_statics(ParserContext *ctx);
 const char *reload_static_name(ParserContext *ctx, ASTNode *decl);
+const char *reload_tls_key(ParserContext *ctx, ASTNode *decl);
+int emit_reload_tls(ParserContext *ctx, ASTNode *node);
 void reload_block_enter(ParserContext *ctx);
 void reload_block_leave(ParserContext *ctx);
 void reload_local_declared(ParserContext *ctx, const char *name, const char *c_name);

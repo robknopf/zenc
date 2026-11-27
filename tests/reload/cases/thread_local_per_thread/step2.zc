@@ -1,0 +1,23 @@
+// Version 2. A @thread_local static, per thread in a reloaded module (zc gives it storage the
+// host keeps per thread, by key: tcc can't give a module thread-local storage). Each step's
+// thread counts from the initial value on its own; the host's thread keeps its count across
+// versions (version 2 starts where version 1 left off), and version 2's new initial value
+// (100) is what a new thread starts from.
+import "std/thread.zc"
+
+fn bump() -> int {
+    @thread_local static let n: int = 100;
+    n = n + 1;
+    return n;
+}
+
+let in_thread: int = 0;
+
+@link_name("reload_step")
+fn reload_step(state: void*) {
+    let a = bump();
+    let b = bump();
+    let t = Thread::spawn(fn() { in_thread = bump(); }).unwrap();
+    t.join().unwrap();
+    println "version 2: here {a} {b}, a new thread {in_thread}";
+}

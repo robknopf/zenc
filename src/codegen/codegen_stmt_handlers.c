@@ -558,6 +558,10 @@ void handle_node_var_decl(ParserContext *ctx, ASTNode *node)
              host_static);
         return;
     }
+    if (emit_reload_tls(ctx, node))
+    {
+        return;
+    }
     if (node->var_decl.is_thread_local)
     {
         EMIT(ctx, "_Thread_local ");

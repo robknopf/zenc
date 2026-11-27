@@ -95,6 +95,13 @@ void emit_preamble(ParserContext *ctx)
              "double);\n#define _zc_pow pow\n#endif\n");
         EMIT(ctx, "%s", "#include <unistd.h>\n#include <fcntl.h>\n"); // POSIX functions
         EMIT(ctx, "%s", "#define ZC_SIMD(T, N) T __attribute__((vector_size(N * sizeof(T))))\n");
+        if (ctx->config->reload_mode && !ctx->config->use_cpp)
+        {
+            // (a @thread_local's storage per thread, the reload host's: emit_reload_tls)
+            EMIT(ctx, "%s",
+                 "void *zr_tls_get(void **handle, const char *key, size_t size, const void "
+                 "*init);\n");
+        }
 
         // Map C11 _Thread_local to C++11 thread_local (used in _z_{u}128_str)
         if (ctx->config->use_cpp ||

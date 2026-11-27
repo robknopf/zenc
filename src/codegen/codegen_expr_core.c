@@ -616,6 +616,19 @@ void handle_expr_literal(ParserContext *ctx, ASTNode *node)
 
 void emit_raw_with_captures(ParserContext *ctx, const char *content)
 {
+    // --reload: a thread-local in raw C stays as written, and a module compiled by libtcc
+    // can't have one (std/reload.zc defines _Thread_local and __thread away): there it is
+    // one global, shared by the module's threads. Said once a module. (@thread_local
+    // statics are per thread: emit_reload_tls.)
+    static int told;
+    if (ctx->config->reload_mode && !told && content &&
+        (strstr(content, "_Thread_local") || strstr(content, "__thread")))
+    {
+        told = 1;
+        zwarn("--reload: a thread-local in a raw C block is one global, shared by the module's "
+              "threads: libtcc can't give a module thread-local storage. A @thread_local static "
+              "is per thread.");
+    }
     // The emitter writes a pending indentation even for an empty string, which would leave
     // spaces on an otherwise empty line: emit nothing for nothing. Identifiers are rewritten
     // for a lambda's captures, and (--reload) for static locals kept by the host.
