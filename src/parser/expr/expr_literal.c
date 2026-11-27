@@ -646,7 +646,9 @@ ASTNode *parse_string_literal(ParserContext *ctx, Token t)
 
         ASTNode *node = ast_create(NODE_RAW_STMT);
         node->token = t;
-        node->raw_stmt.content = code;
+        // NULL when the interpolation didn't parse (already reported): an empty string, so
+        // whatever copies or reads the node next (a generic's instantiation) doesn't crash.
+        node->raw_stmt.content = code ? code : xstrdup("");
         take_fstring_exprs(ctx, node);
         node->type_info = type_new(TYPE_STRING);
         node->resolved_type = xstrdup("string");
@@ -758,7 +760,7 @@ ASTNode *parse_fstring_literal(ParserContext *ctx, Token t)
 
     ASTNode *node = ast_create(NODE_RAW_STMT);
     node->token = t;
-    node->raw_stmt.content = code;
+    node->raw_stmt.content = code ? code : xstrdup(""); // (as above: reported, empty)
     take_fstring_exprs(ctx, node);
     node->type_info = type_new(TYPE_STRING);
     node->resolved_type = xstrdup("string");

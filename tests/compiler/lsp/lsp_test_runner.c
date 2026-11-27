@@ -1131,7 +1131,7 @@ static void expect_diagnostics(int id, const char *path, const char *want1, cons
         have1 |= want1 && strcmp(text, want1) == 0;
         have2 |= want2 && strcmp(text, want2) == 0;
         int wanted = (want1 && strcmp(text, want1) == 0) || (want2 && strcmp(text, want2) == 0);
-        unwanted |= !wanted && strstr(text, none_of) != NULL;
+        unwanted |= !wanted && none_of && strstr(text, none_of) != NULL;
     }
     if (!have1 || !have2 || unwanted)
     {
@@ -1268,6 +1268,34 @@ static void test_c_decls(void)
                        "Argument 1 of 'dpaint' is a 'dsize', but the parameter is a 'dcolor'", NULL,
                        "Argument");
     printf("PASS: test_c_decls\n");
+}
+
+// Source that made the server crash while it was being typed (found by fuzzing): each is
+// reported, and the server answers the next request. An unclosed `{` in a string in a
+// generic's method (its instantiation copied the string's missing C), in a `?` prompt, and a
+// `.` after something that didn't parse.
+static void test_errors_that_crashed(void)
+{
+    const char *generic_path = C_TEST_DIR "/crash_generic_fstring.zc";
+    open_document(generic_path, "struct Box<T> { v: T; }\n"
+                                "impl Box<T> {\n"
+                                "    fn show(self) { let s = \"v {self.v\"; }\n"
+                                "}\n"
+                                "fn main() { let b = Box<int>{ v: 1 }; b.show(); }\n");
+    expect_diagnostics(852, generic_path, "Unclosed interpolation brace in printf-sugar", NULL,
+                       NULL);
+    const char *prompt_path = C_TEST_DIR "/crash_prompt.zc";
+    open_document(prompt_path, "fn main() {\n"
+                               "    let x = ? \"name {\";\n"
+                               "}\n");
+    expect_diagnostics(853, prompt_path, "Unclosed interpolation brace in printf-sugar", NULL,
+                       NULL);
+    const char *member_path = C_TEST_DIR "/crash_member.zc";
+    open_document(member_path, "fn main() {\n"
+                               "    let x = (+).y;\n"
+                               "}\n");
+    expect_diagnostics(854, member_path, NULL, NULL, NULL); // (published: it didn't crash)
+    printf("PASS: test_errors_that_crashed\n");
 }
 
 static void write_index_fixture(const char *path, const char *content)
@@ -2185,6 +2213,7 @@ int main(void)
     test_c_header_reexports();
     test_c_header_completion();
     test_c_decls();
+    test_errors_that_crashed();
     test_shutdown();
     send_request("{\"jsonrpc\": \"2.0\", \"method\": \"exit\", \"params\": {}}");
     waitpid(child_pid, NULL, 0);

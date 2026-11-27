@@ -284,6 +284,10 @@ static ASTNode *parse_expr_prec_impl(ParserContext *ctx, Lexer *l, Precedence mi
             // input is typed after the prompt).
             char *print_code =
                 process_printf_sugar(ctx, t_str, inner, 0, "stdout", NULL, NULL, 0, is_raw, 0);
+            if (!print_code)
+            {
+                print_code = xstrdup(""); // the prompt didn't parse (reported)
+            }
             zfree(inner);
 
             // Checks for (args...) suffix for SCAN mode
@@ -1805,6 +1809,10 @@ static ASTNode *parse_expr_prec_impl(ParserContext *ctx, Lexer *l, Precedence mi
             {
                 zpanic_at(field, "Expected field name after .");
                 break;
+            }
+            if (!lhs)
+            {
+                break; // what came before the '.' didn't parse (already reported)
             }
             ASTNode *node = ast_create(NODE_EXPR_MEMBER);
             node->token = field;
