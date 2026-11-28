@@ -140,7 +140,7 @@ jobs:
           - name: Windows MinGW
             os: windows-latest
             cc: gcc
-            zc_has_jit: 0
+            zc_has_jit: 1 # fork: zc's own tcc (build.bat's default), which the reload tests use
 
     steps:
     - uses: actions/checkout@v4

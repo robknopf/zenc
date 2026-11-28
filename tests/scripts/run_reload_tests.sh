@@ -43,9 +43,14 @@ case "$(uname -s)" in
         LIBS="-ltcc -lpthread -lm -Wl,--export-all-symbols" ;;
 esac
 if ! printf '#include <libtcc.h>\nint main(void) { tcc_delete(tcc_new()); return 0; }\n' |
-    $CC -x c - -o "$WORK/probe" $TCC_DIRS $LIBS > /dev/null 2>&1; then
+    $CC -x c - -o "$WORK/probe" $TCC_DIRS $LIBS > "$WORK/probe.log" 2>&1; then
     echo "Reload tests skipped: libtcc is not available"
-    [ -n "$ZC_RELOAD_REQUIRED" ] && exit 1 # (CI: a skip there is a failure)
+    if [ -n "$ZC_RELOAD_REQUIRED" ]; then # (CI: a skip there is a failure, and why)
+        echo "  zc --tcc-dir: ${ZC_TCC:-(none)}; compiled with: $CC $TCC_DIRS $LIBS"
+        [ -n "$ZC_TCC" ] && ls "$ZC_TCC" | head -20 | sed 's/^/    /'
+        sed 's/^/    /' "$WORK/probe.log" | head -20
+        exit 1
+    fi
     exit 0
 fi
 if ! "$ZC" transpile -q "$ROOT/tests/reload/host.zc" -o "$WORK/host.c" \
