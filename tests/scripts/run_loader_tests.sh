@@ -16,7 +16,8 @@
 #        CC=...     the compiler for load_host (default cc)
 #        ZC_LOADER_TESTS="a.zc b.zc"   only these
 #        ZC_LOADER_VERBOSE=1           say why each skipped test was
-# Skipped, successfully, when tcc or libtcc is not available.
+# Skipped, successfully, when tcc or libtcc is not available (a failure with
+# ZC_RELOAD_REQUIRED=1, as CI sets).
 
 ZC="${1:-./zc}"
 ZC="$(cd "$(dirname "$ZC")" && pwd)/$(basename "$ZC")"
@@ -34,6 +35,7 @@ fi
 TCC="${TCC:-$(command -v tcc)}"
 if [ -z "$TCC" ]; then
     echo "Loader tests skipped: no tcc"
+    [ -n "$ZC_RELOAD_REQUIRED" ] && exit 1 # (CI: a skip there is a failure)
     exit 0
 fi
 # Its libtcc: beside it (Windows), or in ../include and ../lib (an installed tree).
@@ -54,6 +56,7 @@ if ! "$ZC" transpile -q "$ROOT/tests/reload/load_host.zc" -o "$WORK/load_host.c"
     ! $CC -g "$WORK/load_host.c" $TCC_DIRS $LIBS -o "$WORK/load_host$EXE" >> "$WORK/build.log" 2>&1; then
     if grep -q "libtcc" "$WORK/build.log"; then
         echo "Loader tests skipped: libtcc is not available"
+        [ -n "$ZC_RELOAD_REQUIRED" ] && exit 1 # (CI: a skip there is a failure)
         exit 0
     fi
     echo "Loader tests: load_host does not build"

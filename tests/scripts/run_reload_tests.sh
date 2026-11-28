@@ -45,6 +45,7 @@ esac
 if ! printf '#include <libtcc.h>\nint main(void) { tcc_delete(tcc_new()); return 0; }\n' |
     $CC -x c - -o "$WORK/probe" $TCC_DIRS $LIBS > /dev/null 2>&1; then
     echo "Reload tests skipped: libtcc is not available"
+    [ -n "$ZC_RELOAD_REQUIRED" ] && exit 1 # (CI: a skip there is a failure)
     exit 0
 fi
 if ! "$ZC" transpile -q "$ROOT/tests/reload/host.zc" -o "$WORK/host.c" \

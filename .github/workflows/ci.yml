@@ -209,6 +209,23 @@ jobs:
       if: matrix.name == 'Linux GCC'
       run: make CC="${{ matrix.cc }}" ZC_HAS_JIT=${{ matrix.zc_has_jit }} test-unit
 
+    # fork: hot reload (std/reload.zc) where the Reloader loads versions itself: x86-64 Linux
+    # and Windows. Its cases, poll(), and every test program through its loader; zc's own
+    # libtcc, built with zc, so a skip ("libtcc is not available") is a failure here.
+    - name: Run Hot Reload Tests
+      if: matrix.name == 'Linux GCC' || matrix.name == 'Windows MinGW'
+      shell: bash
+      env:
+        ZC_RELOAD_REQUIRED: 1
+      run: |
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          export CC=gcc ZC=./zc.exe
+        else
+          export CC="${{ matrix.cc }}" ZC=./zc
+        fi
+        ./tests/scripts/run_reload_tests.sh "$ZC"
+        ./tests/scripts/run_loader_tests.sh "$ZC"
+
     - name: Upload Failed Test Artifacts
       if: failure()
       uses: actions/upload-artifact@v4
