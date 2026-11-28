@@ -213,18 +213,44 @@ jobs:
     # and Windows. Its cases, poll(), and every test program through its loader; zc's own
     # libtcc, built with zc, so a skip ("libtcc is not available") is a failure here.
     - name: Run Hot Reload Tests
-      if: matrix.name == 'Linux GCC' || matrix.name == 'Windows MinGW'
+      if: matrix.name == 'Linux GCC'
+      shell: bash
+      env:
+        ZC_RELOAD_REQUIRED: 1
+        CC: ${{ matrix.cc }}
+      run: |
+        ./tests/scripts/run_reload_tests.sh ./zc
+        ./tests/scripts/run_loader_tests.sh ./zc
+
+    # fork: on Windows a module's code uses msvcrt (tcc's C library there), and the Reloader
+    # refuses a host built for another C runtime (UCRT). The runner's gcc: that refusal is
+    # checked with it (or, for msvcrt, every case runs). Then zc and its tcc are built again
+    # with MSYS2's MINGW64 gcc (msvcrt) and every case runs, and the loader's tests.
+    - name: Setup MSYS2 MINGW64 (msvcrt)
+      if: matrix.name == 'Windows MinGW'
+      id: msys2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        release: false
+        update: false
+        install: mingw-w64-x86_64-gcc
+
+    - name: Run Hot Reload Tests (Windows)
+      if: matrix.name == 'Windows MinGW'
       shell: bash
       env:
         ZC_RELOAD_REQUIRED: 1
       run: |
-        if [ "${{ runner.os }}" = "Windows" ]; then
-          export CC=gcc ZC=./zc.exe
-        else
-          export CC="${{ matrix.cc }}" ZC=./zc
-        fi
-        ./tests/scripts/run_reload_tests.sh "$ZC"
-        ./tests/scripts/run_loader_tests.sh "$ZC"
+        echo "runner's gcc: $(gcc -dumpmachine) $(gcc -dumpversion)"
+        CC=gcc ./tests/scripts/run_reload_tests.sh ./zc.exe
+        export PATH="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin:$PATH"
+        echo "MINGW64's gcc: $(command -v gcc), $(gcc -dumpmachine) $(gcc -dumpversion)"
+        rm -rf tcc obj/tinycc zc.exe
+        ./build.bat
+        export CC=gcc
+        ./tests/scripts/run_reload_tests.sh ./zc.exe
+        ./tests/scripts/run_loader_tests.sh ./zc.exe
 
     - name: Upload Failed Test Artifacts
       if: failure()

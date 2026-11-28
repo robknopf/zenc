@@ -62,6 +62,25 @@ if ! "$ZC" transpile -q "$ROOT/tests/reload/host.zc" -o "$WORK/host.c" \
     exit 1
 fi
 
+# Windows, a host compiler for a C runtime other than msvcrt (UCRT: MSVC, MSYS2's UCRT64, most
+# current MinGW-w64s): std/reload.zc refuses to load a module there (whose code uses msvcrt,
+# tcc's). The one check then is that it does, and says why.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        if ! printf '#include <stdio.h>\n#if defined(_UCRT) || __MSVCRT_VERSION__ > 0x700\n#error\n#endif\n' |
+                $CC -fsyntax-only -x c - > /dev/null 2>&1; then
+            mkdir -p "$WORK/ucrt"
+            timeout 60 "$WORK/host" "$ZC" "$CASES/code_change/" "$WORK/ucrt" > /dev/null 2> "$WORK/ucrt/err"
+            if grep -q "built for a C runtime other than msvcrt" "$WORK/ucrt/err"; then
+                echo "  [PASS] refused: $CC is not for msvcrt, which modules use (run the cases with an msvcrt gcc)"
+                exit 0
+            fi
+            echo "  [FAIL] $CC is not for msvcrt, and the Reloader did not refuse"
+            sed 's/^/      stderr: /' "$WORK/ucrt/err" | head -10
+            exit 1
+        fi ;;
+esac
+
 passed=0; failed=0; xfail=0; xpass=0
 failed_names=""
 # The Reloader loads versions itself on x86-64 Linux and Windows (std/reload.zc's ZR_LOADER).

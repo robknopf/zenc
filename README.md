@@ -439,7 +439,7 @@ while running {
 }
 ```
 
-**Limits:** x86-64 Linux and Windows (MinGW-w64) only, macOS and arm64 partly; not with
+**Limits:** x86-64 Linux and Windows (an msvcrt MinGW-w64, such as MSYS2's MINGW64) only, macOS and arm64 partly; not with
 `--misra` or C++ output. An edit that leaves state it can't move safely (a pointer to a
 type whose layout changed, a changed signature of a function the host calls) is refused,
 and the old version keeps running. Heap data behind a pointer isn't moved (std's containers

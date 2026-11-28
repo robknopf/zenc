@@ -22,9 +22,11 @@ must follow and what must stay (`tests/reload/soak.py`).
 
 Each is explained, with what to do about it, in the section named.
 
-- **Platforms:** x86-64 Linux and Windows (MinGW-w64). On macOS and arm64 a system libtcc
-  loads each version: old versions stay loaded, and debuggers see none of them
-  ("Platforms").
+- **Platforms:** x86-64 Linux and Windows (MinGW-w64). On Windows the host must be built
+  with an msvcrt MinGW-w64 gcc (MSYS2's MINGW64, not UCRT64): `build()` refuses in a host
+  built for UCRT, which MSVC and most current MinGW-w64s are ("Platforms"). On macOS and
+  arm64 a system libtcc loads each version: old versions stay loaded, and debuggers see
+  none of them ("Platforms").
 - **Not with** `--misra` or C++ output ("Platforms").
 - **Watching:** `poll()` sees `.zc`, `.c` and `.h` files under one directory tree, and the
   C files the module links and the headers they include wherever they are; a header
@@ -120,8 +122,15 @@ globals and functions (the *manifest*), and the functions below in place of C's
 constructor and destructor attributes. Without `--reload`, the output is the same as
 before.
 
-**Platforms.** x86-64 Linux and Windows. On Windows zc and the host are built with
-MinGW-w64's gcc (its C runtime, msvcrt, is the one tcc's code uses), the host linked with
+**Platforms.** x86-64 Linux and Windows. On Windows zc and the host are built with a
+MinGW-w64 gcc for msvcrt, the C runtime tcc's code uses: MSYS2's MINGW64, for example, not
+its UCRT64. Most current MinGW-w64s (and MSVC) are for UCRT instead, and a host built with
+one would have two C runtimes in one process, each with its own `stdout` buffer, heap and
+`errno` (output out of order, a crash when one frees what the other allocated): there
+`build()` loads nothing, and says why. (`gcc -dumpmachine` doesn't tell them apart;
+`echo '#include <stdio.h>' | gcc -dM -E -x c - | grep -E '_UCRT|MSVCRT_VERSION'` does:
+`_UCRT`, or a version above 0x700, is UCRT.) Modules that use the host's runtime, whichever
+it is, are planned. The host is linked with
 `-ltcc -lpthread -lm` and, where Linux has `-rdynamic`, `-Wl,--export-all-symbols`. zc's
 libtcc is static there too, so a host has no `libtcc.dll` to find. MinGW's gdb debugs it
 (below). A module is compiled for msvcrt alone (tcc's C library there), without MinGW's

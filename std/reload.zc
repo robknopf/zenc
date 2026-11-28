@@ -5584,9 +5584,27 @@ raw {
 
     static int zr_crashes(void *h) { return ((ZrReloader *)h)->crashes; }
 
+    // A module's C library on Windows is msvcrt (tcc's headers there are msvcrt's). A host on
+    // another C runtime (UCRT: MSVC, or a MinGW-w64 built for it, as MSYS2's UCRT64 and most
+    // current ones are; MinGW's __MSVCRT_VERSION__ is 0x700 for msvcrt, 0xE00 for UCRT) would
+    // have two in one process, with their own stdout buffers, heaps and errno: output out of
+    // order, and a crash when one frees what the other allocated.
+    #if defined(_WIN32) && (defined(_UCRT) || defined(_MSC_VER) || \
+                            (defined(__MSVCRT_VERSION__) && __MSVCRT_VERSION__ > 0x700))
+    #define ZR_HOST_UCRT 1
+    #endif
+
     static int zr_build(void *h)
     {
         ZrReloader *r = (ZrReloader *)h;
+    #ifdef ZR_HOST_UCRT
+        fprintf(stderr, "reload: this program is built for a C runtime other than msvcrt "
+                        "(UCRT, most likely), and a module's code uses msvcrt (tcc's C library "
+                        "on Windows): not loading %s. Build the program with an "
+                        "msvcrt MinGW-w64 gcc, such as MSYS2's MINGW64 (not UCRT64).\n",
+                r->source);
+        return 0;
+    #endif
         r->seen = zr_newest(r);
         double t0 = zr_now_ms();
 
